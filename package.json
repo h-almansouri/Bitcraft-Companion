@@ -1,0 +1,12 @@
+{
+  "name": "bitcraft-companion",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bitcraft Companion App — market, deals, crafting planner, and live map.",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

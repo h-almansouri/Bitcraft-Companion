@@ -1,0 +1,20 @@
+# Runtime data (auto-created by proxy.js; ephemeral on free hosts)
+data/
+
+# Local rollback backups
+*.backup.json
+
+# Dependencies (none currently, but just in case)
+node_modules/
+
+# Leftover investigation/debug scripts (not part of the app)
+debug-chunk.js
+_bcm3*
+
+# OS / editor cruft
+*.log
+.DS_Store
+Thumbs.db
+
+# Local Claude Code tooling/settings (not needed to run the app)
+.claude/
