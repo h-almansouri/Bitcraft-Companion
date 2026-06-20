@@ -239,6 +239,11 @@ selector pools every tracked player's inventories grouped under each player; mat
 - [x] STAGE 1 DONE (pushed, commit 4bc733c): foundation + sidebar UI + Experience grouped
       (`renderExperienceTab` → `loadSkillsInto(p)` → `skillsSectionHtml(pData,rankData)`; live-refresh refreshes
       each player's `#xp-body-<id>` in place). Verified: add/remove/persist/reload all work.
+- [x] Collapsible sections + per-player "stop monitoring" (pushed 61bf053): reusable `playerSection(p, html, bodyId)`
+      wrapper with a collapse chevron + pause toggle in the header; `playerCollapsed`/`playerPaused` Sets
+      (persist `bc_players_collapsed`/`bc_players_paused`); `activePlayers()` = non-paused (live-refresh skips
+      paused). `togglePlayerCollapse`/`togglePlayerMonitor`. Experience uses it (body id `psec-skills-<id>`).
+      Stages 2 & 3 MUST wrap each player's content in `playerSection(...)` for consistent collapse/pause.
 - [ ] STAGE 2: Tasks grouped — per-player traveler tasks + inventory selector grouped by player + material
       counts pooled across all tracked inventories. Plan: fetch each player's traveler-tasks + inventory, merge
       inventories tagged with player; key tracked-invs by player+index (not bare index). loadTasks/renderTasksUI
