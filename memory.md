@@ -251,10 +251,18 @@ selector pools every tracked player's inventories grouped under each player; mat
       pause), body id `psec-tasks-<id>`. tasksTrackedInvs now holds composite keys; persisted by player+name
       (`_taskInvNameKey`, `_saveTasksTrackedNames`, `_resolveTrackedTasks`, `allTaskInvKeys`). Verified: grouped
       selector, pooled counts, toggle persist/restore, collapse, pause. Refresh button calls `loadTasks(null)`.
-- [ ] STAGE 3: Inventory + Crafts grouped — leanest path = fetch all tracked players, MERGE their inventories
-      (tag each with _playerName) into one structure and add a player grouping level in the existing
-      grouped/flat renderers (reuses updateInvContent / renderCrafting with a player partition + namespaced keys).
-- Touch-points still on primary only (fine): planner inventory-awareness, map "Track me" button.
+- [x] STAGE 3 DONE: Inventory + Crafts grouped (per-player collapsible/pausable sections).
+      INVENTORY: `renderInventoryTab(silent)` + `invByPlayer` (via `fetchPlayerInv`); global toolbar
+      (Live/Refresh/search/grouped-flat); `inventoryContentHtml(data,q,pfx)` returns per-player HTML with
+      section/chip keys namespaced `entityId|secKey`; `fillPlayerInvCached`, `renderAllInvBodies`, `setInvView`.
+      CRAFTS: `renderCraftingTab(silent)` + `craftByPlayer` (via `fetchPlayerCrafts`); global active/passive
+      toggle (`setCraftTab`); `craftingContentHtml(craftData)` (was renderCrafting, now returns content only).
+      Both routed via loadTab/refreshPlayerTabs; live refresh skips paused. Bodies `psec-inv-<id>`/`psec-craft-<id>`.
+      Verified: per-player sections, search, flat/grouped, active/passive, collapse, no errors.
+      NOTE: old single-player loadInventory/renderInventory/updateInvContent/buildAllSlots + loadCrafting/
+      renderCrafting are now DEAD (self-referencing island, never called) — left in place; safe to delete later.
+- ALL FOUR PLAYER TABS NOW MULTI-PLAYER. Touch-points still primary-only (fine): planner inventory-awareness,
+  map "Track me" button.
 
 ## Conventions / guardrails (apply to all of the above)
 - Single-file client; no build step. Validate by extracting the last `<script>` and `node --check`.

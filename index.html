@@ -999,9 +999,7 @@ function switchTab(tab) {
 function loadTab(tab, silent=false) {
   if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
   if (tab === 'inventory') { renderInventoryTab(silent); return; } // multi-player: one section per player
-  if (!currentPlayer) return;
-  const id = currentPlayer.entityId;
-  if (tab === 'crafting') loadCrafting(id, silent);
+  if (tab === 'crafting') { renderCraftingTab(silent); return; }
 }
 
 // ── PLAYER SEARCH ──
@@ -1107,7 +1105,7 @@ function refreshPlayerTabs() {
   if (currentTab === 'skills') renderExperienceTab();
   else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
   else if (currentTab === 'inventory') renderInventoryTab();
-  else if (currentTab === 'crafting') { if (currentPlayer) loadTab(currentTab); }
+  else if (currentTab === 'crafting') renderCraftingTab();
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -1750,9 +1748,9 @@ async function loadCrafting(id, silent=false) {
   } catch(e) { if (!silent) el.innerHTML = errBox(e); }
 }
 
-function renderCrafting() {
-  const el = document.getElementById('tab-crafting');
-  if (!craftData) return;
+// Returns the crafts HTML for ONE player's craftData (respects the global active/passive toggle).
+function craftingContentHtml(craftData) {
+  if (!craftData) return '';
   const {active, done, passive, itemMap} = craftData;
 
   // Active tab shows in-progress + completed crafts together
@@ -1888,21 +1886,64 @@ function renderCrafting() {
     </div>`;
   }).join('');
 
-  el.innerHTML = `
-    <div class="craft-tabs">
-      <div class="craft-tab ${!isPassive?'active':''}" onclick="craftTabActive='active';renderCrafting()">
-        <i class="ti ti-flame"></i> Active (${active.length})${done.length?` <span style="font-size:10px;background:rgba(99,153,34,.2);color:var(--green-light);border-radius:8px;padding:1px 6px;margin-left:3px">${done.length} done</span>`:''}
-      </div>
-      <div class="craft-tab ${isPassive?'active':''}" onclick="craftTabActive='passive';renderCrafting()">
-        <i class="ti ti-clock"></i> Passive (${passive.length})
-      </div>
-    </div>
-    ${isPassive
-      ? (renderPassiveCraftsHtml(passive, itemMap) || '<div class="empty"><i class="ti ti-mood-empty"></i><span>No passive crafts</span></div>')
-      : (claimBlocks || '<div class="empty"><i class="ti ti-mood-empty"></i><span>No crafts in this category</span></div>')}`;
+  return isPassive
+    ? (renderPassiveCraftsHtml(passive, itemMap) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No passive crafts</span></div>')
+    : (claimBlocks || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts in this category</span></div>');
+}
 
-  if (isPassive) startPassiveCraftTimer();
-  else stopPassiveCraftTimer();
+// ── Multi-player Crafts (one collapsible section per tracked player) ─────────────
+let craftByPlayer = {}; // entityId -> {active, done, passive, itemMap}
+async function fetchPlayerCrafts(id) {
+  const [acData, pcData] = await Promise.all([
+    apiFetch(`/api/players/${id}/crafts?completed=all`),
+    apiFetch(`/api/players/${id}/passive-crafts?status=all`),
+    loadCraftingData().catch(()=>{})
+  ]);
+  const itemMap = {};
+  const addItems = d => { if (!d) return; if (Array.isArray(d)) d.forEach(i => { if (i?.id) itemMap[i.id] = i; }); else if (typeof d === 'object') Object.assign(itemMap, d); };
+  addItems(acData.items); addItems(acData.cargos); addItems(pcData.items); addItems(pcData.cargos);
+  const rawCrafts = acData.craftResults || acData.crafts || acData.activeCrafts || (Array.isArray(acData) ? acData : []);
+  const isCraftDone = c => !!(c.completed || c.isCompleted || c.status === 'complete' || c.status === 'completed');
+  const active = rawCrafts.filter(c => !isCraftDone(c)), done = rawCrafts.filter(c => isCraftDone(c));
+  const passive = pcData.craftResults || pcData.passiveCrafts || pcData.crafts || pcData.results || (Array.isArray(pcData) ? pcData : []);
+  return { active, done, passive, itemMap };
+}
+function fillPlayerCraftCached(entityId) {
+  const b = document.getElementById('psec-craft-' + entityId);
+  if (b) b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
+}
+function setCraftTab(t) {
+  craftTabActive = t;
+  document.querySelectorAll('#craft-toolbar .craft-tab').forEach((b, i) => b.classList.toggle('active', (i===0) === (t!=='passive')));
+  trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId));
+  if (t === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
+}
+async function renderCraftingTab(silent) {
+  const el = document.getElementById('tab-crafting');
+  if (!el) return;
+  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!silent || !document.getElementById('craft-toolbar')) {
+    el.innerHTML = `
+      <div id="craft-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
+        <button id="live-btn-crafting" class="btn live-btn" onclick="toggleTabLive('crafting')"><i class="ti ti-player-play"></i> Live</button>
+        <button class="btn ctrl-btn" onclick="renderCraftingTab()"><i class="ti ti-refresh"></i> Refresh</button>
+        <span style="flex:1"></span>
+        <div class="craft-tabs" style="margin:0">
+          <div class="craft-tab ${craftTabActive!=='passive'?'active':''}" onclick="setCraftTab('active')"><i class="ti ti-flame"></i> Active</div>
+          <div class="craft-tab ${craftTabActive==='passive'?'active':''}" onclick="setCraftTab('passive')"><i class="ti ti-clock"></i> Passive</div>
+        </div>
+      </div>
+      <div id="craft-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId)).join('')}</div>`;
+    updateLiveBtns();
+  }
+  await Promise.all(trackedPlayers.map(async p => {
+    if (silent && isPlayerPaused(p.entityId) && craftByPlayer[p.entityId]) return;
+    try { craftByPlayer[p.entityId] = await fetchPlayerCrafts(p.entityId); }
+    catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
+    fillPlayerCraftCached(p.entityId);
+  }));
+  if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
+  startLiveRefresh('crafting');
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
