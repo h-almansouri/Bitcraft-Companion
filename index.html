@@ -525,7 +525,9 @@ main.planner-mode{max-width:none;padding:1rem}
 // since proxy.js serves this page). Override with localStorage 'bc_api_override' for dev (e.g. pointing
 // a static preview at a separate proxy).
 const API = (() => { try { const o = localStorage.getItem('bc_api_override'); if (o) return o; } catch(e){} return location.origin; })();
-let currentPlayer = null;
+let currentPlayer = null;          // = trackedPlayers[0] (primary) — used by tabs not yet multi-player
+let trackedPlayers = [];           // all players being tracked; player tabs render a section per player
+let searchDocBound = false;        // guard so the document click-to-close listener binds only once
 let currentTab = 'skills';
 let xpThresholds = [];
 let invViewMode = 'grouped'; // grouped | flat
@@ -981,13 +983,14 @@ function switchTab(tab) {
   else if (tab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
+  else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
 }
 function loadTab(tab, silent=false) {
+  if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
   if (!currentPlayer) return;
   const id = currentPlayer.entityId;
-  if (tab === 'skills') loadSkills(id, silent);
-  else if (tab === 'crafting') loadCrafting(id, silent);
+  if (tab === 'crafting') loadCrafting(id, silent);
   else if (tab === 'inventory') loadInventory(id, silent);
 }
 
@@ -1002,7 +1005,12 @@ function initSearch() {
     searchTimeout = setTimeout(() => liveSearch(q), 400);
   });
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') searchPlayers(); });
-  document.addEventListener('click', e => { if (!e.target.closest('.search-wrap') && !e.target.closest('.search-btn')) hideResults(); });
+  // The input element is recreated whenever the player list re-renders, so its listeners are fresh;
+  // the document-level close listener must bind only ONCE or it stacks on every re-render.
+  if (!searchDocBound) {
+    searchDocBound = true;
+    document.addEventListener('click', e => { if (!e.target.closest('.search-wrap') && !e.target.closest('.search-btn')) hideResults(); });
+  }
 }
 function hideResults() { const el = document.getElementById('search-results'); if (el) el.style.display = 'none'; }
 async function liveSearch(q) {
@@ -1031,44 +1039,64 @@ async function searchPlayers() {
     else showResults(players);
   } catch(e) { if(el){el.innerHTML=`<div class="search-result-item" style="color:#f09595">Error: ${escHtml(e.message)}</div>`;} }
 }
+function playerName(p) { return (p && (p.username || p.userName)) || 'Unknown'; }
+function savePlayers() { safeSetItem('bc_players', JSON.stringify(trackedPlayers)); }
+function isPlayerTracked(id) { return trackedPlayers.some(p => String(p.entityId) === String(id)); }
+
+// Selecting a player now ADDS them to the tracked list (multi-player). currentPlayer stays as the
+// "primary" (first tracked) for any tab not yet converted to multi-player.
 function selectPlayer(p) {
-  currentPlayer = p;
+  if (!p || !p.entityId) return;
   hideResults();
-  const name = p.username || p.userName || 'Unknown';
-  const initials = name.slice(0,2).toUpperCase();
-  document.getElementById('player-area').innerHTML = `
-    <div class="player-badge">
-      <div class="player-badge-avatar">${initials}</div>
-      <div class="player-badge-name">${escHtml(name)}</div>
-      <i class="ti ti-x player-badge-x" onclick="clearPlayer()" title="Change player"></i>
-    </div>`;
-  document.getElementById('topbar-right').innerHTML = `<i class="ti ti-user" style="color:var(--teal)"></i><span style="color:var(--teal-light);font-weight:500">${escHtml(name)}</span>`;
-  safeSetItem('bc_player', JSON.stringify(p));
-  loadTab(currentTab);
-  if (currentTab === 'tasks') loadTasks(p.entityId);
+  if (!isPlayerTracked(p.entityId)) trackedPlayers.push(p);
+  currentPlayer = trackedPlayers[0];
+  savePlayers();
+  renderPlayerArea();
+  refreshPlayerTabs();
 }
-function clearPlayer() {
-  currentPlayer = null;
-  invData = null;
-  plannerTrackedInvs = null;
-  plannerInvMap = {};
-  tasksTrackedInvs = new Set();
-  tasksInvsInited = false;
-  stopAllLive();
-  stopLiveRefresh();
-  try { localStorage.removeItem('bc_player'); } catch(e) {}
-  document.getElementById('topbar-right').innerHTML = '';
-  document.getElementById('player-area').innerHTML = `
+function removeTrackedPlayer(id) {
+  trackedPlayers = trackedPlayers.filter(p => String(p.entityId) !== String(id));
+  currentPlayer = trackedPlayers[0] || null;
+  savePlayers();
+  if (!trackedPlayers.length) {
+    invData = null; plannerTrackedInvs = null; plannerInvMap = {};
+    tasksTrackedInvs = new Set(); tasksInvsInited = false;
+    stopAllLive(); stopLiveRefresh();
+  }
+  renderPlayerArea();
+  refreshPlayerTabs();
+}
+// Sidebar: search box + a removable chip per tracked player.
+function renderPlayerArea() {
+  const area = document.getElementById('player-area');
+  if (!area) return;
+  const has = trackedPlayers.length > 0;
+  const chips = trackedPlayers.map(p => `
+    <div style="display:inline-flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border2);border-radius:14px;padding:3px 8px;font-size:12px;color:var(--text)" title="${escHtml(playerName(p))}">
+      <span style="width:6px;height:6px;border-radius:50%;background:var(--teal);flex-shrink:0"></span>
+      <span style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(playerName(p))}</span>
+      <i class="ti ti-x" style="cursor:pointer;color:var(--text3);font-size:13px" onclick="removeTrackedPlayer('${p.entityId}')" title="Remove"></i>
+    </div>`).join('');
+  area.innerHTML = `
     <div class="search-wrap">
       <i class="ti ti-search si"></i>
-      <input type="text" id="player-input" placeholder="Search player..." autocomplete="off">
+      <input type="text" id="player-input" placeholder="${has ? 'Add another player…' : 'Search player…'}" autocomplete="off">
       <div class="search-results" id="search-results" style="display:none"></div>
     </div>
-    <button class="search-btn" onclick="searchPlayers()"><i class="ti ti-search"></i> Search</button>`;
+    <button class="search-btn" onclick="searchPlayers()"><i class="ti ti-${has ? 'plus' : 'search'}"></i> ${has ? 'Add' : 'Search'}</button>
+    ${has ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${chips}</div>` : ''}`;
   initSearch();
-  ['skills','crafting','inventory'].forEach(t => {
-    document.getElementById('tab-'+t).innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>';
-  });
+  const tr = document.getElementById('topbar-right');
+  if (tr) tr.innerHTML = has ? `<i class="ti ti-users" style="color:var(--teal)"></i><span style="color:var(--teal-light);font-weight:500">${trackedPlayers.length} player${trackedPlayers.length > 1 ? 's' : ''} tracked</span>` : '';
+}
+// Re-render the active player tab after the tracked list changes.
+function refreshPlayerTabs() {
+  if (!trackedPlayers.length) {
+    ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
+  }
+  if (currentTab === 'skills') renderExperienceTab();
+  else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
+  else if (currentTab === 'inventory' || currentTab === 'crafting') { if (currentPlayer) loadTab(currentTab); }
 }
 
 // ── XP / LEVEL HELPERS ──
@@ -1102,19 +1130,36 @@ function xpIntoLevel(xp) {
 }
 
 // ── SKILLS ──
-async function loadSkills(id, silent=false) {
+// Multi-player Experience: one collapsible section per tracked player.
+async function renderExperienceTab() {
   const el = document.getElementById('tab-skills');
-  if (!silent) el.innerHTML = loading();
+  if (!el) return;
+  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  try { await ensureThresholds(); } catch(e) {}
+  el.innerHTML = trackedPlayers.map(p => `
+    <div class="player-section" style="margin-bottom:1.5rem">
+      <div class="category-label" style="font-size:15px;color:var(--teal-light)"><i class="ti ti-user"></i> ${escHtml(playerName(p))}</div>
+      <div id="xp-body-${p.entityId}">${loading()}</div>
+    </div>`).join('');
+  trackedPlayers.forEach(p => loadSkillsInto(p));
+  startLiveRefresh('skills');
+}
+async function loadSkillsInto(p, silent=false) {
+  const body = document.getElementById('xp-body-' + p.entityId);
+  if (!body) return;
   try {
-    await ensureThresholds();
     const [pData, rankData] = await Promise.all([
-      apiFetch(`/api/players/${id}`),
-      apiFetch(`/api/players/${id}/skill-rankings`)
+      apiFetch(`/api/players/${p.entityId}`),
+      apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}))
     ]);
+    body.innerHTML = skillsSectionHtml(pData, rankData);
+  } catch(e) { if (!silent) body.innerHTML = errBox(e); }
+}
+function skillsSectionHtml(pData, rankData) {
     const player = pData.player || {};
     const skillMap = player.skillMap || {};
     const experience = player.experience || [];
-    const rankings = rankData.rankings || {};
+    const rankings = (rankData && rankData.rankings) || {};
 
     const skills = experience
       .filter(e => e.skill_id !== 1 && e.skill_id !== 22)
@@ -1155,7 +1200,7 @@ async function loadSkills(id, silent=false) {
       }).join('');
     }
 
-    el.innerHTML = `
+    return `
       <div class="stat-row">
         <div class="stat"><div class="stat-label">Highest level</div><div class="stat-val">${maxLvl}</div></div>
         <div class="stat"><div class="stat-label">Total levels</div><div class="stat-val">${totalLvl}</div></div>
@@ -1164,8 +1209,6 @@ async function loadSkills(id, silent=false) {
       ${professions.length?`<div class="category-label"><i class="ti ti-hammer"></i> Professions</div><div class="skills-grid">${renderSkillCards(professions)}</div>`:''}
       ${adventure.length?`<div class="category-label"><i class="ti ti-sword"></i> Adventure</div><div class="skills-grid">${renderSkillCards(adventure)}</div>`:''}
       ${other.length?`<div class="category-label"><i class="ti ti-dots"></i> Other</div><div class="skills-grid">${renderSkillCards(other)}</div>`:''}`;
-    startLiveRefresh('skills');
-  } catch(e) { if (!silent) el.innerHTML = errBox(e); }
 }
 
 // ── LIVE REFRESH ──
@@ -1179,6 +1222,7 @@ function startLiveRefresh(tab) {
   liveRefreshId = setInterval(() => {
     if (document.hidden) return;
     if (tab === 'tasks') loadTasks(currentPlayer.entityId, true);
+    else if (tab === 'skills') trackedPlayers.forEach(p => loadSkillsInto(p, true)); // refresh each player's section in place
     else loadTab(tab, true);
   }, ms);
 }
@@ -5246,8 +5290,17 @@ function slotContents(slot) {
   // Load saved shopping lists so in-memory state mirrors storage before the Shopping tab is opened.
   try { loadShoppingLists(); } catch(e) {}
   initSearch();
-  // Restore last player (calls loadTab for player-dependent tabs)
-  try { const saved = JSON.parse(localStorage.getItem('bc_player')); if (saved?.entityId) selectPlayer(saved); } catch(e) {}
+  // Restore tracked players (migrating the old single-player key if present)
+  try {
+    let arr = JSON.parse(localStorage.getItem('bc_players') || 'null');
+    if (!Array.isArray(arr)) {
+      const legacy = JSON.parse(localStorage.getItem('bc_player') || 'null');
+      arr = (legacy && legacy.entityId) ? [legacy] : [];
+    }
+    trackedPlayers = arr.filter(p => p && p.entityId);
+    currentPlayer = trackedPlayers[0] || null;
+  } catch(e) {}
+  renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
 })();
