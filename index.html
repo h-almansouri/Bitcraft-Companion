@@ -1124,36 +1124,39 @@ function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.en
 function playerSection(p, innerHtml, bodyId){
   const id = p.entityId, collapsed = isPlayerCollapsed(id), paused = isPlayerPaused(id);
   return `<div class="player-section" style="margin-bottom:1.1rem;border:1px solid var(--border);border-radius:8px;overflow:hidden">
-    <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}')" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
-      <i class="ti ti-chevron-${collapsed?'right':'down'}" id="psec-chev-${id}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+    <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
+      <i class="ti ti-chevron-${collapsed?'right':'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
       <i class="ti ti-user" style="color:var(--teal-light);font-size:14px"></i>
       <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
-      <span id="psec-paused-${id}" class="badge" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
+      <span class="badge psec-paused" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
       <span style="flex:1"></span>
-      <i class="ti ti-${paused?'player-play':'player-pause'}" id="psec-mon-${id}" title="${paused?'Resume monitoring':'Stop monitoring (pause live refresh)'}" onclick="event.stopPropagation();togglePlayerMonitor('${id}')" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
+      <i class="ti ti-${paused?'player-play':'player-pause'} psec-mon" title="${paused?'Resume monitoring':'Stop monitoring (pause live refresh)'}" onclick="event.stopPropagation();togglePlayerMonitor('${id}', this)" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
     </div>
     <div id="${bodyId}" style="display:${collapsed?'none':''};padding:.65rem .75rem">${innerHtml}</div>
   </div>`;
 }
-function togglePlayerCollapse(id){
+// Element-relative (not by id): the same player renders on multiple tabs with identical markup, so
+// we operate on the section that was actually clicked rather than the first id match in the DOM.
+function togglePlayerCollapse(id, hdrEl){
   id = String(id);
   if (playerCollapsed.has(id)) playerCollapsed.delete(id); else playerCollapsed.add(id);
   savePlayerCollapsed();
   const open = !playerCollapsed.has(id);
-  const chev = document.getElementById('psec-chev-'+id); if (chev) chev.className = 'ti ti-chevron-'+(open?'down':'right');
-  // the section body is the div immediately after the header (body id varies per tab)
-  const section = chev ? chev.closest('.player-section') : null;
-  const body = section ? section.querySelector('.player-section-hdr + div') : null;
-  if (body) body.style.display = open ? '' : 'none';
+  const section = hdrEl ? hdrEl.closest('.player-section') : null;
+  if (!section) return;
+  const chev = section.querySelector('.psec-chev'); if (chev) chev.className = 'ti ti-chevron-'+(open?'down':'right')+' psec-chev';
+  const body = section.querySelector('.player-section-hdr + div'); if (body) body.style.display = open ? '' : 'none';
 }
-function togglePlayerMonitor(id){
+function togglePlayerMonitor(id, iconEl){
   id = String(id);
   const nowPaused = !playerPaused.has(id);
   if (nowPaused) playerPaused.add(id); else playerPaused.delete(id);
   savePlayerPaused();
-  const icon = document.getElementById('psec-mon-'+id);
-  if (icon){ icon.className = 'ti ti-'+(nowPaused?'player-play':'player-pause'); icon.title = nowPaused?'Resume monitoring':'Stop monitoring (pause live refresh)'; }
-  const badge = document.getElementById('psec-paused-'+id);
+  if (!iconEl) return;
+  iconEl.className = 'ti ti-'+(nowPaused?'player-play':'player-pause')+' psec-mon';
+  iconEl.title = nowPaused ? 'Resume monitoring' : 'Stop monitoring (pause live refresh)';
+  const section = iconEl.closest('.player-section');
+  const badge = section ? section.querySelector('.psec-paused') : null;
   if (badge) badge.style.display = nowPaused ? '' : 'none';
 }
 
@@ -4499,12 +4502,14 @@ function plannerRecipeBlocked(r) {
   if (!plannerHideSeasonal) return false;
   return r.inputs.some(inp => { const it = craftingData.itemsById[inp.itemId]; return it && plannerIsSeasonal(it); });
 }
-// Recipes that actually craft an item — excludes pack/unpack "convert" recipes, research, and
-// (when the toggle is on) recipes requiring seasonal inputs. Items left with no real recipe are
-// gathered raws (e.g. Basic Sand → leaf node).
+// Recipes that actually craft an item — excludes pack/unpack "convert" recipes and research-action
+// recipes (whose names START with "Unpack"/"Research"), and (when the toggle is on) recipes requiring
+// seasonal inputs. Note: only the *leading* word is matched, so legit crafts like "Craft Ornate Stone
+// Research" (which produce research-page items needed by codexes) are KEPT and break down normally.
+// Items left with no real recipe are gathered raws (e.g. Basic Sand → leaf node).
 function plannerRealRecipes(itemId) {
   const recipes = craftingData.recipesByOutput[itemId] || [];
-  return recipes.filter(r => !/unpack|research/i.test(r.name || '') && !plannerRecipeBlocked(r));
+  return recipes.filter(r => !/^(unpack|research)\b/i.test(r.name || '') && !plannerRecipeBlocked(r));
 }
 let plannerHideSeasonal = true; // toggle; when on, hides the whole Seasonal* tag family
 function plannerLoadSeasonalPref(){ try { const v = localStorage.getItem('bc_planner_hide_seasonal'); if (v !== null) plannerHideSeasonal = v === '1'; } catch(e){} }
