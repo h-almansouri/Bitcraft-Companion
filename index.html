@@ -998,10 +998,10 @@ function switchTab(tab) {
 }
 function loadTab(tab, silent=false) {
   if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
+  if (tab === 'inventory') { renderInventoryTab(silent); return; } // multi-player: one section per player
   if (!currentPlayer) return;
   const id = currentPlayer.entityId;
   if (tab === 'crafting') loadCrafting(id, silent);
-  else if (tab === 'inventory') loadInventory(id, silent);
 }
 
 // ── PLAYER SEARCH ──
@@ -1106,7 +1106,8 @@ function refreshPlayerTabs() {
   }
   if (currentTab === 'skills') renderExperienceTab();
   else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
-  else if (currentTab === 'inventory' || currentTab === 'crafting') { if (currentPlayer) loadTab(currentTab); }
+  else if (currentTab === 'inventory') renderInventoryTab();
+  else if (currentTab === 'crafting') { if (currentPlayer) loadTab(currentTab); }
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -1614,7 +1615,99 @@ function toggleInvSection(key) {
 }
 function selectInvChip(key, idx) {
   invSelectedChip[key] = (invSelectedChip[key] === idx) ? -1 : idx;
-  updateInvContent();
+  fillPlayerInvCached(key.split('|')[0]); // re-render just that player's section
+}
+
+// ── Multi-player Inventory (one collapsible section per tracked player) ──────────
+let invByPlayer = {}; // entityId -> {inventories, items, cargos}
+function buildSlotsFor(data) {
+  if (!data) return [];
+  const {inventories=[], items={}, cargos={}} = data;
+  const allSlots = [];
+  inventories.forEach(inv => {
+    (inv.pockets||[]).forEach(slot => {
+      const s = slotContents(slot); if (!s) return;
+      const isCargo = s.itemType === 1;
+      const meta = isCargo ? cargos[s.itemId] : items[s.itemId];
+      const invName = inv.inventoryName || inv.buildingName || 'Unknown';
+      const n = invName.toLowerCase();
+      let locationType = 'personal';
+      if (inv._isHousing) locationType = 'housing';
+      else if (inv.claimName) locationType = n.includes('bank') ? 'bank' : 'storage';
+      allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, meta });
+    });
+  });
+  return allSlots;
+}
+// Returns the grouped/flat inventory HTML for one player's data. Section/chip state keys are prefixed
+// with the player's entityId so multiple sections coexist without colliding.
+function inventoryContentHtml(data, q, pfx) {
+  const allSlots = buildSlotsFor(data);
+  q = (q||'').toLowerCase();
+  if (!allSlots.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
+  const filtered = q ? allSlots.filter(s => (s.meta?.name||'').toLowerCase().includes(q) || (s.meta?.tag||'').toLowerCase().includes(q)) : allSlots;
+  if (!filtered.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
+  const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card"><div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
+  if (invViewMode === 'flat') {
+    return `<div class="inv-items-grid">${filtered.sort((a,b)=>b.quantity-a.quantity).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card"><div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
+  }
+  const byLocation = {};
+  filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, slots:[]}; byLocation[key].slots.push(s); });
+  const personal = Object.values(byLocation).filter(l => l.locationType==='personal');
+  const banks    = Object.values(byLocation).filter(l => l.locationType==='bank');
+  const housing  = Object.values(byLocation).filter(l => l.locationType==='housing');
+  const storage  = Object.values(byLocation).filter(l => l.claimName && l.locationType==='storage');
+  const renderItemGrid = slots => `<div class="inv-items-grid">${slots.map(itemCard).join('')}</div>`;
+  function renderSection(title, icon, locs, base) {
+    if (!locs.length) return '';
+    const secKey = pfx + '|' + base;
+    const collapsed = !!invSectionCollapsed[secKey];
+    const selIdx = invSelectedChip[secKey] ?? -1;
+    const chips = locs.map((loc, i) => { const isBank = (loc.locationType==='bank'||loc.locationType==='storage'); const sub = isBank ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const expandedLocs = q ? locs : (selIdx>=0 ? [locs[selIdx]] : []);
+    const content = expandedLocs.length ? `<div class="inv-chip-content">${expandedLocs.map(l=>renderItemGrid(l.slots)).join('')}</div>` : '';
+    return `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${secKey}')"><span class="inv-group-name"><i class="ti ${icon}"></i>${title}</span><span class="inv-group-meta"></span><i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i></div><div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="inv-chips-row">${chips.join('')}</div>${content}</div></div>`;
+  }
+  return renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage');
+}
+function fillPlayerInvCached(entityId) {
+  const body = document.getElementById('psec-inv-' + entityId);
+  if (body) body.innerHTML = inventoryContentHtml(invByPlayer[entityId], invSearch, String(entityId));
+}
+function renderAllInvBodies() { trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId)); }
+function setInvView(mode) {
+  invViewMode = mode;
+  document.querySelectorAll('#inv-toggle button').forEach((b, i) => b.classList.toggle('active', (i===0) === (mode==='grouped')));
+  renderAllInvBodies();
+}
+async function renderInventoryTab(silent) {
+  const el = document.getElementById('tab-inventory');
+  if (!el) return;
+  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!silent || !document.getElementById('inv-toolbar')) {
+    el.innerHTML = `
+      <div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
+        <button id="live-btn-inventory" class="btn live-btn" onclick="toggleTabLive('inventory')"><i class="ti ti-player-play"></i> Live</button>
+        <button class="btn ctrl-btn" onclick="renderInventoryTab()"><i class="ti ti-refresh"></i> Refresh</button>
+        <span style="flex:1"></span>
+        <div id="inv-toggle" class="inv-toggle" style="margin:0">
+          <button class="${invViewMode==='grouped'?'active':''}" onclick="setInvView('grouped')"><i class="ti ti-layout-list"></i> Grouped</button>
+          <button class="${invViewMode==='flat'?'active':''}" onclick="setInvView('flat')"><i class="ti ti-layout-grid"></i> Flat</button>
+        </div>
+        <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="text" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
+      </div>
+      <div id="inv-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId)).join('')}</div>`;
+    const inp = document.getElementById('inv-search-input');
+    inp.addEventListener('input', () => { invSearch = inp.value; renderAllInvBodies(); });
+    updateLiveBtns();
+  }
+  await Promise.all(trackedPlayers.map(async p => {
+    if (silent && isPlayerPaused(p.entityId) && invByPlayer[p.entityId]) return; // keep cached for paused
+    try { invByPlayer[p.entityId] = await fetchPlayerInv(p.entityId); }
+    catch(e) { if (!invByPlayer[p.entityId]) invByPlayer[p.entityId] = { inventories:[], items:{}, cargos:{} }; }
+    fillPlayerInvCached(p.entityId);
+  }));
+  startLiveRefresh('inventory');
 }
 
 // ── CRAFTING ──
