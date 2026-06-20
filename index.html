@@ -527,6 +527,8 @@ main.planner-mode{max-width:none;padding:1rem}
 const API = (() => { try { const o = localStorage.getItem('bc_api_override'); if (o) return o; } catch(e){} return location.origin; })();
 let currentPlayer = null;          // = trackedPlayers[0] (primary) — used by tabs not yet multi-player
 let trackedPlayers = [];           // all players being tracked; player tabs render a section per player
+let playerCollapsed = new Set();   // entityIds whose player section is collapsed (persisted)
+let playerPaused = new Set();      // entityIds excluded from live auto-refresh — "stop monitoring" (persisted)
 let searchDocBound = false;        // guard so the document click-to-close listener binds only once
 let currentTab = 'skills';
 let xpThresholds = [];
@@ -1099,6 +1101,54 @@ function refreshPlayerTabs() {
   else if (currentTab === 'inventory' || currentTab === 'crafting') { if (currentPlayer) loadTab(currentTab); }
 }
 
+// ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
+// Used by every multi-player tab so each player can be collapsed individually and excluded from
+// live auto-refresh without removing them from the tracked list.
+function isPlayerCollapsed(id){ return playerCollapsed.has(String(id)); }
+function isPlayerPaused(id){ return playerPaused.has(String(id)); }
+function savePlayerCollapsed(){ safeSetItem('bc_players_collapsed', JSON.stringify([...playerCollapsed])); }
+function savePlayerPaused(){ safeSetItem('bc_players_paused', JSON.stringify([...playerPaused])); }
+// Players that should be auto-refreshed by live-refresh (skips paused ones).
+function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.entityId)); }
+
+// Wrap a player's tab content in a collapsible section with a header (name + collapse + pause toggle).
+// `bodyId` lets callers fill the body asynchronously (e.g. `psec-skills-<id>`).
+function playerSection(p, innerHtml, bodyId){
+  const id = p.entityId, collapsed = isPlayerCollapsed(id), paused = isPlayerPaused(id);
+  return `<div class="player-section" style="margin-bottom:1.1rem;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+    <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}')" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
+      <i class="ti ti-chevron-${collapsed?'right':'down'}" id="psec-chev-${id}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+      <i class="ti ti-user" style="color:var(--teal-light);font-size:14px"></i>
+      <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
+      <span id="psec-paused-${id}" class="badge" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
+      <span style="flex:1"></span>
+      <i class="ti ti-${paused?'player-play':'player-pause'}" id="psec-mon-${id}" title="${paused?'Resume monitoring':'Stop monitoring (pause live refresh)'}" onclick="event.stopPropagation();togglePlayerMonitor('${id}')" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
+    </div>
+    <div id="${bodyId}" style="display:${collapsed?'none':''};padding:.65rem .75rem">${innerHtml}</div>
+  </div>`;
+}
+function togglePlayerCollapse(id){
+  id = String(id);
+  if (playerCollapsed.has(id)) playerCollapsed.delete(id); else playerCollapsed.add(id);
+  savePlayerCollapsed();
+  const open = !playerCollapsed.has(id);
+  const chev = document.getElementById('psec-chev-'+id); if (chev) chev.className = 'ti ti-chevron-'+(open?'down':'right');
+  // the section body is the div immediately after the header (body id varies per tab)
+  const section = chev ? chev.closest('.player-section') : null;
+  const body = section ? section.querySelector('.player-section-hdr + div') : null;
+  if (body) body.style.display = open ? '' : 'none';
+}
+function togglePlayerMonitor(id){
+  id = String(id);
+  const nowPaused = !playerPaused.has(id);
+  if (nowPaused) playerPaused.add(id); else playerPaused.delete(id);
+  savePlayerPaused();
+  const icon = document.getElementById('psec-mon-'+id);
+  if (icon){ icon.className = 'ti ti-'+(nowPaused?'player-play':'player-pause'); icon.title = nowPaused?'Resume monitoring':'Stop monitoring (pause live refresh)'; }
+  const badge = document.getElementById('psec-paused-'+id);
+  if (badge) badge.style.display = nowPaused ? '' : 'none';
+}
+
 // ── XP / LEVEL HELPERS ──
 async function ensureThresholds() {
   if (xpThresholds.length) return;
@@ -1136,16 +1186,12 @@ async function renderExperienceTab() {
   if (!el) return;
   if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
   try { await ensureThresholds(); } catch(e) {}
-  el.innerHTML = trackedPlayers.map(p => `
-    <div class="player-section" style="margin-bottom:1.5rem">
-      <div class="category-label" style="font-size:15px;color:var(--teal-light)"><i class="ti ti-user"></i> ${escHtml(playerName(p))}</div>
-      <div id="xp-body-${p.entityId}">${loading()}</div>
-    </div>`).join('');
+  el.innerHTML = trackedPlayers.map(p => playerSection(p, loading(), 'psec-skills-' + p.entityId)).join('');
   trackedPlayers.forEach(p => loadSkillsInto(p));
   startLiveRefresh('skills');
 }
 async function loadSkillsInto(p, silent=false) {
-  const body = document.getElementById('xp-body-' + p.entityId);
+  const body = document.getElementById('psec-skills-' + p.entityId);
   if (!body) return;
   try {
     const [pData, rankData] = await Promise.all([
@@ -1222,7 +1268,7 @@ function startLiveRefresh(tab) {
   liveRefreshId = setInterval(() => {
     if (document.hidden) return;
     if (tab === 'tasks') loadTasks(currentPlayer.entityId, true);
-    else if (tab === 'skills') trackedPlayers.forEach(p => loadSkillsInto(p, true)); // refresh each player's section in place
+    else if (tab === 'skills') activePlayers().forEach(p => loadSkillsInto(p, true)); // refresh non-paused players in place
     else loadTab(tab, true);
   }, ms);
 }
@@ -5300,6 +5346,8 @@ function slotContents(slot) {
     trackedPlayers = arr.filter(p => p && p.entityId);
     currentPlayer = trackedPlayers[0] || null;
   } catch(e) {}
+  try { const c = JSON.parse(localStorage.getItem('bc_players_collapsed') || '[]'); if (Array.isArray(c)) playerCollapsed = new Set(c.map(String)); } catch(e) {}
+  try { const pz = JSON.parse(localStorage.getItem('bc_players_paused') || '[]'); if (Array.isArray(pz)) playerPaused = new Set(pz.map(String)); } catch(e) {}
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
