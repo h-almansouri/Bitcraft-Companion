@@ -702,16 +702,24 @@ function _savePlannerTrackedNames() {
 function _loadPlannerTrackedNames() {
   try { const v = localStorage.getItem('bc_planner_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
 }
-// Returns null (no saved data), 'all', or array of names
+// Tracked task inventories are keyed per player as `${entityId}#${invIndex}` so the same-named
+// inventory on different players doesn't collide. Persisted by player+name. 'all' = track everything.
+function _taskInvNameKey(entityId, inv) { return entityId + '||' + _invNameKey(inv); }
 function _saveTasksTrackedNames() {
-  if (!invData) return;
-  if (tasksTrackedInvs === null) {
-    safeSetItem('bc_tasks_tracked', '"all"');
-    return;
-  }
+  if (tasksTrackedInvs === null) { safeSetItem('bc_tasks_tracked', '"all"'); return; }
   const names = [];
-  (invData.inventories||[]).forEach((inv, i) => { if (tasksTrackedInvs.has(i)) names.push(_invNameKey(inv)); });
+  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => { if (tasksTrackedInvs.has(p.entityId + '#' + idx)) names.push(_taskInvNameKey(p.entityId, inv)); }); });
   safeSetItem('bc_tasks_tracked', JSON.stringify(names));
+}
+function _resolveTrackedTasks(names) {
+  const nameSet = new Set(names), result = new Set();
+  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => { if (nameSet.has(_taskInvNameKey(p.entityId, inv))) result.add(p.entityId + '#' + idx); }); });
+  return result;
+}
+function allTaskInvKeys() {
+  const keys = [];
+  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => keys.push(p.entityId + '#' + idx)); });
+  return keys;
 }
 function _loadTasksTrackedNames() {
   try { const v = localStorage.getItem('bc_tasks_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
@@ -1927,59 +1935,78 @@ function renderPassiveCraftsHtml(passive, itemMap) {
 }
 
 // ── TASKS ──
+// Fetch a player's full inventory (personal + housing), merged into one {inventories, items, cargos}
+// structure — without touching any global. Used by the multi-player Tasks tab.
+async function fetchPlayerInv(id) {
+  const [d, housingList] = await Promise.all([
+    apiFetch(`/api/players/${id}/inventories`),
+    apiFetch(`/api/players/${id}/housing`).catch(() => [])
+  ]);
+  const houses = Array.isArray(housingList) ? housingList.filter(h => !h.isEmpty) : [];
+  const houseDetails = await Promise.all(houses.map(h => apiFetch(`/api/players/${id}/housing/${h.buildingEntityId}`).catch(() => null)));
+  const housingInvs = [];
+  houseDetails.forEach((hd, i) => {
+    if (!hd) return;
+    const house = houses[i];
+    (hd.items  || []).forEach(it => { d.items [it.id] = it; });
+    (hd.cargos || []).forEach(c  => { d.cargos[c.id] = c;  });
+    (hd.inventories || []).forEach(inv => {
+      const slots = (inv.inventory || []).filter(s => s.contents && s.contents.item_id).map(s => ({
+        contents: { itemId: s.contents.item_id, itemType: (s.contents.item_type === 'cargo' || s.contents.item_type === 1) ? 1 : 0, quantity: s.contents.quantity }
+      }));
+      if (!slots.length) return;
+      housingInvs.push({ inventoryName: inv.buildingNickname || inv.buildingName || hd.buildingName || 'House', claimName: hd.claimName || house.claimName || 'Housing', regionId: hd.regionId || house.regionId || null, _isHousing: true, pockets: slots });
+    });
+  });
+  return { ...d, inventories: [...(d.inventories || []), ...housingInvs] };
+}
+
+let taskPlayersById = {}; // entityId -> { player, travTasks, itemMetaMap, expires, inv }
+// Multi-player: fetch each tracked player's traveler-tasks + inventory. On a silent (live) refresh,
+// paused players keep their cached data. The `id` arg is ignored (kept for existing callers).
 async function loadTasks(id, silent=false) {
   const el = document.getElementById('tasks-content');
   if (!el) return;
-  let travTasks=[], itemMetaMap={}, expires=null;
-  if (id) {
-    if (!silent) el.innerHTML = loading();
+  if (!trackedPlayers.length) { taskPlayersById = {}; renderTasksUI(); return; }
+  if (!silent) el.innerHTML = loading();
+  await Promise.all(trackedPlayers.map(async p => {
+    if (silent && isPlayerPaused(p.entityId) && taskPlayersById[p.entityId]) return; // keep cached for paused
     try {
-      // Fetch tasks; simultaneously ensure full inventory is loaded
-      // (loadPlannerInventory is a no-op if invData already populated)
-      const [taskData] = await Promise.all([
-        apiFetch(`/api/players/${id}/traveler-tasks`),
-        loadPlannerInventory()   // sets global invData with personal + housing
+      const [taskData, inv] = await Promise.all([
+        apiFetch(`/api/players/${p.entityId}/traveler-tasks`),
+        fetchPlayerInv(p.entityId)
       ]);
-      travTasks  = taskData.tasks || [];
-      itemMetaMap = {...(taskData.items||{}), ...(taskData.cargo||{})};
-      expires    = taskData.expirationTimestamp;
-
-      // Restore tracked inventories from localStorage (once per player load)
-      if (!tasksInvsInited && invData) {
-        tasksInvsInited = true;
-        const saved = _loadTasksTrackedNames();
-        if (saved === 'all') {
-          tasksTrackedInvs = null; // null = track all
-        } else if (saved !== null) {
-          tasksTrackedInvs = _resolveTrackedByName(invData.inventories || [], saved);
-        }
-        // If no saved data, keep the default empty Set (none selected)
-      }
-    } catch(e) {}
+      taskPlayersById[p.entityId] = { player: p, travTasks: taskData.tasks || [], itemMetaMap: {...(taskData.items||{}), ...(taskData.cargo||{})}, expires: taskData.expirationTimestamp, inv };
+    } catch(e) { if (!taskPlayersById[p.entityId]) taskPlayersById[p.entityId] = { player: p, travTasks: [], itemMetaMap: {}, expires: null, inv: { inventories: [], items: {}, cargos: {} } }; }
+  }));
+  Object.keys(taskPlayersById).forEach(eid => { if (!isPlayerTracked(eid)) delete taskPlayersById[eid]; }); // prune removed
+  // Restore tracked-inventory selection once (now that inventories are loaded for resolution)
+  if (!tasksInvsInited) {
+    tasksInvsInited = true;
+    const saved = _loadTasksTrackedNames();
+    if (saved === 'all') tasksTrackedInvs = null;
+    else if (Array.isArray(saved)) tasksTrackedInvs = _resolveTrackedTasks(saved);
   }
-  lastTaskData = {travTasks, itemMetaMap, expires};
-  renderTasksUI(travTasks, itemMetaMap, expires);
+  renderTasksUI();
 }
 
 
-function toggleTaskTrackedInv(idx) {
-  if (!invData) return;
+function toggleTaskTrackedInv(key) {
   if (tasksTrackedInvs === null) {
-    // null means "all" — convert to explicit set minus this one
-    const total = (invData.inventories||[]).length;
-    tasksTrackedInvs = new Set([...Array(total).keys()]);
-    tasksTrackedInvs.delete(idx);
+    // null means "all" — convert to an explicit set of every inventory key minus this one
+    tasksTrackedInvs = new Set(allTaskInvKeys());
+    tasksTrackedInvs.delete(key);
   } else {
-    if (tasksTrackedInvs.has(idx)) tasksTrackedInvs.delete(idx);
-    else tasksTrackedInvs.add(idx);
+    if (tasksTrackedInvs.has(key)) tasksTrackedInvs.delete(key);
+    else tasksTrackedInvs.add(key);
   }
   _saveTasksTrackedNames();
-  if (lastTaskData) renderTasksUI(lastTaskData.travTasks, lastTaskData.itemMetaMap, lastTaskData.expires);
+  renderTasksUI();
 }
 function toggleAllTaskInvs(state) {
   tasksTrackedInvs = state ? null : new Set();
   _saveTasksTrackedNames();
-  if (lastTaskData) renderTasksUI(lastTaskData.travTasks, lastTaskData.itemMetaMap, lastTaskData.expires);
+  renderTasksUI();
 }
 function toggleTaskInvPanel() {
   taskInvOpen = !taskInvOpen;
@@ -2047,73 +2074,57 @@ function craftIcon(name) {
   return 'ti-hammer';
 }
 
-function renderTasksUI(travTasks, itemMetaMap, expires) {
+function renderTasksUI() {
   const el = document.getElementById('tasks-content');
   if (!el) return;
+  if (countdownInterval) clearInterval(countdownInterval);
+  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
 
-  // Debug: open DevTools console and type `_taskRaw` to inspect the raw task structure
-  if (travTasks.length > 0) window._taskRaw = travTasks[0];
-
-  // ── Build inventoryMap from tracked invData ──
+  const players = trackedPlayers.map(p => taskPlayersById[p.entityId]).filter(Boolean);
+  // Merged item metadata (item ids are global, so merging across players is safe) for name lookups.
+  const itemMetaMap = {};
+  players.forEach(tp => Object.assign(itemMetaMap, tp.itemMetaMap || {}));
+  // Pooled inventory counts across the SELECTED inventories of all tracked players.
   const inventoryMap = {};
-  if (invData) {
-    const {inventories=[]} = invData;
-    inventories.forEach((inv, idx) => {
-      if (tasksTrackedInvs !== null && !tasksTrackedInvs.has(idx)) return;
-      (inv.pockets||[]).forEach(slot => {
-        const s = slotContents(slot);
-        if (!s) return;
-        const key = s.itemType + ':' + s.itemId;
-        inventoryMap[key] = (inventoryMap[key]||0) + s.quantity;
-      });
-    });
-  }
+  players.forEach(tp => (tp.inv.inventories||[]).forEach((inv, idx) => {
+    const key = tp.player.entityId + '#' + idx;
+    if (tasksTrackedInvs !== null && !tasksTrackedInvs.has(key)) return;
+    (inv.pockets||[]).forEach(slot => { const s = slotContents(slot); if (!s) return; const k = s.itemType + ':' + s.itemId; inventoryMap[k] = (inventoryMap[k]||0) + s.quantity; });
+  }));
+  const expires = players.map(p => p.expires).find(Boolean) || null;
 
-  // ── Build inventory selector UI ──
+  // ── Inventory selector UI — grouped by player, then personal/house/bank ──
   function renderTaskInvSelector() {
-    if (!invData) return '';
-    const invs = invData.inventories || [];
-    if (!invs.length) return '';
-    const total = invs.length;
-    const tracked = tasksTrackedInvs === null ? total : tasksTrackedInvs.size;
-
-    const cats = {personal:[], house:[], bank:[]};
-    invs.forEach((inv, idx) => {
-      if (inv._isHousing) cats.house.push({inv, idx});
-      else if (inv.claimName) cats.bank.push({inv, idx});
-      else cats.personal.push({inv, idx});
-    });
-
-    const isOn = idx => tasksTrackedInvs === null || tasksTrackedInvs.has(idx);
-
-    const chip = ({inv, idx}) => {
+    let total = 0, tracked = 0;
+    players.forEach(tp => (tp.inv.inventories||[]).forEach((inv, idx) => { total++; if (tasksTrackedInvs === null || tasksTrackedInvs.has(tp.player.entityId + '#' + idx)) tracked++; }));
+    if (!total) return '';
+    const isOn = key => tasksTrackedInvs === null || tasksTrackedInvs.has(key);
+    const chip = (tp, inv, idx) => {
+      const key = tp.player.entityId + '#' + idx;
       const label = inv.inventoryName || inv.buildingName || 'Unknown';
-      // Only show claim name for bank/storage, not for housing
       const claim = (!inv._isHousing && inv.claimName) ? inv.claimName : '';
-      const on    = isOn(idx);
-      return `<span class="planner-inv-loc${on?' active':''}" onclick="toggleTaskTrackedInv(${idx})">
-        <i class="ti ti-${on?'checkbox':'square'}" style="font-size:13px"></i>
-        ${escHtml(label)}${claim?`<span class="inv-loc-claim">${escHtml(claim)}</span>`:''}
-      </span>`;
+      const on = isOn(key);
+      return `<span class="planner-inv-loc${on?' active':''}" onclick="toggleTaskTrackedInv('${key}')"><i class="ti ti-${on?'checkbox':'square'}" style="font-size:13px"></i> ${escHtml(label)}${claim?`<span class="inv-loc-claim">${escHtml(claim)}</span>`:''}</span>`;
     };
-    const renderCat = (title, icon, entries) => !entries.length ? '' : `
-      <div style="margin-bottom:.3rem">
-        <div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div>
-        <div class="planner-inv-chips">${entries.map(chip).join('')}</div>
+    const renderCat = (title, icon, entries) => !entries.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${entries.join('')}</div></div>`;
+    const playerGroups = players.map(tp => {
+      const invs = tp.inv.inventories || [];
+      if (!invs.length) return '';
+      const cats = { personal:[], house:[], bank:[] };
+      invs.forEach((inv, idx) => { const c = inv._isHousing ? 'house' : (inv.claimName ? 'bank' : 'personal'); cats[c].push(chip(tp, inv, idx)); });
+      return `<div style="margin-bottom:.55rem">
+        <div style="font-size:12px;font-weight:600;color:var(--teal-light);margin-bottom:.25rem"><i class="ti ti-user" style="font-size:12px"></i> ${escHtml(playerName(tp.player))}</div>
+        ${renderCat('Personal','ti-user',cats.personal)}${renderCat('House','ti-home',cats.house)}${renderCat('Town Banks','ti-building-bank',cats.bank)}
       </div>`;
-
+    }).join('');
     return `<div class="task-inv-selector planner-inv-section">
       <div class="planner-inv-hdr" onclick="toggleTaskInvPanel()">
         <i id="task-inv-chevron" class="ti ti-chevron-${taskInvOpen ? 'down' : 'right'}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
-        <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventory <span style="font-size:11px;font-weight:400;color:var(--text3)">(optional)</span></div>
+        <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventory <span style="font-size:11px;font-weight:400;color:var(--text3)">(material counts, pooled)</span></div>
         <span class="planner-inv-hdr-sub">${tracked}/${total} tracked</span>
       </div>
       <div class="planner-inv-body" style="display:${taskInvOpen ? '' : 'none'}">
-        <div class="planner-inv-cats">
-          ${renderCat('Personal', 'ti-user', cats.personal)}
-          ${renderCat('House', 'ti-home', cats.house)}
-          ${renderCat('Town Banks', 'ti-building-bank', cats.bank)}
-        </div>
+        <div class="planner-inv-cats">${playerGroups}</div>
         <div class="planner-inv-footer">
           <span>${tracked}/${total} tracked</span>
           <span class="planner-inv-toggle" onclick="toggleAllTaskInvs(true)">All</span>
@@ -2123,8 +2134,6 @@ function renderTasksUI(travTasks, itemMetaMap, expires) {
       </div>
     </div>`;
   }
-
-  if (countdownInterval) clearInterval(countdownInterval);
   function getCountdown() {
     if (!expires) return '—';
     const now = Math.floor(Date.now()/1000);
@@ -2183,6 +2192,7 @@ function renderTasksUI(travTasks, itemMetaMap, expires) {
     return first ? cap(first.toLowerCase()) : 'Traveler';
   }
 
+  function npcBlocksHtml(travTasks) {
   const byTrader = {};
   travTasks.forEach(t => {
     const key = extractTraderName(t);
@@ -2190,7 +2200,7 @@ function renderTasksUI(travTasks, itemMetaMap, expires) {
     byTrader[key].push(t);
   });
 
-  const npcBlocks = Object.entries(byTrader).map(([traderName, tasks]) => {
+  return Object.entries(byTrader).map(([traderName, tasks]) => {
     const skillName = tasks[0]?.skillName || tasks[0]?.category || '';
 
     // Only trust the API — having enough items does NOT mean the task is handed in
@@ -2235,26 +2245,32 @@ function renderTasksUI(travTasks, itemMetaMap, expires) {
       ${taskCols}
     </div>`;
   }).join('');
+  }
 
-  const invSelectorHtml = currentPlayer ? renderTaskInvSelector() : '';
+  // Each tracked player gets a collapsible section with their grouped traveler tasks.
+  const sections = trackedPlayers.map(p => {
+    const tp = taskPlayersById[p.entityId];
+    const inner = tp
+      ? (npcBlocksHtml(tp.travTasks) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No traveler tasks</span></div>')
+      : loading();
+    return playerSection(p, inner, 'psec-tasks-' + p.entityId);
+  }).join('');
 
   el.innerHTML = `
     <div class="tasks-toolbar">
       ${expires
         ? `<div class="task-rotation" style="margin-bottom:0;flex:1"><i class="ti ti-clock"></i> Next rotation in <span class="task-countdown" id="task-countdown">${getCountdown()}</span></div>`
         : '<div style="flex:1"></div>'}
-      ${currentPlayer ? `
-        <button id="live-btn-tasks" class="btn live-btn" onclick="toggleTabLive('tasks')"><i class="ti ti-player-play"></i> Live</button>
-        <button class="btn ctrl-btn" onclick="loadTasks(currentPlayer?.entityId)"><i class="ti ti-refresh"></i> Refresh</button>
-      ` : ''}
+      <button id="live-btn-tasks" class="btn live-btn" onclick="toggleTabLive('tasks')"><i class="ti ti-player-play"></i> Live</button>
+      <button class="btn ctrl-btn" onclick="loadTasks(null)"><i class="ti ti-refresh"></i> Refresh</button>
     </div>
-    ${invSelectorHtml}
-    ${!currentPlayer?'<div class="empty"><i class="ti ti-user-search"></i><span>Select a player first</span></div>':npcBlocks||'<div class="empty"><i class="ti ti-mood-empty"></i><span>No traveler tasks</span></div>'}`;
+    ${renderTaskInvSelector()}
+    ${sections}`;
 
   if (expires) {
     countdownInterval = setInterval(() => {
-      const el = document.getElementById('task-countdown');
-      if (el) el.textContent = getCountdown();
+      const e = document.getElementById('task-countdown');
+      if (e) e.textContent = getCountdown();
     }, 1000);
   }
   updateLiveBtns();

@@ -244,10 +244,13 @@ selector pools every tracked player's inventories grouped under each player; mat
       (persist `bc_players_collapsed`/`bc_players_paused`); `activePlayers()` = non-paused (live-refresh skips
       paused). `togglePlayerCollapse`/`togglePlayerMonitor`. Experience uses it (body id `psec-skills-<id>`).
       Stages 2 & 3 MUST wrap each player's content in `playerSection(...)` for consistent collapse/pause.
-- [ ] STAGE 2: Tasks grouped — per-player traveler tasks + inventory selector grouped by player + material
-      counts pooled across all tracked inventories. Plan: fetch each player's traveler-tasks + inventory, merge
-      inventories tagged with player; key tracked-invs by player+index (not bare index). loadTasks/renderTasksUI
-      /renderTaskInvSelector + tasksTrackedInvs keying all need the player dimension.
+- [x] STAGE 2 DONE: Tasks grouped. `taskPlayersById` cache; `loadTasks` fetches each player's traveler-tasks +
+      `fetchPlayerInv(id)` (reusable inventory fetcher, no globals); silent/live refresh skips paused players.
+      `renderTasksUI()` (no args): merged itemMetaMap + POOLED inventoryMap across selected inventories; inventory
+      selector grouped by player (chips keyed `entityId#idx`); each player's tasks in a `playerSection` (collapse +
+      pause), body id `psec-tasks-<id>`. tasksTrackedInvs now holds composite keys; persisted by player+name
+      (`_taskInvNameKey`, `_saveTasksTrackedNames`, `_resolveTrackedTasks`, `allTaskInvKeys`). Verified: grouped
+      selector, pooled counts, toggle persist/restore, collapse, pause. Refresh button calls `loadTasks(null)`.
 - [ ] STAGE 3: Inventory + Crafts grouped — leanest path = fetch all tracked players, MERGE their inventories
       (tag each with _playerName) into one structure and add a player grouping level in the existing
       grouped/flat renderers (reuses updateInvContent / renderCrafting with a player partition + namespaced keys).
