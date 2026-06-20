@@ -228,6 +228,26 @@ Game updates (e.g. "Uncharted Islands", 2026-06-11) add items/recipes/regions. W
   map tab + on visibilitychange). Registered in `bcLayerReg.events`. Verified: 4 vaults render, toggle
   persists, timer shows. If bitjita adds more world-event types to events.geojson they'll appear automatically.
 
+## Multi-player tracking (in progress — staged rollout)
+Goal: track multiple players at once; ALL four player tabs (Experience, Inventory, Crafts, Tasks) show a
+section per tracked player, grouped by player (user confirmed "all players, grouped"). Tasks inventory
+selector pools every tracked player's inventories grouped under each player; material counts pool across all.
+- State: `trackedPlayers[]` (persisted `bc_players`, migrates old `bc_player`); `currentPlayer` kept = primary
+  (trackedPlayers[0]) so not-yet-converted single-player tabs keep working. Sidebar = search adds a player +
+  a removable chip each. `selectPlayer` now ADDS; `removeTrackedPlayer(id)`; `renderPlayerArea()`;
+  `refreshPlayerTabs()`. clearPlayer/loadSkills removed.
+- [x] STAGE 1 DONE (pushed, commit 4bc733c): foundation + sidebar UI + Experience grouped
+      (`renderExperienceTab` → `loadSkillsInto(p)` → `skillsSectionHtml(pData,rankData)`; live-refresh refreshes
+      each player's `#xp-body-<id>` in place). Verified: add/remove/persist/reload all work.
+- [ ] STAGE 2: Tasks grouped — per-player traveler tasks + inventory selector grouped by player + material
+      counts pooled across all tracked inventories. Plan: fetch each player's traveler-tasks + inventory, merge
+      inventories tagged with player; key tracked-invs by player+index (not bare index). loadTasks/renderTasksUI
+      /renderTaskInvSelector + tasksTrackedInvs keying all need the player dimension.
+- [ ] STAGE 3: Inventory + Crafts grouped — leanest path = fetch all tracked players, MERGE their inventories
+      (tag each with _playerName) into one structure and add a player grouping level in the existing
+      grouped/flat renderers (reuses updateInvContent / renderCrafting with a player partition + namespaced keys).
+- Touch-points still on primary only (fine): planner inventory-awareness, map "Track me" button.
+
 ## Conventions / guardrails (apply to all of the above)
 - Single-file client; no build step. Validate by extracting the last `<script>` and `node --check`.
 - Any new persisted preference uses `safeSetItem` (never raw `localStorage.setItem`).
