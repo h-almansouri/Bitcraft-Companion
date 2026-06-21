@@ -124,7 +124,7 @@ function extractArray(text, startMarker, endMarker) {
   // Strip iconAssetName to save space (not needed for planner)
   const cleanItems = items.map(i => ({
     id: i.id, name: i.name, description: i.description,
-    tier: i.tier, tag: i.tag, rarity: i.rarity
+    tier: i.tier, tag: i.tag, rarity: i.rarity, iconAssetName: i.iconAssetName
   }));
 
   const out = { items: cleanItems, recipes, skills, extractedAt: Date.now() };

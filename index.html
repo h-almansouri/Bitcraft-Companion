@@ -3330,6 +3330,7 @@ function renderShoppingListHtml() {
     return `<tr style="border-bottom:${isExpanded?'none':'1px solid var(--border)'};cursor:pointer;${isExpanded?'background:var(--bg3)':''}" onclick="shoppingToggleExpand('${item.id}')">
       <td style="padding:.5rem .75rem">
         <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">
+          ${gameIconImg(item.iconAssetName || mkt?.iconAssetName, 20)}
           <span style="font-size:13px;font-weight:500;color:var(--text)">${escHtml(item.name)}</span>
           ${item.isCargo ? '<span style="font-size:10px;background:var(--bg3);color:var(--text3);border-radius:3px;padding:1px 5px">cargo</span>' : ''}
           ${chips}
@@ -4031,8 +4032,8 @@ function bcPointLayerClass(){
 }
 
 async function bcLoadIndexes(){
-  try { const r = await fetch(`${API}/mapassets/resourceIndex.json`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
-  try { const r = await fetch(`${API}/mapassets/creatureIndex.json`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=icons1`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=icons1`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
 }
 // One combined list of resources + enemies (each entry knows its kind).
 function bcAllEntries(){
@@ -4066,6 +4067,7 @@ function bcRenderResourceList(){
     const col = (trk && trk.color) || v.color || (v.kind==='enemy' ? '#e0556e' : '#5fd0ff');
     return `<div class="bc-li${trk?' on':''}" onclick="bcToggleMapItem('${v.kind}','${v.id}')">
       <span class="bc-li-dot" style="background:${col}"></span>
+      ${gameIconImg(v.icon,18)}
       <span class="bc-li-nm">${escHtml(v.name||('#'+v.id))}</span>
       ${v.tag?`<span class="bc-li-tag">${escHtml(v.tag)}</span>`:''}
       ${v.tier>0?`<span class="bc-li-t">T${v.tier}</span>`:''}
@@ -4235,7 +4237,7 @@ async function renderPlanner() {
 
 async function loadCraftingData() {
   if (craftingData) return;
-  const d = await apiFetch('/crafting-data');
+  const d = await apiFetch('/crafting-data?v=icons1'); // ?v bumps to bust stale browser cache on data refresh
   craftingData = d;
   // Build indexes
   craftingData.itemsById = {};
@@ -4520,7 +4522,7 @@ function buildRecipeTreeHTML(itemId, qty, visited, depth) {
 
   // No recipe = raw material (gathered or only-convert)
   if (!recipe || depth > 8) {
-    return `<div class="rn-raw"><i class="ti ti-leaf"></i> <span>${name}</span> <span class="rn-qty">${fmtCount(qty)}×</span></div>`;
+    return `<div class="rn-raw">${gameIconImg(item?.iconAssetName,16) || '<i class="ti ti-leaf"></i>'} <span>${name}</span> <span class="rn-qty">${fmtCount(qty)}×</span></div>`;
   }
 
   const outEntry = recipe.outputs.find(o => o.itemId === itemId) || {quantity:1};
@@ -4564,6 +4566,7 @@ function buildRecipeTreeHTML(itemId, qty, visited, depth) {
   return `<div class="rn">
     <div class="${itemCls}"${clickAttr}>
       ${chevron}
+      ${gameIconImg(item?.iconAssetName,18)}
       <span class="rn-name">${name}</span>
       <span class="rn-qty">${fmtCount(qty)}×</span>
       ${skill && depth > 0 ? `<span class="rn-skill">${escHtml(skill.name)}</span>` : ''}
@@ -4685,7 +4688,7 @@ function renderPlanPanel() {
     const active = plannerSelId === p.itemId ? ' pactive' : '';
     return `<div class="plan-item-row${active}">
       <div style="flex:1;min-width:0;cursor:pointer" onclick="plannerSelectItem(${p.itemId})" title="View recipe tree">
-        <div class="plan-item-name">${name}</div>
+        <div class="plan-item-name">${gameIconImg(item?.iconAssetName,18)} ${name}</div>
         ${tierStr ? `<div class="plan-item-meta">${tierStr} · ${escHtml(item.tag||'')}</div>` : ''}
         <div class="plan-cvb" id="cvb-${p.itemId}" style="font-size:10.5px;color:var(--text2);margin-top:3px;line-height:1.35"><span style="color:var(--text3)">pricing…</span></div>
       </div>
@@ -5035,7 +5038,7 @@ function invAwareChip(qty, itemId, extraCls) {
     else if (have > 0)   { invCls = ' inv-partial';  tag = `<span class="inv-tag partial">${fmtCount(have)}</span>`; }
     else                 { invCls = ' inv-missing'; }
   }
-  return `<span class="bs-chip ${extraCls}${invCls}"><span class="bq">${fmtCount(qty)}×</span> ${name}${tag}</span>`;
+  return `<span class="bs-chip ${extraCls}${invCls}"><span class="bq">${fmtCount(qty)}×</span> ${gameIconImg(item?.iconAssetName,16)} ${name}${tag}</span>`;
 }
 
 function planMatChip(qty, itemId) {
@@ -5049,7 +5052,7 @@ function planMatChip(qty, itemId) {
     else if (have > 0)   { invCls = ' inv-partial';  tag = `<span class="inv-tag partial">${fmtCount(have)}</span>`; }
     else                 { invCls = ' inv-missing'; }
   }
-  return `<span class="plan-mat-chip${invCls}"><span class="mc-qty">${fmtCount(qty)}×</span>${name}${tag}</span>`;
+  return `<span class="plan-mat-chip${invCls}"><span class="mc-qty">${fmtCount(qty)}×</span>${gameIconImg(item?.iconAssetName,16)} ${name}${tag}</span>`;
 }
 
 // ── BUILDING STEPS ──
@@ -5228,7 +5231,7 @@ function itemLabel(meta, itemId, itemType) {
 const BC_ICON_BASE = 'https://bitjita.com/';
 function gameIconUrl(assetName){
   if (!assetName) return '';
-  let a = String(assetName).replace(/^\/+/, '');
+  let a = String(assetName).replace(/\[.*$/, '').replace(/^\/+/, ''); // strip packed-data suffix + leading slashes
   // Some endpoints drop the leading "GeneratedIcons/" (e.g. inventory returns "Items/X"); add it back.
   if (!a.startsWith('GeneratedIcons')) a = 'GeneratedIcons/' + a;
   return BC_ICON_BASE + a + '.webp';

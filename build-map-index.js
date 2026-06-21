@@ -31,10 +31,10 @@ const isTest = name => /^TEST\b/i.test(name || ''); // drop dev/test spawns; kee
   if (!resources.length || !creatures.length) { console.error('Empty response — aborting (kept existing indexes).'); process.exit(1); }
 
   const resIndex = {};
-  resources.forEach(r => { if (isTest(r.name)) return; resIndex[r.id] = { tier: r.tier, name: r.name, tag: r.tag }; });
+  resources.forEach(r => { if (isTest(r.name)) return; resIndex[r.id] = { tier: r.tier, name: r.name, tag: r.tag, icon: r.icon_asset_name }; });
 
   const creIndex = {};
-  creatures.forEach(c => { if (isTest(c.name)) return; creIndex[c.enemyType] = { tier: c.tier, name: c.name, tag: c.tag }; });
+  creatures.forEach(c => { if (isTest(c.name)) return; creIndex[c.enemyType] = { tier: c.tier, name: c.name, tag: c.tag, icon: c.iconAddress }; });
 
   const dir = path.join(__dirname, 'mapassets');
   fs.writeFileSync(path.join(dir, 'resourceIndex.json'), JSON.stringify(resIndex));

@@ -264,6 +264,24 @@ selector pools every tracked player's inventories grouped under each player; mat
 - ALL FOUR PLAYER TABS NOW MULTI-PLAYER. Touch-points still primary-only (fine): planner inventory-awareness,
   map "Track me" button.
 
+## Game icons (DONE)
+Real in-game icons render across the app. URL pattern: `https://bitjita.com/<iconAssetName>.webp` (served by
+bitjita; we point `<img>` DIRECTLY there, NOT through our proxy, so it's free for the host). Helper
+`gameIconImg(assetName,size)` + `gameIconUrl()`: lazy-loaded, `onerror` hides gracefully, and NORMALIZES the
+asset name — strips a `[...]` packed-data suffix (one malformed craftingData entry) and prepends
+`GeneratedIcons/` when missing (inventory API returns bare `Items/X`). `.game-icon` CSS class.
+Asset-name sources: market/items (`iconAssetName`), inventory item metas (`iconAssetName`), traveler-task
+item metas (`iconAssetName`), crafts itemMap (`iconAssetName`), resources (`icon_asset_name`), creatures
+(`iconAddress`). craftingData.json now KEEPS `iconAssetName` (extract-crafting-data.js updated); map indexes
+now carry `icon` (build-map-index.js updated → rerun both after a game update). Wired into: Market list+detail,
+Inventory cards, Tasks rows, Craft cards, Planner (plan list / raw materials / recipe tree), Map resource list,
+Shopping rows.
+CACHING FIX (important): proxy now serves `/crafting-data` + `/mapassets/*` with ETag revalidation
+(`Cache-Control: no-cache`) instead of `max-age=86400`, so data refreshes reach users immediately (304 when
+unchanged). Client fetches them with `?v=icons1` to bust the OLD 24h-cached copies one time — bump the `v`
+token whenever you need to force-bust client caches again. Skills keep Tabler icons (bitjita skill icons use
+odd glyph filenames).
+
 ## Conventions / guardrails (apply to all of the above)
 - Single-file client; no build step. Validate by extracting the last `<script>` and `node --check`.
 - Any new persisted preference uses `safeSetItem` (never raw `localStorage.setItem`).

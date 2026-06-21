@@ -182,6 +182,18 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// Serve a local file with ETag revalidation: the browser caches it but MUST revalidate, so a data
+// refresh (craftingData/map indexes) reaches users immediately (304 when unchanged = cheap, full
+// download only when the file actually changed). Replaces the old max-age=86400 that served stale data.
+function serveFileCached(req, res, filePath, contentType) {
+  let st;
+  try { st = fs.statSync(filePath); } catch (e) { res.writeHead(404); res.end('Not found'); return; }
+  const etag = '"' + st.size + '-' + Math.floor(st.mtimeMs) + '"';
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'no-cache' }); res.end(); return; }
+  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache', 'ETag': etag });
+  res.end(fs.readFileSync(filePath));
+}
+
 http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
@@ -202,17 +214,15 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Serve local crafting data
-  if (req.url === '/crafting-data') {
+  // Serve local crafting data (ignore any ?v= cache-bust query)
+  if (req.url.split('?')[0] === '/crafting-data') {
     const filePath = path.join(__dirname, 'craftingData.json');
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'craftingData.json not found. Run: node extract-crafting-data.js' }));
       return;
     }
-    const data = fs.readFileSync(filePath);
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=86400' });
-    res.end(data);
+    serveFileCached(req, res, filePath, 'application/json');
     return;
   }
 
@@ -223,8 +233,7 @@ http.createServer((req, res) => {
     if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(name).toLowerCase();
     const types = { '.webp':'image/webp', '.png':'image/png', '.svg':'image/svg+xml', '.json':'application/json', '.geojson':'application/json', '.js':'text/javascript', '.css':'text/css' };
-    res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'max-age=86400' });
-    res.end(fs.readFileSync(filePath));
+    serveFileCached(req, res, filePath, types[ext] || 'application/octet-stream');
     return;
   }
 
