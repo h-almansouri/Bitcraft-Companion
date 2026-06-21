@@ -215,6 +215,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .market-item-tag{font-size:11px;color:var(--text3);margin-top:2px}
 .market-item-right{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
 .market-items-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.5rem;margin-top:.75rem}
+.game-icon{object-fit:contain;flex-shrink:0;border-radius:4px;background:rgba(0,0,0,.18);vertical-align:middle}
 .mkt-hide-btn{background:none;border:none;color:#c07070;cursor:pointer;font-size:15px;line-height:1;padding:3px 5px;border-radius:4px;opacity:0.35;transition:opacity .12s,color .12s,background .12s;flex-shrink:0}
 .market-item-card:hover .mkt-hide-btn,.market-cat-hdr:hover .mkt-hide-btn{opacity:0.8}
 .mkt-hide-btn:hover{color:#fff!important;background:var(--red-light)!important;opacity:1!important}
@@ -1423,9 +1424,9 @@ function inventoryContentHtml(data, q, pfx) {
   if (!allSlots.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
   const filtered = q ? allSlots.filter(s => (s.meta?.name||'').toLowerCase().includes(q) || (s.meta?.tag||'').toLowerCase().includes(q)) : allSlots;
   if (!filtered.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
-  const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card"><div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
+  const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
   if (invViewMode === 'flat') {
-    return `<div class="inv-items-grid">${filtered.sort((a,b)=>b.quantity-a.quantity).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card"><div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
+    return `<div class="inv-items-grid">${filtered.sort((a,b)=>b.quantity-a.quantity).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
   }
   const byLocation = {};
   filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, slots:[]}; byLocation[key].slots.push(s); });
@@ -1597,6 +1598,7 @@ function craftingContentHtml(craftData) {
     }
 
     return `<div class="craft-card">
+      ${gameIconImg(item?.iconAssetName, 28)}
       <div class="craft-card-body">
         <div class="craft-card-name">${escHtml(name)}</div>
         ${!isDone ? `<div class="craft-progress-wrap"><div class="craft-progress active" style="width:${pct}%"></div></div>` : ''}
@@ -2057,6 +2059,7 @@ function renderTasksUI() {
     const statusIcon  = met ? 'ti-circle-check'    : partial ? 'ti-circle-half-2'   : 'ti-circle';
     return `<div style="display:flex;align-items:center;gap:.4rem;padding:.28rem 0;border-bottom:1px solid var(--border)">
       <i class="ti ${statusIcon}" style="color:${statusColor};font-size:13px;flex-shrink:0"></i>
+      ${gameIconImg(meta?.iconAssetName, 18)}
       <span style="font-size:12px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(name)}">${escHtml(name)}</span>
       <span style="font-size:12px;font-weight:600;color:${statusColor};flex-shrink:0;white-space:nowrap;background:rgba(0,0,0,.22);padding:1px 6px;border-radius:4px">${fmtNum(have)}/${fmtNum(needed)}</span>
     </div>`;
@@ -2822,6 +2825,7 @@ function renderMarketResults() {
             const rar = rarityName(it.rarityStr ?? it.rarity);
             const rarBadge = rar ? `<span class="badge ${rarityClass(rar)}">${escHtml(rar)}</span>` : '';
             return `<div class="market-item-card" onclick="openMarketItem(${idx})">
+            ${gameIconImg(it.iconAssetName, 30)}
             <div class="market-item-left">
               <div class="market-item-name">${escHtml(it.name||'Unknown')}</div>
               <div class="market-item-tag">${escHtml(it.tag||'')}</div>
@@ -2925,6 +2929,7 @@ async function loadItemMarket(id, type, name, prefetched) {
     el.innerHTML = `
       <div style="margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem">
         <button class="btn" onclick="backToMarketResults()"><i class="ti ti-arrow-left"></i> Back</button>
+        ${gameIconImg((d.item&&d.item.iconAssetName), 32)}
         <span style="font-size:14px;font-weight:500;color:var(--text)">${escHtml(name)}</span>
         ${regionNote}
       </div>
@@ -5217,6 +5222,21 @@ function itemLabel(meta, itemId, itemType) {
   const name = meta.name || '';
   if (meta.tier && meta.tier > 0) return 'T' + meta.tier + ' - ' + name;
   return name;
+}
+// Real in-game icons: bitjita serves them at https://bitjita.com/<assetName>.webp. We point <img>
+// straight at bitjita (NOT our proxy) so it costs the host nothing, and hide gracefully on a miss.
+const BC_ICON_BASE = 'https://bitjita.com/';
+function gameIconUrl(assetName){
+  if (!assetName) return '';
+  let a = String(assetName).replace(/^\/+/, '');
+  // Some endpoints drop the leading "GeneratedIcons/" (e.g. inventory returns "Items/X"); add it back.
+  if (!a.startsWith('GeneratedIcons')) a = 'GeneratedIcons/' + a;
+  return BC_ICON_BASE + a + '.webp';
+}
+function gameIconImg(assetName, size){
+  if (!assetName) return '';
+  size = size || 26;
+  return `<img class="game-icon" src="${gameIconUrl(assetName)}" loading="lazy" width="${size}" height="${size}" onerror="this.style.display='none'">`;
 }
 function slotContents(slot) {
   // API may return pockets as {itemId,itemType,quantity} or {contents:{itemId,...}}
