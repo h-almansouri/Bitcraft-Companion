@@ -330,6 +330,9 @@ main.planner-mode{max-width:none;padding:1rem}
 .bs-hdr-title{font-size:13px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:.4rem}
 .bs-hdr-title i{color:var(--teal);font-size:15px}
 .bs-hdr-count{font-size:11px;color:var(--text3);background:var(--bg3);padding:2px 8px;border-radius:10px}
+.bs-missing-btn{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:var(--text2);background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:3px 9px;cursor:pointer;transition:background .12s,border-color .12s,color .12s}
+.bs-missing-btn:hover{border-color:var(--teal);color:var(--text)}
+.bs-missing-btn.on{background:var(--teal-dim);border-color:var(--teal);color:var(--teal-light)}
 .bs-section-label{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin:.75rem 0 .35rem;display:flex;align-items:center;gap:.4rem}
 .bs-section-label i{font-size:13px}
 .bs-label-count{background:var(--bg3);border-radius:8px;padding:1px 6px;margin-left:2px}
@@ -676,6 +679,9 @@ let bsChecked = new Set();      // 'g_itemId' or 'c_itemId' for checked building
 let plannerTreeCollapsed = new Set(); // recipe-tree node itemIds collapsed (persisted; remembered per item)
 try { const v = localStorage.getItem('bc_planner_tree_collapsed'); if (v) plannerTreeCollapsed = new Set(JSON.parse(v).map(Number)); } catch(e){}
 function savePlannerTreeCollapsed(){ safeSetItem('bc_planner_tree_collapsed', JSON.stringify([...plannerTreeCollapsed])); }
+let bsShowMissingOnly = false;  // building-steps filter: hide steps already done/have (persisted)
+try { bsShowMissingOnly = localStorage.getItem('bc_bs_missing_only') === '1'; } catch(e){}
+function toggleBsMissingOnly(){ bsShowMissingOnly = !bsShowMissingOnly; try { safeSetItem('bc_bs_missing_only', bsShowMissingOnly?'1':'0'); } catch(e){} renderBuildingSteps(); }
 let tasksTrackedInvs  = new Set(); // Set of inv indices tracked for task material counts (null = all)
 let tasksInvsInited   = false;     // whether tasksTrackedInvs has been restored from localStorage
 let plannerTrackedInvs = null; // Set of inventory indices being tracked (null = not init)
@@ -5169,50 +5175,41 @@ function renderBuildingSteps() {
   const isDone = (key, itemId) => bsChecked.has(key) || haveItem(itemId);
   const checkedCount = [...gather, ...craft].filter(s => isDone((gather.includes(s)?'g_':'c_')+s.itemId, s.itemId)).length;
 
-  let gHtml = '';
-  if (gather.length) {
-    gHtml = `<div class="bs-section-label"><i class="ti ti-antenna" style="color:var(--amber)"></i> GATHER <span class="bs-label-count">${gather.length}</span></div>`;
-    gather.forEach((s, i) => {
-      const key = `g_${s.itemId}`;
+  // "Missing only" hides steps already done (manually checked or covered by inventory).
+  const sectionHtml = (steps, prefix, label, icon, color, verb, isCraft) => {
+    const visible = bsShowMissingOnly ? steps.filter(s => !isDone(`${prefix}_${s.itemId}`, s.itemId)) : steps;
+    if (!visible.length) return '';
+    let h = `<div class="bs-section-label"><i class="ti ${icon}" style="color:${color}"></i> ${label} <span class="bs-label-count">${visible.length}</span></div>`;
+    visible.forEach((s, i) => {
+      const key = `${prefix}_${s.itemId}`;
       const have = haveItem(s.itemId);
       const done = isDone(key, s.itemId);
-      gHtml += `<div class="bs-row${done?' bs-done':''}">
+      const fromLine = isCraft ? `<div class="bs-line2"><span class="bs-from">from</span>${s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ')}</div>` : '';
+      h += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
         <span class="bs-num">${i+1}.</span>
         <div class="bs-body">
-          <div class="bs-line1"><span class="bs-verb">Gather</span>${invAwareChip(s.qty, s.itemId, 'gather')}</div>
+          <div class="bs-line1"><span class="bs-verb">${verb}</span>${invAwareChip(s.qty, s.itemId, isCraft?'craft-out':'gather')}</div>
+          ${fromLine}
         </div>
         ${have?haveBadge:''}
       </div>`;
     });
-  }
-
-  let cHtml = '';
-  if (craft.length) {
-    cHtml = `<div class="bs-section-label"><i class="ti ti-bolt" style="color:var(--teal)"></i> CRAFT <span class="bs-label-count">${craft.length}</span></div>`;
-    craft.forEach((s, i) => {
-      const key = `c_${s.itemId}`;
-      const have = haveItem(s.itemId);
-      const done = isDone(key, s.itemId);
-      const inputChips = s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ');
-      cHtml += `<div class="bs-row${done?' bs-done':''}">
-        <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
-        <span class="bs-num">${i+1}.</span>
-        <div class="bs-body">
-          <div class="bs-line1"><span class="bs-verb">Craft</span>${invAwareChip(s.qty, s.itemId, 'craft-out')}</div>
-          <div class="bs-line2"><span class="bs-from">from</span>${inputChips}</div>
-        </div>
-        ${have?haveBadge:''}
-      </div>`;
-    });
-  }
+    return h;
+  };
+  const gHtml = sectionHtml(gather, 'g', 'GATHER', 'ti-antenna', 'var(--amber)', 'Gather', false);
+  const cHtml = sectionHtml(craft, 'c', 'CRAFT', 'ti-bolt', 'var(--teal)', 'Craft', true);
+  const body = (bsShowMissingOnly && !gHtml && !cHtml)
+    ? `<div class="empty" style="padding:1.25rem"><i class="ti ti-circle-check" style="color:var(--green-light);font-size:1.6rem"></i><span>${(total>0 && checkedCount===total) ? 'All steps complete!' : 'Nothing missing'}</span></div>`
+    : (gHtml + cHtml);
 
   el.innerHTML = `
     <div class="bs-hdr">
       <div class="bs-hdr-title"><i class="ti ti-checklist"></i> Building Steps</div>
+      <button class="bs-missing-btn${bsShowMissingOnly?' on':''}" onclick="toggleBsMissingOnly()" title="Hide steps you've already done or have"><i class="ti ti-${bsShowMissingOnly?'eye-off':'list-check'}"></i> Missing only</button>
       <span class="bs-hdr-count">${checkedCount}/${total}</span>
     </div>
-    ${gHtml}${cHtml}`;
+    ${body}`;
 }
 
 function toggleBsStep(key, cb) {
