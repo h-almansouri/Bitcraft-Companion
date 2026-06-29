@@ -251,7 +251,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .rn-item{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;flex-wrap:wrap}
 .rn-item.rn-root{background:rgba(29,158,117,.06);border-color:var(--teal-dim)}
 .rn-name{flex:1;font-size:13px;font-weight:500;color:var(--text)}
-.rn-qty{font-size:11px;color:var(--teal-light);font-weight:600;background:var(--bg4);padding:2px 8px;border-radius:10px;white-space:nowrap}
+.rn-qty{font-size:12px;color:#0c1a18;font-weight:800;background:var(--teal-light);padding:2px 9px;border-radius:10px;white-space:nowrap;box-shadow:0 0 0 1px var(--teal)}
 .rn-skill{font-size:10px;color:var(--text3)}
 .rn-raw{display:flex;align-items:center;gap:.4rem;padding:.3rem .6rem;background:var(--bg4);border-radius:4px;font-size:12px;color:var(--text2);margin-bottom:.25rem}
 .rn-raw i{color:var(--text3);font-size:12px}
@@ -338,6 +338,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .bs-row:hover{background:var(--bg3)}
 .bs-row input[type=checkbox]{accent-color:var(--teal);width:14px;height:14px;cursor:pointer;flex-shrink:0;margin-top:3px}
 .bs-row.bs-done .bs-body{opacity:.38;text-decoration:line-through}
+.bs-have{margin-left:auto;align-self:center;flex-shrink:0;font-size:10px;font-weight:700;color:var(--green-light);background:rgba(99,153,34,.16);border:1px solid rgba(99,153,34,.4);padding:1px 7px;border-radius:9px;text-transform:uppercase;letter-spacing:.04em}
 .bs-num{font-size:11px;color:var(--text3);min-width:22px;text-align:right;flex-shrink:0;padding-top:2px}
 .bs-body{flex:1;display:flex;flex-direction:column;gap:3px}
 .bs-line1{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}
@@ -672,6 +673,9 @@ let plannerPlan = [];      // [{itemId, qty}]
 let plannerSelId = null;   // currently selected item id in left panel
 let plannerSelRecipe = {}; // itemId -> recipeId overrides
 let bsChecked = new Set();      // 'g_itemId' or 'c_itemId' for checked building steps
+let plannerTreeCollapsed = new Set(); // recipe-tree node itemIds collapsed (persisted; remembered per item)
+try { const v = localStorage.getItem('bc_planner_tree_collapsed'); if (v) plannerTreeCollapsed = new Set(JSON.parse(v).map(Number)); } catch(e){}
+function savePlannerTreeCollapsed(){ safeSetItem('bc_planner_tree_collapsed', JSON.stringify([...plannerTreeCollapsed])); }
 let tasksTrackedInvs  = new Set(); // Set of inv indices tracked for task material counts (null = all)
 let tasksInvsInited   = false;     // whether tasksTrackedInvs has been restored from localStorage
 let plannerTrackedInvs = null; // Set of inventory indices being tracked (null = not init)
@@ -4559,12 +4563,13 @@ function buildRecipeTreeHTML(itemId, qty, visited, depth) {
   }
 
   const hasKids    = !!childHtml;
+  const collapsed  = hasKids && plannerTreeCollapsed.has(itemId);
   const itemCls    = `rn-item${depth === 0 ? ' rn-root' : ''}${hasKids ? ' rn-has-children' : ''}`;
   const clickAttr  = hasKids ? ' onclick="plannerToggleRn(this)"' : '';
-  const chevron    = hasKids ? '<i class="ti ti-chevron-down rn-chevron"></i>' : '';
+  const chevron    = hasKids ? `<i class="ti ti-chevron-down rn-chevron"${collapsed?' style="transform:rotate(-90deg)"':''}></i>` : '';
 
   return `<div class="rn">
-    <div class="${itemCls}"${clickAttr}>
+    <div class="${itemCls}"${clickAttr} data-item="${itemId}">
       ${chevron}
       ${gameIconImg(item?.iconAssetName,18)}
       <span class="rn-name">${name}</span>
@@ -4573,7 +4578,7 @@ function buildRecipeTreeHTML(itemId, qty, visited, depth) {
       ${skill && depth === 0 ? `<span class="rn-skill" style="color:var(--teal-light)">${escHtml(skill.name)} Lv${recipe.skillLevel}</span>` : ''}
       ${selHtml}
     </div>
-    ${hasKids ? `<div class="rn-children">${childHtml}</div>` : ''}
+    ${hasKids ? `<div class="rn-children"${collapsed?' style="display:none"':''}>${childHtml}</div>` : ''}
   </div>`;
 }
 
@@ -4595,6 +4600,9 @@ function plannerToggleRn(header) {
   children.style.display = collapsed ? '' : 'none';
   const chevron = header.querySelector('.rn-chevron');
   if (chevron) chevron.style.transform = collapsed ? '' : 'rotate(-90deg)';
+  // Persist per item id so the state is remembered when re-opening this (or any) item's tree.
+  const id = +header.dataset.item;
+  if (id) { if (collapsed) plannerTreeCollapsed.delete(id); else plannerTreeCollapsed.add(id); savePlannerTreeCollapsed(); }
 }
 
 function plannerExpandAll() {
@@ -4602,6 +4610,7 @@ function plannerExpandAll() {
   if (!panel) return;
   panel.querySelectorAll('.rn-children').forEach(el => { el.style.display = ''; });
   panel.querySelectorAll('.rn-chevron').forEach(el => { el.style.transform = ''; });
+  plannerTreeCollapsed.clear(); savePlannerTreeCollapsed();
 }
 
 function plannerCollapseAll() {
@@ -4609,6 +4618,9 @@ function plannerCollapseAll() {
   if (!panel) return;
   panel.querySelectorAll('.rn-children').forEach(el => { el.style.display = 'none'; });
   panel.querySelectorAll('.rn-chevron').forEach(el => { el.style.transform = 'rotate(-90deg)'; });
+  // Remember every collapsible node (with children) as collapsed.
+  panel.querySelectorAll('.rn-item.rn-has-children[data-item]').forEach(el => { const id = +el.dataset.item; if (id) plannerTreeCollapsed.add(id); });
+  savePlannerTreeCollapsed();
 }
 
 // ── Plan persistence ──
@@ -5112,6 +5124,31 @@ function buildBuildingSteps() {
   return {gather, craft};
 }
 
+// Inventory-aware net requirements (MRP-style): walks the plan consuming tracked inventory as a pool.
+// Any item whose demand is fully covered by inventory (directly, or because everything that needs it is
+// covered) never lands in `net` — so its build step (and the steps that feed it) can be auto-checked.
+function computeNetNeeds() {
+  const pool = {...plannerInvMap}; // consumable copy of on-hand quantities (crafting-data id keyed)
+  const net = {};
+  function need(itemId, qty, vis) {
+    if (qty <= 0) return;
+    const have = pool[itemId] || 0;
+    const use = Math.min(have, qty);
+    pool[itemId] = have - use;
+    const remaining = qty - use;
+    if (remaining <= 0) return;            // covered by inventory → not needed (and don't explode inputs)
+    net[itemId] = (net[itemId] || 0) + remaining;
+    const recipe = plannerBestRecipe(itemId);
+    if (!recipe || vis.has(itemId)) return; // leaf, or cycle guard
+    const outEntry = recipe.outputs.find(o => o.itemId === itemId) || {quantity: 1};
+    const mult = Math.ceil(remaining / outEntry.quantity);
+    const nv = new Set(vis).add(itemId);
+    recipe.inputs.forEach(inp => need(inp.itemId, inp.quantity * mult, nv));
+  }
+  plannerPlan.forEach(p => need(p.itemId, p.qty, new Set()));
+  return net;
+}
+
 function renderBuildingSteps() {
   const el = document.getElementById('planner-building-steps');
   if (!el) return;
@@ -5122,23 +5159,30 @@ function renderBuildingSteps() {
 
   const {gather, craft} = buildBuildingSteps();
   const total = gather.length + craft.length;
-  const checkedCount = [...bsChecked].filter(k => {
-    const [t, id] = k.split('_');
-    return (t==='g' && gather.some(s=>String(s.itemId)===id)) || (t==='c' && craft.some(s=>String(s.itemId)===id));
-  }).length;
+  // Inventory-aware: a step whose item is fully covered by tracked inventory (or only feeds covered
+  // items) is auto-completed — you already have it / don't need to make it.
+  computePlannerInvMap();
+  const net = computeNetNeeds();
+  const invActive = Object.keys(plannerInvMap).length > 0;
+  const haveItem = id => invActive && !net[id];
+  const haveBadge = '<span class="bs-have" title="Covered by your tracked inventory">have</span>';
+  const isDone = (key, itemId) => bsChecked.has(key) || haveItem(itemId);
+  const checkedCount = [...gather, ...craft].filter(s => isDone((gather.includes(s)?'g_':'c_')+s.itemId, s.itemId)).length;
 
   let gHtml = '';
   if (gather.length) {
     gHtml = `<div class="bs-section-label"><i class="ti ti-antenna" style="color:var(--amber)"></i> GATHER <span class="bs-label-count">${gather.length}</span></div>`;
     gather.forEach((s, i) => {
       const key = `g_${s.itemId}`;
-      const done = bsChecked.has(key);
+      const have = haveItem(s.itemId);
+      const done = isDone(key, s.itemId);
       gHtml += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
         <span class="bs-num">${i+1}.</span>
         <div class="bs-body">
           <div class="bs-line1"><span class="bs-verb">Gather</span>${invAwareChip(s.qty, s.itemId, 'gather')}</div>
         </div>
+        ${have?haveBadge:''}
       </div>`;
     });
   }
@@ -5148,7 +5192,8 @@ function renderBuildingSteps() {
     cHtml = `<div class="bs-section-label"><i class="ti ti-bolt" style="color:var(--teal)"></i> CRAFT <span class="bs-label-count">${craft.length}</span></div>`;
     craft.forEach((s, i) => {
       const key = `c_${s.itemId}`;
-      const done = bsChecked.has(key);
+      const have = haveItem(s.itemId);
+      const done = isDone(key, s.itemId);
       const inputChips = s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ');
       cHtml += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
@@ -5157,6 +5202,7 @@ function renderBuildingSteps() {
           <div class="bs-line1"><span class="bs-verb">Craft</span>${invAwareChip(s.qty, s.itemId, 'craft-out')}</div>
           <div class="bs-line2"><span class="bs-from">from</span>${inputChips}</div>
         </div>
+        ${have?haveBadge:''}
       </div>`;
     });
   }
