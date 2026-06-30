@@ -343,6 +343,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .bs-row.bs-done .bs-body{opacity:.38;text-decoration:line-through}
 .bs-have{margin-left:auto;align-self:center;flex-shrink:0;font-size:10px;font-weight:700;color:var(--green-light);background:rgba(99,153,34,.16);border:1px solid rgba(99,153,34,.4);padding:1px 7px;border-radius:9px;text-transform:uppercase;letter-spacing:.04em}
 .bs-have.bs-covered{color:var(--text2);background:rgba(120,130,150,.16);border-color:rgba(120,130,150,.4)}
+.bs-have.bs-manual{color:var(--teal-light);background:var(--teal-dim);border-color:var(--teal)}
 .bs-num{font-size:11px;color:var(--text3);min-width:22px;text-align:right;flex-shrink:0;padding-top:2px}
 .bs-body{flex:1;display:flex;flex-direction:column;gap:3px}
 .bs-line1{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}
@@ -5177,6 +5178,7 @@ function renderBuildingSteps() {
   const haveSelf = (id, qty) => invActive && (plannerInvMap[id] || 0) >= qty;
   const haveBadge = '<span class="bs-have" title="You already have enough of this item">have</span>';
   const coveredBadge = '<span class="bs-have bs-covered" title="Not needed — covered by something further along that you already have">not needed</span>';
+  const doneBadge = '<span class="bs-have bs-manual" title="You ticked this step off manually">done</span>';
   const isDone = (key, itemId) => bsChecked.has(key) || notNeeded(itemId);
   const checkedCount = [...gather, ...craft].filter(s => isDone((gather.includes(s)?'g_':'c_')+s.itemId, s.itemId)).length;
 
@@ -5193,7 +5195,7 @@ function renderBuildingSteps() {
       // Covered-but-not-held: drop the misleading partial-have coloring (you don't have this item —
       // it's just not needed because you have what it feeds).
       const chip = invAwareChip(s.qty, s.itemId, isCraft?'craft-out':'gather', covered && !self);
-      const badge = self ? haveBadge : (covered ? coveredBadge : '');
+      const badge = self ? haveBadge : (covered ? coveredBadge : (bsChecked.has(key) ? doneBadge : ''));
       const fromLine = isCraft ? `<div class="bs-line2"><span class="bs-from">from</span>${s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ')}</div>` : '';
       h += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
