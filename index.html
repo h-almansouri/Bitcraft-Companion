@@ -342,6 +342,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .bs-row input[type=checkbox]{accent-color:var(--teal);width:14px;height:14px;cursor:pointer;flex-shrink:0;margin-top:3px}
 .bs-row.bs-done .bs-body{opacity:.38;text-decoration:line-through}
 .bs-have{margin-left:auto;align-self:center;flex-shrink:0;font-size:10px;font-weight:700;color:var(--green-light);background:rgba(99,153,34,.16);border:1px solid rgba(99,153,34,.4);padding:1px 7px;border-radius:9px;text-transform:uppercase;letter-spacing:.04em}
+.bs-have.bs-covered{color:var(--text2);background:rgba(120,130,150,.16);border-color:rgba(120,130,150,.4)}
 .bs-num{font-size:11px;color:var(--text3);min-width:22px;text-align:right;flex-shrink:0;padding-top:2px}
 .bs-body{flex:1;display:flex;flex-direction:column;gap:3px}
 .bs-line1{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}
@@ -5044,12 +5045,12 @@ function toggleAllPlannerInvs(all) {
   renderBuildingSteps();
 }
 
-function invAwareChip(qty, itemId, extraCls) {
+function invAwareChip(qty, itemId, extraCls, plain) {
   const id = +itemId;
   const item = craftingData.itemsById[id];
   const name = item ? escHtml(item.name) : `Item ${id}`;
   const have = plannerInvMap[id] || 0;
-  const hasInv = Object.keys(plannerInvMap).length > 0;
+  const hasInv = !plain && Object.keys(plannerInvMap).length > 0;
   let invCls = '', tag = '';
   if (hasInv) {
     if (have >= qty)      { invCls = ' inv-have';    tag = `<span class="inv-tag have">${fmtCount(have)}</span>`; }
@@ -5170,9 +5171,13 @@ function renderBuildingSteps() {
   computePlannerInvMap();
   const net = computeNetNeeds();
   const invActive = Object.keys(plannerInvMap).length > 0;
-  const haveItem = id => invActive && !net[id];
-  const haveBadge = '<span class="bs-have" title="Covered by your tracked inventory">have</span>';
-  const isDone = (key, itemId) => bsChecked.has(key) || haveItem(itemId);
+  // "not needed" = item isn't required at all after netting inventory (you have it, OR you have a
+  // downstream item it would feed into). "have self" = you specifically hold enough of THIS item.
+  const notNeeded = id => invActive && !net[id];
+  const haveSelf = (id, qty) => invActive && (plannerInvMap[id] || 0) >= qty;
+  const haveBadge = '<span class="bs-have" title="You already have enough of this item">have</span>';
+  const coveredBadge = '<span class="bs-have bs-covered" title="Not needed — covered by something further along that you already have">not needed</span>';
+  const isDone = (key, itemId) => bsChecked.has(key) || notNeeded(itemId);
   const checkedCount = [...gather, ...craft].filter(s => isDone((gather.includes(s)?'g_':'c_')+s.itemId, s.itemId)).length;
 
   // "Missing only" hides steps already done (manually checked or covered by inventory).
@@ -5182,17 +5187,22 @@ function renderBuildingSteps() {
     let h = `<div class="bs-section-label"><i class="ti ${icon}" style="color:${color}"></i> ${label} <span class="bs-label-count">${visible.length}</span></div>`;
     visible.forEach((s, i) => {
       const key = `${prefix}_${s.itemId}`;
-      const have = haveItem(s.itemId);
+      const covered = notNeeded(s.itemId);
+      const self = haveSelf(s.itemId, s.qty);
       const done = isDone(key, s.itemId);
+      // Covered-but-not-held: drop the misleading partial-have coloring (you don't have this item —
+      // it's just not needed because you have what it feeds).
+      const chip = invAwareChip(s.qty, s.itemId, isCraft?'craft-out':'gather', covered && !self);
+      const badge = self ? haveBadge : (covered ? coveredBadge : '');
       const fromLine = isCraft ? `<div class="bs-line2"><span class="bs-from">from</span>${s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ')}</div>` : '';
       h += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
         <span class="bs-num">${i+1}.</span>
         <div class="bs-body">
-          <div class="bs-line1"><span class="bs-verb">${verb}</span>${invAwareChip(s.qty, s.itemId, isCraft?'craft-out':'gather')}</div>
+          <div class="bs-line1"><span class="bs-verb">${verb}</span>${chip}</div>
           ${fromLine}
         </div>
-        ${have?haveBadge:''}
+        ${badge}
       </div>`;
     });
     return h;
