@@ -1329,7 +1329,7 @@ function stopAllLive() {
 }
 
 function updateLiveBtns() {
-  ['inventory', 'tasks', 'planner', 'shopping'].forEach(tab => {
+  ['inventory', 'crafting', 'tasks', 'planner', 'shopping'].forEach(tab => {
     const btn = document.getElementById('live-btn-' + tab);
     if (!btn) return;
     const on = isTabLive(tab);
