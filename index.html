@@ -165,15 +165,14 @@ main.planner-mode{max-width:none;padding:1rem}
 .tool-grid-row{display:grid;grid-template-columns:70px repeat(5,1fr);gap:6px;align-items:stretch}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
 .tool-per{color:var(--text3);font-weight:500;margin-left:3px;text-transform:none}
-.tool-tier-cell{display:flex;align-items:center;justify-content:center;border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;background:var(--bg3)}
-.tool-tier-badge{font-size:14px;font-weight:800;color:var(--tc,var(--text))}
-.tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:9px 6px}
+.tool-tier-cell{display:flex;align-items:center;justify-content:center;border:1px solid var(--tc,var(--border));border-left:4px solid var(--tc,var(--border));border-radius:8px;background:var(--tcbg,var(--bg3))}
+.tool-tier-badge{font-size:15px;font-weight:800;color:var(--tc,var(--text))}
+.tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--tcbg,var(--bg3));border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;padding:9px 6px}
 .tool-have{font-size:15px;font-weight:700;color:var(--text)}
 .tool-cell.tool-ok .tool-have{color:var(--green-light)}
 .tool-cell.tool-low .tool-have{color:var(--amber-light)}
-.tool-cell.tool-zero{opacity:.5}
+.tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
-.tool-cell.tool-tools{background:var(--bg4)}
 .tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
 @media(max-width:720px){.tool-grid-row{grid-template-columns:44px repeat(5,1fr);gap:4px}.tool-cell{flex-direction:column;gap:2px;padding:6px 2px}.tool-hcell{font-size:9px}.tool-have{font-size:13px}}
 
@@ -1287,21 +1286,23 @@ function xpIntoLevel(xp) {
   return xp - floor;
 }
 
-// ── SKILL TIERS / COLORS ──  Tier 1 = levels 1-20 (grey); each 10 levels above 20 is the next tier.
-// Array is indexed by tier number (index 0 is an unused fallback), so TIER_COLORS[1] == Tier 1.
+// ── SKILL / MATERIAL TIER COLORS ──  Colors mirror the in-game ingot metal for each tier
+// (Ferralith→Astralite). Very dark metals (Umbracite) are lightened for visibility on the dark UI —
+// hue is kept faithful, only lightness is adjusted. Indexed by tier number (index 0 = fallback).
+// Skill tiers: T1 = levels 1-20, then each +10 levels is the next tier.
 const TIER_COLORS = [
-  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // (fallback)  grey
-  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // T1  (1-20)    grey
-  {c:'#4ac26b', bg:'rgba(74,194,107,.15)'},   // T2  (21-30)   green
-  {c:'#1fc7c7', bg:'rgba(31,199,199,.15)'},   // T3  (31-40)   teal
-  {c:'#4c8dff', bg:'rgba(76,141,255,.16)'},   // T4  (41-50)   blue
-  {c:'#8a5cff', bg:'rgba(138,92,255,.17)'},   // T5  (51-60)   violet
-  {c:'#c85cff', bg:'rgba(200,92,255,.17)'},   // T6  (61-70)   magenta
-  {c:'#ff5cae', bg:'rgba(255,92,174,.17)'},   // T7  (71-80)   pink
-  {c:'#ff5c5c', bg:'rgba(255,92,92,.17)'},    // T8  (81-90)   red
-  {c:'#ff8f3b', bg:'rgba(255,143,59,.18)'},   // T9  (91-100)  orange
-  {c:'#ffc933', bg:'rgba(255,201,51,.18)'},   // T10 (101-110) amber
-  {c:'#ffe873', bg:'rgba(255,232,115,.20)'},  // T11 (111+)    gold
+  {c:'#9aa4b2', bg:'rgba(154,164,178,.12)'},  // (fallback)
+  {c:'#b46a5e', bg:'rgba(180,106,94,.15)'},   // T1  Ferralith  brick/rust
+  {c:'#d5904f', bg:'rgba(213,144,79,.15)'},   // T2  Pyrelite   copper
+  {c:'#6cc84a', bg:'rgba(108,200,74,.15)'},   // T3  Emarium    green
+  {c:'#4fa0c4', bg:'rgba(79,160,196,.15)'},   // T4  Elenvar    steel teal
+  {c:'#6f5cf0', bg:'rgba(111,92,240,.17)'},   // T5  Luminite   indigo
+  {c:'#e0463c', bg:'rgba(224,70,60,.16)'},    // T6  Rathium    red
+  {c:'#e0c33f', bg:'rgba(224,195,63,.16)'},   // T7  Aurumite   gold
+  {c:'#57cfa6', bg:'rgba(87,207,166,.15)'},   // T8  Celestium  mint/seafoam
+  {c:'#8f8aa6', bg:'rgba(143,138,166,.17)'},  // T9  Umbracite  shadow slate (lightened)
+  {c:'#a9cdf0', bg:'rgba(169,205,240,.17)'},  // T10 Astralite  pale sky
+  {c:'#d9e6ff', bg:'rgba(217,230,255,.18)'},  // T11+           beyond Astralite
 ];
 function tierInfo(level){
   level = level || 0;
@@ -5383,15 +5384,15 @@ async function renderToolCrafting(){
   </div>`;
   const rows = [];
   for (let t=1; t<=10; t++){
-    const tc = (TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1]).c;
+    const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
     const cells = TOOL_COLS.map(c => {
       const nm = c.name(t), h = have(nm);
       const cls = h===0 ? 'tool-zero' : (h>=c.per ? 'tool-ok' : 'tool-low');
       return `<div class="tool-cell ${cls}" title="${escHtml(nm)} — need ${c.per} per tool">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
-    rows.push(`<div class="tool-grid-row">
-      <div class="tool-tier-cell" style="--tc:${tc}"><span class="tool-tier-badge">T${t}</span></div>
+    rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
+      <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
     </div>`);
