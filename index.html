@@ -6097,25 +6097,36 @@ function handleLiveMessage(m){
   if (ch.indexOf('stamina_state') === 0) onLiveStamina(String(id), data);
   else if (ch.indexOf('experience_state') === 0) onLiveExperience(String(id), data);
 }
+// The live feed carries CURRENT stamina (a float that drains as you act); max stamina isn't in it,
+// so we read the true max from the REST stats endpoint (values[1]) and cache it per player.
+let liveStaminaMax = {};   // entityId -> { max, ts }
+function ensureStaminaMax(id){
+  const c = liveStaminaMax[id];
+  if (c && (Date.now() - c.ts) < 300000) return;   // fresh enough
+  apiFetch(`/api/players/${id}/stats`).then(d => {
+    const m = (d.stats && d.stats.values) ? liveNum(d.stats.values[1]) : null;
+    if (m != null) liveStaminaMax[id] = { max: m, ts: Date.now() };
+  }).catch(()=>{});
+}
 function onLiveStamina(id, data){
   if (!data || typeof data !== 'object') return;
-  const cur = liveNum(data.stamina ?? data.current ?? data.currentStamina ?? data.current_stamina ?? data.value);
-  const max = liveNum(data.maxStamina ?? data.max ?? data.max_stamina);
+  const cur = liveNum(data.stamina ?? data.current ?? data.value);
   if (cur == null) return;
-  const prev = liveStamina[id] || {};
-  liveStamina[id] = { current: cur, max: (max != null ? max : prev.max) };
+  ensureStaminaMax(id);
+  const max = liveStaminaMax[id] ? liveStaminaMax[id].max : null;
+  liveStamina[id] = { current: cur, max };
   loadAlerts();
   const t = alertSettings.types.stamina;
-  if (!(t && t.on && alertSettings.master) || isPlayerPaused(id) || !isPlayerTracked(id)) return;
+  if (!(t && t.on && alertSettings.master) || isPlayerPaused(id) || !isPlayerTracked(id) || max == null) return;
   const st = alertState[id] || (alertState[id] = {});
-  let ceiling = liveStamina[id].max;
-  if (ceiling == null){ st.stamRunMax = Math.max(st.stamRunMax || 0, cur); ceiling = st.stamRunMax; }
-  if (cur < ceiling) st.liveStamBelow = true;
-  else if (st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); }
+  if (cur < max - 1) st.liveStamBelow = true;                 // dipped below full
+  else if (st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to max
 }
 function onLiveExperience(id, data){
   const store = skillsByPlayer[id]; if (!store || !store.skills) return;
-  const rows = Array.isArray(data) ? data : (Array.isArray(data.experience) ? data.experience : (Array.isArray(data.stacks) ? data.stacks : [data]));
+  const rows = Array.isArray(data) ? data
+    : (Array.isArray(data.experience_stacks) ? data.experience_stacks
+    : (Array.isArray(data.experience) ? data.experience : [data]));
   const changed = [];
   rows.forEach(r => {
     if (!r || typeof r !== 'object') return;
