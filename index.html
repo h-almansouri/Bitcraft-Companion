@@ -1593,7 +1593,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
 // ── LIVE REFRESH ──
 let liveRefreshId = null;
 const tabLiveIds = {};   // user-controlled per-tab live refresh
-const REFRESH_MS = {skills:60000, inventory:30000, crafting:30000, tasks:15000};
+const REFRESH_MS = {skills:10000, inventory:30000, crafting:10000, tasks:10000};
 function startLiveRefresh(tab) {
   stopLiveRefresh();
   const ms = REFRESH_MS[tab];
@@ -1993,7 +1993,8 @@ async function renderCraftingTab(silent) {
     fillPlayerCraftCached(p.entityId);
   }));
   if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
-  startLiveRefresh('crafting');
+  // Crafts auto-refresh is gated by the Live button (toggleTabLive) only — no always-on refresh here,
+  // so "Live off" means manual (Refresh button) and "Live on" polls at REFRESH_MS.crafting.
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
