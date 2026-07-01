@@ -7,6 +7,13 @@ const PORT = process.env.PORT || 3000;
 const TARGET = 'bitjita.com';
 const DATA_DIR = path.join(__dirname, 'data');
 
+// Safety net: never let a single async hiccup take down the whole service. Node 18+ EXITS the
+// process on an unhandled promise rejection (and on an uncaught exception), which on a host like
+// Render turns one transient error — a client aborting a proxied stream, a rejected upstream fetch —
+// into a crash/restart loop (the "waking up" page that never resolves). Log and keep serving.
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', (e && e.stack) || e));
+process.on('uncaughtException',  (e) => console.error('[uncaughtException]',  (e && e.stack) || e));
+
 // ────────────────────────────────────────────────────────────────────────────
 // Tier 1 backend: in-memory caches + server-side deal precompute + prefs storage.
 // The server now does the heavy lifting (one shared market fetch, one shared item-detail cache, and
@@ -195,6 +202,7 @@ function serveFileCached(req, res, filePath, contentType) {
 }
 
 http.createServer((req, res) => {
+  res.on('error', () => {}); // client aborted mid-response (common under bursty load) — ignore, don't crash
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -353,9 +361,9 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log(`Bitcraft proxy running on http://localhost:${PORT}`);
   // Warm the caches and compute deals shortly after startup (don't block listen).
-  setTimeout(() => { getMarketList().then(() => computeDeals()); }, 500);
-  setInterval(() => { getMarketList(true); }, MARKET_TTL);
-  setInterval(maybeComputeDeals, 60 * 1000);
+  setTimeout(() => { getMarketList().then(() => computeDeals()).catch(e => console.error('[warm]', e && e.message)); }, 500);
+  setInterval(() => { getMarketList(true).catch(() => {}); }, MARKET_TTL);
+  setInterval(() => { try { maybeComputeDeals(); } catch (e) {} }, 60 * 1000);
   // Flush accumulated price-history snapshots to disk periodically (not on every record).
   setInterval(() => { if (historyDirty) { try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(HISTORY_FILE, JSON.stringify(history)); historyDirty = false; } catch (e) {} } }, 60 * 1000);
 });
