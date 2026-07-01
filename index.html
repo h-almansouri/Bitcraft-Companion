@@ -1257,17 +1257,17 @@ function xpIntoLevel(xp) {
 
 // ── SKILL TIERS / COLORS ──  tier = floor(level/10) (Lv39 -> T3, next tier at Lv40)
 const TIER_COLORS = [
-  {c:'#8a94a6', bg:'rgba(138,148,166,.07)'},  // T0  (1-9)
-  {c:'#6a8cc7', bg:'rgba(106,140,199,.09)'},  // T1  (10-19)
-  {c:'#6f77d6', bg:'rgba(111,119,214,.10)'},  // T2
-  {c:'#8a6fd6', bg:'rgba(138,111,214,.10)'},  // T3
-  {c:'#a86fd6', bg:'rgba(168,111,214,.11)'},  // T4
-  {c:'#c76fc0', bg:'rgba(199,111,192,.11)'},  // T5
-  {c:'#d16f9c', bg:'rgba(209,111,156,.12)'},  // T6
-  {c:'#d67373', bg:'rgba(214,115,115,.12)'},  // T7
-  {c:'#d68a5b', bg:'rgba(214,138,91,.12)'},   // T8
-  {c:'#d6b45b', bg:'rgba(214,180,91,.13)'},   // T9
-  {c:'#ffd75e', bg:'rgba(255,215,94,.14)'},   // T10 (100+)
+  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // T0  (1-9)   grey
+  {c:'#4ac26b', bg:'rgba(74,194,107,.15)'},   // T1  (10-19) green
+  {c:'#1fc7c7', bg:'rgba(31,199,199,.15)'},   // T2         teal
+  {c:'#4c8dff', bg:'rgba(76,141,255,.16)'},   // T3         blue
+  {c:'#8a5cff', bg:'rgba(138,92,255,.17)'},   // T4         violet
+  {c:'#c85cff', bg:'rgba(200,92,255,.17)'},   // T5         magenta
+  {c:'#ff5cae', bg:'rgba(255,92,174,.17)'},   // T6         pink
+  {c:'#ff5c5c', bg:'rgba(255,92,92,.17)'},    // T7         red
+  {c:'#ff8f3b', bg:'rgba(255,143,59,.18)'},   // T8         orange
+  {c:'#ffc933', bg:'rgba(255,201,51,.18)'},   // T9         amber
+  {c:'#ffe873', bg:'rgba(255,232,115,.20)'},  // T10 (100+) gold
 ];
 function tierInfo(level){ const t = Math.max(0, Math.min(TIER_COLORS.length-1, Math.floor((level||0)/10))); return {t, c:TIER_COLORS[t].c, bg:TIER_COLORS[t].bg}; }
 
@@ -1308,6 +1308,7 @@ function saveSkillCalcPrefs(){ safeSetItem('bc_skill_calc', JSON.stringify(skill
 // ── SKILL CALCULATOR ("journey") PANEL ──
 function openSkillJourney(entityId, skillId){
   entityId = String(entityId);
+  if (openJourney[entityId] === skillId){ closeSkillJourney(entityId); return; } // click same skill again = close
   openJourney[entityId] = skillId;
   renderJourney(entityId);
   const el = document.getElementById('sj-' + entityId);
