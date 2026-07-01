@@ -5887,16 +5887,21 @@ function slotContents(slot) {
 // beneficial), a passive craft finishes, or a player goes idle. Each alert has its own on/off + sound,
 // with a shared master toggle and volume. (Stamina isn't exposed by the game API, so it's not offered.)
 // ══════════════════════════════════════════════════════════════════════════
+// Player /stats returns a bare array indexed by stat id (confirmed against bitjita's stats page +
+// buff stat ids): 0 = Health, 1 = Stamina, 8 = Cooldown, 13 = Evasion, 15 = Crafting, 16 = Gathering…
+const STAT_IDX = { health:0, stamina:1 };
 const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
   types: {
     buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
+    stamina:   { on:false, sound:'coin' },
     craftDone: { on:false, sound:'ding' },
     idle:      { on:false, sound:'alarm', seconds:60 },
   }
 };
 const ALERT_META = {
   buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff' },
+  stamina:   { label:'Max stamina',          icon:'ti-bolt',      desc:'A player’s stamina refills to full' },
   craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes' },
   idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving' },
 };
@@ -5980,6 +5985,17 @@ async function alertsTick(){
         if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
         st.buffs = cur;
       }
+      if (T.stamina.on){
+        const d = await apiFetch(`/api/players/${id}/stats`);
+        const v = d.stats && d.stats.values;
+        const cur = v ? v[STAT_IDX.stamina] : undefined;
+        if (typeof cur === 'number'){
+          if (st.stamMax == null) st.stamMax = cur;      // baseline (don't fire on first sight)
+          if (cur > st.stamMax) st.stamMax = cur;        // max grew (level/gear) → track upward
+          if (cur < st.stamMax) st.stamBelow = true;     // dipped below full
+          else if (st.stamBelow){ st.stamBelow = false; fireAlert('stamina', `${playerName(p)} — stamina full`); } // refilled to full
+        }
+      }
       if (T.idle.on){
         const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
         const now = Date.now();
@@ -6032,7 +6048,7 @@ function renderAlerts(){
         <label class="al-toggle al-master"><input type="checkbox" ${alertSettings.master?'checked':''} onchange="toggleAlertMaster(this.checked)"> <i class="ti ti-bell"></i> <b>Sound alerts</b></label>
         <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="playAlertSound('chime')">Test</button></div>
       </div>
-      <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina isn't available</b> from the game API, so it can't be alerted on yet.</div>
+      <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full (read from the game's stats API); if it never seems to trigger, the API may only report resting/max values for that player.</div>
       <div class="al-list">
         ${Object.keys(ALERT_META).map(typeRow).join('')}
       </div>
