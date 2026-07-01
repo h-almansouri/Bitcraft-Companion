@@ -162,8 +162,9 @@ main.planner-mode{max-width:none;padding:1rem}
 .task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
 /* tool crafting grid */
 .tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
-.tool-grid-row{display:grid;grid-template-columns:64px repeat(6,1fr);gap:6px;align-items:stretch}
+.tool-grid-row{display:grid;grid-template-columns:56px repeat(7,1fr);gap:6px;align-items:stretch}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
+.tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
 .tool-per{color:var(--text3);font-weight:500;margin-left:3px;text-transform:none}
 .tool-tier-cell{display:flex;align-items:center;justify-content:center;border:1px solid var(--tc,var(--border));border-left:4px solid var(--tc,var(--border));border-radius:8px;background:var(--tcbg,var(--bg3))}
@@ -175,23 +176,25 @@ main.planner-mode{max-width:none;padding:1rem}
 .tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
 .tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
-@media(max-width:720px){.tool-grid-row{grid-template-columns:38px repeat(6,1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:6px 2px}.tool-hcell{font-size:8px}.tool-have{font-size:12px}}
+@media(max-width:720px){.tool-grid-row{grid-template-columns:32px repeat(7,1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
 /* reroll / upgrade calculator */
 .tool-calc{margin-top:1.5rem;border:1px solid var(--border2);border-radius:10px;background:var(--bg2);padding:1rem}
 .tool-calc-hdr{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem}
 .tool-calc-hdr i{color:var(--teal-light)}
 .tc-wip{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--amber-light);background:rgba(186,117,23,.15);border:1px solid rgba(186,117,23,.4);border-radius:6px;padding:1px 6px}
-.tc-shared{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-bottom:.8rem}
-.tc-cols{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
-@media(max-width:640px){.tc-cols{grid-template-columns:1fr}.tc-shared{grid-template-columns:1fr}}
-.tc-col{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.75rem}
-.tc-col-title{font-size:12px;font-weight:700;display:flex;align-items:center;gap:.4rem;margin-bottom:.65rem}
-.tc-field{margin-bottom:.5rem}
 .tc-field label{display:block;font-size:10px;color:var(--text3);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.03em}
-.tc-res{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:2px 0;color:var(--text2)}
-.tc-res b{color:var(--text);font-weight:700}
-.tc-res.tc-profit{border-top:1px solid var(--border);margin-top:.3rem;padding-top:.45rem;font-size:13px}
-.tc-winner{margin-top:.85rem;text-align:center;font-weight:700;color:var(--text);background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:.55rem;display:flex;align-items:center;justify-content:center;gap:.4rem}
+.tc2-controls{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:.9rem}
+@media(max-width:640px){.tc2-controls{grid-template-columns:1fr}}
+.tc2-result{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.9rem}
+.tc2-headline{font-size:13px;color:var(--text2)}
+.tc2-sub{color:var(--text3);font-size:11px}
+.tc2-cost{font-size:26px;font-weight:800;color:var(--teal-light);margin:.15rem 0 .6rem}
+.tc2-steps{margin-bottom:.7rem;display:flex;flex-direction:column;gap:.35rem}
+.tc2-step{font-size:12px;color:var(--text);background:var(--bg4);border-radius:6px;padding:.45rem .55rem;display:flex;align-items:center;gap:.45rem;line-height:1.4}
+.tc2-stepnum{flex-shrink:0;width:18px;height:18px;border-radius:50%;background:var(--bg2);color:var(--text3);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.tc2-line{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--text3);border-top:1px solid var(--border)}
+.tc2-line b{color:var(--text);font-weight:700}
+.tc2-bad{font-size:12px;color:var(--amber-light);display:flex;align-items:center;gap:.4rem}
 
 /* ── INVENTORY ── */
 .inv-group{margin-bottom:1rem}
@@ -5329,6 +5332,9 @@ function toggleAllPlannerInvs(all) {
 // Ingots use the metal name per tier; planks/leather/rope use the "adjective" tier name.
 const TOOL_METAL = ['Ferralith','Pyrelite','Emarium','Elenvar','Luminite','Rathium','Aurumite','Celestium','Umbracite','Astralite'];
 const TOOL_ADJ   = ['Rough','Simple','Sturdy','Fine','Exquisite','Peerless','Ornate','Pristine','Magnificent','Flawless'];
+// Consumables (seeds, fish oil) use a different tier-adjective set than the tool mats.
+const CONSUMABLE_ADJ = ['Basic','Simple','Infused','Fine','Exquisite','Peerless','Ornate','Pristine','Magnificent','Flawless'];
+const SEED_CROPS = ['Embergrain','Starbulb','Wispweave']; // reroll accepts any of these; we use the cheapest
 const TOOL_COLS = [
   { label:'Ingot',   per:4, name:t=>`${TOOL_METAL[t-1]} Ingot` },
   { label:'Plank',   per:2, name:t=>`${TOOL_ADJ[t-1]} Plank` },
@@ -5353,7 +5359,11 @@ async function fetchToolPrices(){
   toolPricingActive = true;
   await ensureToolMarketIdx();
   const names = new Set();
-  for (let t=1;t<=10;t++) TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));
+  for (let t=1;t<=10;t++){
+    TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));
+    names.add((CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase());
+    SEED_CROPS.forEach(k=>names.add((CONSUMABLE_ADJ[t-1]+' '+k+' Seeds').toLowerCase()));
+  }
   const queue = [...names].filter(nm => toolPrice[nm] === undefined);
   const worker = async () => {
     while (queue.length){
@@ -5372,78 +5382,108 @@ async function fetchToolPrices(){
   if (currentTab === 'tools') renderToolCrafting();
 }
 
-// ── Reroll / Upgrade calculator (generalized from the community scrap-vs-upgrade model) ──
-const TOOL_CALC_DEFAULTS = { items:100, chance:15, perReroll:2.66, rerollCost:480, baseVal:800, targetVal:23000, upCost:1680, upBaseVal:900, upTargetVal:18000 };
-let toolCalc = null;
-function loadToolCalc(){ if (toolCalc) return; try { toolCalc = Object.assign({}, TOOL_CALC_DEFAULTS, JSON.parse(localStorage.getItem('bc_tool_calc')||'{}')); } catch(e){ toolCalc = {...TOOL_CALC_DEFAULTS}; } }
-function toolCalcCompute(v){
-  const chance = (+v.chance||0)/100, items = +v.items||0, perReroll = +v.perReroll||0;
-  let iterations=0, rareItems=0, rerollIncome=0, rerollCost=0, rerollProfit=null;
-  const itemsDelta = perReroll - 1 + chance;   // net items consumed each reroll loop
-  if (itemsDelta > 0 && items > perReroll){
-    iterations = Math.ceil((items - perReroll)/itemsDelta);
-    const finalBase = items - iterations*itemsDelta;
-    rareItems = iterations*chance;
-    rerollCost = (+v.rerollCost||0)*iterations + (items - finalBase)*(+v.baseVal||0);
-    rerollIncome = rareItems*(+v.targetVal||0);
-    rerollProfit = rerollIncome - rerollCost;
+// ── Rarity roll economics ──  (RARITY_NAMES is declared once, later in the file)
+const RARITY_UP_CHANCE = { 1:0.30, 2:0.15, 3:0.075, 4:0.0375, 5:0.01875 }; // chance to go rarity r -> r+1
+const SCRAP_TO_REACH = { 2:3, 3:5, 4:15, 5:30, 6:60 }; // scrap consumed per reroll attempt toward rarity R (Mythic=60 is a guess)
+let toolCalc = null; // { target, maxTier }
+function loadToolCalc(){ if (toolCalc) return; try { toolCalc = Object.assign({ target:4, maxTier:6 }, JSON.parse(localStorage.getItem('bc_tool_calc_v2')||'{}')); } catch(e){ toolCalc = { target:4, maxTier:6 }; } }
+function saveToolCalc(){ try { safeSetItem('bc_tool_calc_v2', JSON.stringify(toolCalc)); } catch(e){} }
+
+// Cost helpers (all in hex coins, from market). matCost = one tier's mats; cumCost = built up from T1.
+function toolMatCost(t){ let s=0; for (const c of TOOL_COLS){ const p = toolPrice[c.name(t).toLowerCase()]; s += (p||0)*c.per; } return s; }
+function toolCumCost(t){ let s=0; for (let i=1;i<=t;i++) s += toolMatCost(i); return s; }
+function toolSeedPrice(t){ const adj=CONSUMABLE_ADJ[t-1]; const c=SEED_CROPS.map(k=>toolPrice[(adj+' '+k+' Seeds').toLowerCase()]).filter(v=>v!==undefined && v>0); return c.length?Math.min(...c):0; }
+function toolFishOilPrice(t){ return toolPrice[(CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase()] || 0; }
+function toolConsumablesCost(t){ return 100*toolSeedPrice(t) + 20*toolFishOilPrice(t) + 75; }
+// One reroll attempt on a tier-T tool, rolling toward rarity R (scrap = R's requirement × cheapest same-tier common tool).
+function toolRerollCost(t, R){ return toolConsumablesCost(t) + (SCRAP_TO_REACH[R]||0) * toolCumCost(t); }
+function toolPricesReady(){ for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()] === undefined) return false; return true; }
+
+// Expected-value solver: cheapest way to end up with a `target`-rarity tool, only upgrading up to `maxTier`.
+// State (tier, rarity). Two actions per rarity step (both share the static chance): reroll here, or upgrade a tier
+// (which auto-rolls for free). Returns { possible, cost, switchTier } where switchTier is where rerolling begins.
+function solveRarity(target, maxTier){
+  if (maxTier < target) return { possible:false };
+  const M = maxTier;
+  const E = Array.from({length:M+1}, () => new Array(target+1).fill(Infinity));
+  const act = Array.from({length:M+1}, () => new Array(target+1).fill(null));
+  for (let t=1;t<=M;t++) E[t][target] = 0;
+  for (let r=target-1; r>=1; r--){
+    for (let t=M; t>=1; t--){
+      const p = RARITY_UP_CHANCE[r];
+      let best = Infinity, ba = null;
+      if (t >= r+1){ // tier supports rarity r+1 → can reroll toward it
+        const c = toolRerollCost(t, r+1)/p + E[t][r+1];
+        if (c < best){ best = c; ba = 'reroll'; }
+      }
+      if (t < M){ // upgrade a tier (free roll)
+        const c = toolMatCost(t+1) + p*E[t+1][r+1] + (1-p)*E[t+1][r];
+        if (c < best){ best = c; ba = 'upgrade'; }
+      }
+      E[t][r] = best; act[t][r] = ba;
+    }
   }
-  const upIncome = items*chance*(+v.upTargetVal||0) + items*(1-chance)*(+v.upBaseVal||0);
-  const upCost = items*(+v.baseVal||0) + items*(+v.upCost||0);
-  return { iterations, rareItems, rerollIncome, rerollCost, rerollProfit, upIncome, upCost, upProfit: upIncome - upCost };
+  const cost = toolMatCost(1) + E[1][1];
+  return { possible:isFinite(cost), cost, act };
 }
-function toolCalcRecalc(){
-  ['items','chance','perReroll','rerollCost','baseVal','targetVal','upCost','upBaseVal','upTargetVal'].forEach(k => { const el=document.getElementById('tc-'+k); if (el) toolCalc[k] = el.value==='' ? 0 : parseFloat(el.value); });
-  try { safeSetItem('bc_tool_calc', JSON.stringify(toolCalc)); } catch(e){}
-  const r = toolCalcCompute(toolCalc);
-  const set = (id,val,color)=>{ const e=document.getElementById(id); if(!e) return; e.textContent=fmtCoin(Math.round(val||0)); if(color) e.style.color = val>0?'var(--green-light)':(val<0?'var(--red)':'var(--text)'); };
-  set('tc-out-reroll-income', r.rerollIncome);
-  set('tc-out-reroll-cost', r.rerollCost);
-  set('tc-out-reroll-profit', r.rerollProfit==null?0:r.rerollProfit, true);
-  set('tc-out-up-income', r.upIncome);
-  set('tc-out-up-cost', r.upCost);
-  set('tc-out-up-profit', r.upProfit, true);
-  const win = document.getElementById('tc-winner');
-  if (win){
-    const rp = r.rerollProfit==null ? -Infinity : r.rerollProfit;
-    if (rp === -Infinity && r.upProfit === undefined) win.textContent='—';
-    else if (rp > r.upProfit) win.innerHTML = `<i class="ti ti-dice" style="color:var(--amber-light)"></i> Rerolling wins by <b style="color:var(--green-light)">${fmtCoin(Math.round(rp - r.upProfit))}</b>`;
-    else if (r.upProfit > rp) win.innerHTML = `<i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrading wins by <b style="color:var(--green-light)">${fmtCoin(Math.round(r.upProfit - rp))}</b>`;
-    else win.textContent = 'Even';
+// Trace the optimal policy along the "unlucky" line (rarity only advances when you reroll) to produce a
+// concrete step list. Upgrades never guarantee a rarity bump, so every rarity step ends in a reroll here;
+// in practice free upgrade-rolls often succeed and save you some of those rerolls (hence "expected" cost).
+function reconstructPlan(act, target){
+  const steps = []; let t = 1, r = 1, guard = 0, upTo = null;
+  while (r < target && guard++ < 200){
+    const a = act[t] && act[t][r];
+    if (a === 'upgrade'){ t++; upTo = t; }
+    else if (a === 'reroll'){
+      if (upTo){ steps.push({ type:'upgrade', tier:upTo }); upTo = null; }
+      steps.push({ type:'reroll', tier:t, to:r+1 });
+      r++;
+    } else break;
   }
+  if (upTo) steps.push({ type:'upgrade', tier:upTo });
+  return steps;
+}
+
+function setToolTarget(v){ loadToolCalc(); toolCalc.target = +v; saveToolCalc(); renderToolCalcResult(); }
+function setToolMaxTier(v){ loadToolCalc(); toolCalc.maxTier = +v; saveToolCalc(); renderToolCalcResult(); }
+function renderToolCalcResult(){
+  const el = document.getElementById('tool-calc-result');
+  if (!el) return;
+  loadToolCalc();
+  if (!toolPricesReady()){ el.innerHTML = '<span class="dot-spin"></span> loading market prices…'; return; }
+  const target = toolCalc.target, M = toolCalc.maxTier;
+  const rn = RARITY_NAMES[target];
+  const res = solveRarity(target, M);
+  const art = /^[aeiou]/i.test(rn) ? 'an' : 'a';
+  if (!res.possible){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${art.charAt(0).toUpperCase()+art.slice(1)} ${rn} tool needs at least tier ${target}. Raise the max tier.</div>`; return; }
+  const plan = reconstructPlan(res.act, target);
+  const stepHtml = plan.map((s, i) => {
+    if (s.type === 'upgrade') return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrade up to <b>T${s.tier}</b> <span class="tc2-sub">(free rarity roll)</span></div>`;
+    const p = RARITY_UP_CHANCE[s.to-1];
+    const each = toolRerollCost(s.tier, s.to);
+    const rolls = 1/p;
+    return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-dice" style="color:var(--purple-light)"></i> Reroll at <b>T${s.tier}</b> → <b>${RARITY_NAMES[s.to]}</b> <span class="tc2-sub">~${rolls.toFixed(rolls<20?1:0)} rolls × ${fmtCoin(Math.round(each))} = ${fmtCoin(Math.round(rolls*each))}</span></div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="tc2-headline">Cheapest path to ${art} <b style="color:var(--teal-light)">${rn}</b> tool <span class="tc2-sub">(max tier T${M})</span></div>
+    <div class="tc2-cost">${fmtCoin(Math.round(res.cost))} <span class="tc2-sub" style="font-size:12px">expected total</span></div>
+    <div class="tc2-steps">${stepHtml || '<div class="tc2-sub">Already attainable.</div>'}</div>
+    <div class="tc2-sub" style="margin-bottom:.6rem">Each upgrade also rolls rarity for free, so the expected total above is a bit less than the sum of the reroll steps.</div>
+    <div class="tc2-line"><span>Scrap per ${rn} reroll</span><b>${SCRAP_TO_REACH[target]} tools</b></div>
+    <div class="tc2-line"><span>Roll chance ${RARITY_NAMES[target-1]}→${rn}</span><b>${(RARITY_UP_CHANCE[target-1]*100).toFixed(RARITY_UP_CHANCE[target-1]<0.1?3:1)}%</b></div>`;
 }
 function toolCalcHtml(){
   loadToolCalc();
-  const f = (k,label,step)=>`<div class="tc-field"><label>${label}</label><input id="tc-${k}" class="sj-input" type="number" step="${step||'1'}" value="${toolCalc[k]}" oninput="toolCalcRecalc()"></div>`;
+  const rarOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolCalc.target===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
+  const tierOpts = [1,2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolCalc.maxTier===t?' selected':''}>T${t}</option>`).join('');
   return `<div class="tool-calc">
-    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Reroll vs Upgrade calculator <span class="tc-wip">work in progress</span></div>
-    <div class="tc-shared">
-      ${f('items','Item count')}
-      ${f('chance','Rarity-up chance %','0.1')}
-      ${f('baseVal','Base item value (each)')}
+    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity roll planner <span class="tc-wip">work in progress</span></div>
+    <div class="tc2-controls">
+      <div class="tc-field"><label>I want a…</label><select id="tc-target" class="sj-input" onchange="setToolTarget(this.value)">${rarOpts}</select></div>
+      <div class="tc-field"><label>Max tier I can use</label><select id="tc-maxtier" class="sj-input" onchange="setToolMaxTier(this.value)">${tierOpts}</select></div>
     </div>
-    <div class="tc-cols">
-      <div class="tc-col">
-        <div class="tc-col-title" style="color:var(--amber-light)"><i class="ti ti-dice"></i> Reroll (scrap → higher rarity)</div>
-        ${f('perReroll','Items consumed per reroll','0.01')}
-        ${f('rerollCost','Cost per reroll (coins)')}
-        ${f('targetVal','Value of rolled item (each)')}
-        <div class="tc-res"><span>Income</span><b id="tc-out-reroll-income">—</b></div>
-        <div class="tc-res"><span>Cost</span><b id="tc-out-reroll-cost">—</b></div>
-        <div class="tc-res tc-profit"><span>Profit</span><b id="tc-out-reroll-profit">—</b></div>
-      </div>
-      <div class="tc-col">
-        <div class="tc-col-title" style="color:var(--teal-light)"><i class="ti ti-arrow-up-circle"></i> Upgrade (→ next tier)</div>
-        ${f('upCost','Upgrade cost per item (coins)')}
-        ${f('upBaseVal','Next-tier base value (each)')}
-        ${f('upTargetVal','Next-tier rolled value (each)')}
-        <div class="tc-res"><span>Income</span><b id="tc-out-up-income">—</b></div>
-        <div class="tc-res"><span>Cost</span><b id="tc-out-up-cost">—</b></div>
-        <div class="tc-res tc-profit"><span>Profit</span><b id="tc-out-up-profit">—</b></div>
-      </div>
-    </div>
-    <div class="tc-winner" id="tc-winner">—</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Starting point — a generalized version of the community scrap-vs-upgrade model, works for any tier/rarity by entering the values. "Base item value" is what you start with (also charged as the upgrade input); "rolled / target value" is the higher-rarity result. Market auto-fill is coming next.</div>
+    <div class="tc2-result" id="tool-calc-result"></div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Since a reroll burns <b>scrap</b> (whole tools) while a tier-upgrade rolls rarity for the mat cost alone, upgrading is almost always the cheaper rarity attempt — so the plan is to upgrade as far as your max tier allows, then reroll for the rest. Costs use live market prices; expected values use the static roll chances. Scrap for Mythic (60) is a guess.</div>
   </div>`;
 }
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
@@ -5510,7 +5550,9 @@ async function renderToolCrafting(){
     ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
     <div class="tool-hcell">Tools</div>
     <div class="tool-hcell">Cost / tool</div>
+    <div class="tool-hcell">Reroll</div>
   </div>`;
+  const pricesReady = toolPricesReady();
   const rows = [];
   for (let t=1; t<=10; t++){
     const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
@@ -5526,19 +5568,26 @@ async function renderToolCrafting(){
     const cost = loading ? null : parts.reduce((a,b)=>a+b,0);
     const costInner = loading ? '<span class="dot-spin"></span>'
       : (cost>0 ? `<span class="tool-have">${fmtCoin(Math.round(cost))}</span>` : '<span class="tool-have" style="color:var(--text3)">—</span>');
+    // reroll cost for one attempt toward this tier's max rarity (incl. scrap)
+    const capR = Math.min(t, 6);
+    let rerollInner;
+    if (t < 2) rerollInner = '<span class="tool-have" style="color:var(--text3)">—</span>';
+    else if (!pricesReady) rerollInner = '<span class="dot-spin"></span>';
+    else rerollInner = `<span class="tool-have">${fmtCoin(Math.round(toolRerollCost(t, capR)))}</span>`;
     rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
       <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
       <div class="tool-cell tool-cost" title="Cheapest market price of 4 ingots + 2 planks + 2 leather + 2 rope">${costInner}</div>
+      <div class="tool-cell tool-reroll" title="One reroll toward ${RARITY_NAMES[capR]} at T${t}: 100 seed + 20 fish oil + 75 + ${SCRAP_TO_REACH[capR]||0} scrap (built-up tools)">${rerollInner}</div>
     </div>`);
   }
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those materials.</div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats. <b>Reroll</b> = one reroll attempt toward that tier's max rarity, scrap included.</div>
     ${toolCalcHtml()}`;
   updateLiveBtns();
-  toolCalcRecalc();
+  renderToolCalcResult();
   // Kick off market pricing for any materials not yet priced.
   const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
   if (anyUnpriced && !toolPricingActive) fetchToolPrices();
