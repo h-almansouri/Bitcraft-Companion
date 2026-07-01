@@ -123,6 +123,43 @@ main.planner-mode{max-width:none;padding:1rem}
 .skill-xp-row{font-size:11px;color:var(--text2)}
 .category-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin:1.25rem 0 .6rem;display:flex;align-items:center;gap:.5rem}
 .category-label::after{content:'';flex:1;height:1px;background:var(--border)}
+/* tier-colored skill cards */
+.skill-card.tiered{border-left:3px solid var(--tc);background:var(--tcbg)}
+.skill-card.tiered .skill-card-level{color:var(--tc)}
+.skill-card.tiered .skill-bar{background:var(--tc)}
+.skill-card.skill-active{box-shadow:0 0 0 1px var(--green-light),0 0 14px rgba(151,196,89,.22)}
+.skill-card-name-wrap{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;min-width:0}
+.skill-tier-badge{font-size:9px;font-weight:700;letter-spacing:.03em;color:var(--tc);border:1px solid var(--tc);border-radius:4px;padding:0 4px;opacity:.85;flex-shrink:0}
+.skill-active-badge{font-size:9px;font-weight:800;color:#0c1a0c;background:var(--green-light);border-radius:4px;padding:1px 5px;letter-spacing:.05em;text-transform:uppercase;flex-shrink:0;animation:pulseActive 1.6s ease-in-out infinite}
+@keyframes pulseActive{0%,100%{opacity:1}50%{opacity:.5}}
+/* skill journey / calculator panel */
+.skill-journey{margin:1rem 0 .25rem;border:1px solid var(--tc,var(--border2));border-radius:10px;background:linear-gradient(180deg,var(--tcbg,var(--bg2)),var(--bg2));overflow:hidden}
+.skill-journey-hdr{display:flex;align-items:center;gap:.5rem;padding:.7rem .9rem;border-bottom:1px solid var(--border)}
+.skill-journey-title{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem}
+.skill-journey-title i{color:var(--tc,var(--text3))}
+.sj-close{margin-left:auto;color:var(--text3);cursor:pointer;font-size:17px}
+.sj-close:hover{color:var(--text)}
+.sj-grid{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;padding:.9rem}
+@media(max-width:640px){.sj-grid{grid-template-columns:1fr}}
+.sj-panel{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.8rem}
+.sj-panel-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.6rem}
+.sj-row{display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:.45rem;gap:.5rem}
+.sj-row .k{color:var(--text3)}
+.sj-row .v{color:var(--text);font-weight:600}
+.sj-big{font-size:20px;font-weight:800;color:var(--tc,var(--teal-light))}
+.sj-target{display:flex;align-items:center;gap:.5rem}
+.sj-step{width:26px;height:26px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);color:var(--text);font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sj-step:hover{border-color:var(--tc,var(--teal))}
+.sj-target-val{min-width:46px;text-align:center;font-weight:700;color:var(--text);background:var(--bg4);border-radius:6px;padding:3px 0}
+.sj-input{width:100%;background:var(--bg4);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;box-sizing:border-box}
+.sj-input:focus{border-color:var(--tc,var(--teal))}
+.sj-mode{display:flex;gap:.35rem;margin-bottom:.6rem}
+.sj-mode button{flex:1;font-size:11px;padding:5px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);color:var(--text2);cursor:pointer}
+.sj-mode button.on{background:var(--tc,var(--teal-dim));border-color:var(--tc,var(--teal));color:#fff}
+.sj-field{margin-bottom:.5rem}
+.sj-field label{display:block;font-size:10px;color:var(--text3);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.04em}
+/* task trader collapse chevron */
+.task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
 
 /* ── INVENTORY ── */
 .inv-group{margin-bottom:1rem}
@@ -536,6 +573,11 @@ let currentPlayer = null;          // = trackedPlayers[0] (primary) — used by 
 let trackedPlayers = [];           // all players being tracked; player tabs render a section per player
 let playerCollapsed = new Set();   // entityIds whose player section is collapsed (persisted)
 let playerPaused = new Set();      // entityIds excluded from live auto-refresh — "stop monitoring" (persisted)
+let taskTraderCollapsed = new Set(); // "<entityId>|<traderName>" keys collapsed in the Tasks tab (persisted)
+let skillsByPlayer = {};           // entityId -> {skills, rankings} — cached so the journey panel can read them
+let skillSession = {};             // entityId -> {skillId -> {startXp,startTs,curXp,curTs,active}} live XP tracking
+let skillCalcPrefs = {};           // skillId -> {target,mode,xpPerAction,secPerAction} (persisted)
+let openJourney = {};              // entityId -> skillId whose calculator panel is currently open
 let searchDocBound = false;        // guard so the document click-to-close listener binds only once
 let currentTab = 'skills';
 let xpThresholds = [];
@@ -1127,6 +1169,17 @@ function refreshPlayerTabs() {
 function isPlayerCollapsed(id){ return playerCollapsed.has(String(id)); }
 function isPlayerPaused(id){ return playerPaused.has(String(id)); }
 function savePlayerCollapsed(){ safeSetItem('bc_players_collapsed', JSON.stringify([...playerCollapsed])); }
+function saveTaskTraderCollapsed(){ safeSetItem('bc_task_traders_collapsed', JSON.stringify([...taskTraderCollapsed])); }
+// Collapse/expand a trader's task block (element-relative: same trader can appear under multiple players).
+function toggleTaskTrader(hdrEl){
+  const block = hdrEl.closest('.task-npc-block'); if (!block) return;
+  const key = block.dataset.tkey;
+  if (taskTraderCollapsed.has(key)) taskTraderCollapsed.delete(key); else taskTraderCollapsed.add(key);
+  saveTaskTraderCollapsed();
+  const open = !taskTraderCollapsed.has(key);
+  const chev = block.querySelector('.tnpc-chev'); if (chev) chev.className = 'ti ti-chevron-'+(open?'down':'right')+' tnpc-chev';
+  const body = block.querySelector('.task-npc-body'); if (body) body.style.display = open ? '' : 'none';
+}
 function savePlayerPaused(){ safeSetItem('bc_players_paused', JSON.stringify([...playerPaused])); }
 // Players that should be auto-refreshed by live-refresh (skips paused ones).
 function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.entityId)); }
@@ -1202,6 +1255,185 @@ function xpIntoLevel(xp) {
   return xp - floor;
 }
 
+// ── SKILL TIERS / COLORS ──  tier = floor(level/10) (Lv39 -> T3, next tier at Lv40)
+const TIER_COLORS = [
+  {c:'#8a94a6', bg:'rgba(138,148,166,.07)'},  // T0  (1-9)
+  {c:'#6a8cc7', bg:'rgba(106,140,199,.09)'},  // T1  (10-19)
+  {c:'#6f77d6', bg:'rgba(111,119,214,.10)'},  // T2
+  {c:'#8a6fd6', bg:'rgba(138,111,214,.10)'},  // T3
+  {c:'#a86fd6', bg:'rgba(168,111,214,.11)'},  // T4
+  {c:'#c76fc0', bg:'rgba(199,111,192,.11)'},  // T5
+  {c:'#d16f9c', bg:'rgba(209,111,156,.12)'},  // T6
+  {c:'#d67373', bg:'rgba(214,115,115,.12)'},  // T7
+  {c:'#d68a5b', bg:'rgba(214,138,91,.12)'},   // T8
+  {c:'#d6b45b', bg:'rgba(214,180,91,.13)'},   // T9
+  {c:'#ffd75e', bg:'rgba(255,215,94,.14)'},   // T10 (100+)
+];
+function tierInfo(level){ const t = Math.max(0, Math.min(TIER_COLORS.length-1, Math.floor((level||0)/10))); return {t, c:TIER_COLORS[t].c, bg:TIER_COLORS[t].bg}; }
+
+// ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
+function updateSkillSession(entityId, skills){
+  const now = Date.now();
+  const s = skillSession[entityId] || (skillSession[entityId] = {});
+  skills.forEach(sk => {
+    const e = s[sk.skillId];
+    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false}; return; }
+    if (sk.xp > e.curXp){
+      // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
+      if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
+      e.active = true;
+    } else {
+      e.active = false;
+    }
+    e.curXp = sk.xp; e.curTs = now;
+  });
+}
+function sessionRate(entityId, skillId){
+  const e = skillSession[entityId] && skillSession[entityId][skillId];
+  if (!e) return {xpHr:0, gained:0};
+  const gained = e.curXp - e.startXp;
+  const hrs = (e.curTs - e.startTs)/3.6e6;
+  return {xpHr: (hrs>0 && gained>0) ? gained/hrs : 0, gained};
+}
+function fmtDuration(sec){
+  sec = Math.round(sec);
+  if (sec < 60) return sec+'s';
+  const d = Math.floor(sec/86400), h = Math.floor((sec%86400)/3600), m = Math.floor((sec%3600)/60);
+  if (d>0) return `${d}d ${h}h`;
+  if (h>0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function saveSkillCalcPrefs(){ safeSetItem('bc_skill_calc', JSON.stringify(skillCalcPrefs)); }
+
+// ── SKILL CALCULATOR ("journey") PANEL ──
+function openSkillJourney(entityId, skillId){
+  entityId = String(entityId);
+  openJourney[entityId] = skillId;
+  renderJourney(entityId);
+  const el = document.getElementById('sj-' + entityId);
+  if (el) el.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+function closeSkillJourney(entityId){ entityId = String(entityId); delete openJourney[entityId]; renderJourney(entityId); }
+function renderJourney(entityId){
+  entityId = String(entityId);
+  const host = document.getElementById('sj-' + entityId);
+  if (!host) return;
+  const skillId = openJourney[entityId];
+  const data = skillsByPlayer[entityId];
+  const sk = skillId && data && data.skills.find(x => x.skillId === skillId);
+  if (!sk){ host.innerHTML = ''; return; }
+  host.innerHTML = journeyHtml(entityId, sk, data.rankings[skillId]);
+  recalcJourney(entityId);
+}
+function journeyHtml(entityId, sk, rank){
+  const ti = tierInfo(sk.level);
+  const maxLevel = xpThresholds.length || 100;
+  const prefs = skillCalcPrefs[sk.skillId] || {};
+  const target = (prefs.target && prefs.target > sk.level) ? Math.min(maxLevel, prefs.target) : Math.min(maxLevel, sk.level + 1);
+  const mode = prefs.mode || 'live';
+  const xpa = (prefs.xpPerAction != null ? prefs.xpPerAction : '');
+  const spa = (prefs.secPerAction != null ? prefs.secPerAction : '');
+  const {xpHr:liveRate, gained} = sessionRate(entityId, sk.skillId);
+  return `<div class="skill-journey" style="--tc:${ti.c};--tcbg:${ti.bg}">
+    <div class="skill-journey-hdr">
+      <div class="skill-journey-title"><i class="ti ti-route"></i> ${escHtml(sk.name)} Calculator <span class="skill-tier-badge" style="--tc:${ti.c}">T${ti.t}</span></div>
+      <i class="ti ti-x sj-close" onclick="closeSkillJourney('${entityId}')"></i>
+    </div>
+    <div class="sj-grid">
+      <div class="sj-panel">
+        <div class="sj-panel-label">Current &amp; Target</div>
+        <div class="sj-row"><span class="k">Level</span><span class="v" style="color:${ti.c}">${sk.level}</span></div>
+        <div class="skill-bar-wrap" style="height:6px"><div class="skill-bar" style="width:${sk.pct}%;background:${ti.c}"></div></div>
+        <div class="sj-row" style="margin-top:.45rem"><span class="k">Into level</span><span class="v">${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP</span></div>
+        <div class="sj-row"><span class="k">XP to next level</span><span class="v">${fmtNum(sk.toNext)}</span></div>
+        <div class="sj-field" style="margin-top:.7rem">
+          <label>Target level</label>
+          <div class="sj-target">
+            <button class="sj-step" onclick="adjustTarget('${entityId}',-1)">&minus;</button>
+            <span class="sj-target-val" id="sj-target-${entityId}">${target}</span>
+            <button class="sj-step" onclick="adjustTarget('${entityId}',1)">+</button>
+            <span class="k" style="margin-left:auto">XP needed</span>
+            <span class="v" id="sj-need-${entityId}">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="sj-panel">
+        <div class="sj-panel-label">Rate &amp; ETA</div>
+        <div class="sj-mode">
+          <button id="sj-mode-live-${entityId}" class="${mode==='live'?'on':''}" onclick="setJourneyMode('${entityId}','live')">Live rate</button>
+          <button id="sj-mode-manual-${entityId}" class="${mode==='manual'?'on':''}" onclick="setJourneyMode('${entityId}','manual')">Manual</button>
+        </div>
+        <div id="sj-live-${entityId}" style="display:${mode==='live'?'':'none'}">
+          <div class="sj-row"><span class="k">Measured XP/hr</span><span class="v" style="color:${ti.c}">${liveRate>0?fmtNum(Math.round(liveRate)):'—'}</span></div>
+          <div class="sj-row"><span class="k">Session XP</span><span class="v">${gained>0?'+'+fmtNum(gained):'0'}</span></div>
+          ${liveRate>0?'':'<div style="font-size:11px;color:var(--text3);line-height:1.4">Turn on <b>Live</b> and gain XP in-game to measure a rate.</div>'}
+        </div>
+        <div id="sj-manual-${entityId}" style="display:${mode==='manual'?'':'none'}">
+          <div class="sj-field"><label>XP per action</label><input class="sj-input" type="number" min="0" id="sj-xpa-${entityId}" value="${xpa}" oninput="recalcJourney('${entityId}')" placeholder="e.g. 120"></div>
+          <div class="sj-field"><label>Action speed (seconds per action)</label><input class="sj-input" type="number" min="0" step="0.1" id="sj-spa-${entityId}" value="${spa}" oninput="recalcJourney('${entityId}')" placeholder="e.g. 3.5"></div>
+          <div class="sj-row"><span class="k">= XP/hr</span><span class="v" id="sj-manrate-${entityId}" style="color:${ti.c}">—</span></div>
+        </div>
+        <div style="border-top:1px solid var(--border);margin-top:.55rem;padding-top:.55rem">
+          <div class="sj-row"><span class="k">ETA to Lv <span id="sj-etalvl-${entityId}">${target}</span></span><span class="sj-big" id="sj-eta-${entityId}">—</span></div>
+          <div class="sj-row"><span class="k">Total XP</span><span class="v">${fmtNum(sk.xp)}</span></div>
+          ${rank?`<div class="sj-row"><span class="k">Rank</span><span class="v">#${rank.rank}</span></div>`:''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+function adjustTarget(entityId, d){
+  entityId = String(entityId);
+  const skillId = openJourney[entityId]; if (!skillId) return;
+  const data = skillsByPlayer[entityId]; const sk = data && data.skills.find(x => x.skillId === skillId); if (!sk) return;
+  const maxLevel = xpThresholds.length || 100;
+  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  let t = Math.max(sk.level+1, Math.min(maxLevel, (parseInt(el.textContent,10)||sk.level+1) + d));
+  el.textContent = t;
+  const p = skillCalcPrefs[skillId] || (skillCalcPrefs[skillId] = {}); p.target = t; saveSkillCalcPrefs();
+  recalcJourney(entityId);
+}
+function setJourneyMode(entityId, mode){
+  entityId = String(entityId);
+  const skillId = openJourney[entityId]; if (!skillId) return;
+  const p = skillCalcPrefs[skillId] || (skillCalcPrefs[skillId] = {}); p.mode = mode; saveSkillCalcPrefs();
+  const lb = document.getElementById('sj-mode-live-' + entityId), mb = document.getElementById('sj-mode-manual-' + entityId);
+  if (lb) lb.classList.toggle('on', mode==='live'); if (mb) mb.classList.toggle('on', mode==='manual');
+  const lv = document.getElementById('sj-live-' + entityId), mv = document.getElementById('sj-manual-' + entityId);
+  if (lv) lv.style.display = mode==='live'?'':'none'; if (mv) mv.style.display = mode==='manual'?'':'none';
+  recalcJourney(entityId);
+}
+function recalcJourney(entityId){
+  entityId = String(entityId);
+  const skillId = openJourney[entityId]; if (!skillId) return;
+  const data = skillsByPlayer[entityId]; if (!data) return;
+  const sk = data.skills.find(x => x.skillId === skillId); if (!sk) return;
+  const tEl = document.getElementById('sj-target-' + entityId); if (!tEl) return;
+  const target = parseInt(tEl.textContent,10) || (sk.level+1);
+  const etalvl = document.getElementById('sj-etalvl-' + entityId); if (etalvl) etalvl.textContent = target;
+  const targetFloor = xpThresholds[target-1] || 0;
+  const need = Math.max(0, targetFloor - sk.xp);
+  const needEl = document.getElementById('sj-need-' + entityId); if (needEl) needEl.textContent = fmtNum(need);
+  const p = skillCalcPrefs[skillId] || {};
+  const mode = p.mode || 'live';
+  let rate = 0;
+  if (mode === 'manual'){
+    const xpa = parseFloat((document.getElementById('sj-xpa-' + entityId)||{}).value) || 0;
+    const spa = parseFloat((document.getElementById('sj-spa-' + entityId)||{}).value) || 0;
+    rate = (xpa>0 && spa>0) ? xpa * (3600/spa) : 0;
+    const mr = document.getElementById('sj-manrate-' + entityId); if (mr) mr.textContent = rate>0?fmtNum(Math.round(rate)):'—';
+    p.xpPerAction = xpa || ''; p.secPerAction = spa || ''; skillCalcPrefs[skillId] = p; saveSkillCalcPrefs();
+  } else {
+    rate = sessionRate(entityId, skillId).xpHr;
+  }
+  const etaEl = document.getElementById('sj-eta-' + entityId);
+  if (etaEl){
+    if (need <= 0) etaEl.textContent = 'Reached ✓';
+    else if (rate > 0) etaEl.textContent = fmtDuration(need / rate * 3600);
+    else etaEl.textContent = '—';
+  }
+}
+
 // ── SKILLS ──
 // Multi-player Experience: one collapsible section per tracked player.
 async function renderExperienceTab() {
@@ -1214,18 +1446,23 @@ async function renderExperienceTab() {
   startLiveRefresh('skills');
 }
 async function loadSkillsInto(p, silent=false) {
-  const body = document.getElementById('psec-skills-' + p.entityId);
+  const eid = String(p.entityId);
+  const body = document.getElementById('psec-skills-' + eid);
   if (!body) return;
+  // Don't clobber a calculator input the user is editing during a background live refresh.
+  if (silent) { const ae = document.activeElement; if (ae && ae.closest && ae.closest('#sj-' + eid)) return; }
   try {
     const [pData, rankData] = await Promise.all([
       apiFetch(`/api/players/${p.entityId}`),
       apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}))
     ]);
-    body.innerHTML = skillsSectionHtml(pData, rankData);
+    body.innerHTML = skillsSectionHtml(pData, rankData, eid);
+    renderJourney(eid);   // re-open the calculator panel (if one was open) with fresh level/rate
   } catch(e) { if (!silent) body.innerHTML = errBox(e); }
 }
-function skillsSectionHtml(pData, rankData) {
+function skillsSectionHtml(pData, rankData, entityId) {
     const player = pData.player || {};
+    entityId = String(entityId != null ? entityId : (player.entityId || ''));
     const skillMap = player.skillMap || {};
     const experience = player.experience || [];
     const rankings = (rankData && rankData.rankings) || {};
@@ -1248,16 +1485,27 @@ function skillsSectionHtml(pData, rankData) {
     const maxLvl = skills.reduce((m,sk)=>Math.max(m,sk.level),0);
     const totalLvl = skills.reduce((s,sk)=>s+sk.level,0);
 
+    // Live-track XP + cache for the calculator panel to read.
+    updateSkillSession(entityId, skills);
+    skillsByPlayer[entityId] = { skills, rankings };
+
     const professions = skills.filter(s => s.category === 'Profession');
     const adventure = skills.filter(s => s.category === 'Adventure');
     const other = skills.filter(s => s.category !== 'Profession' && s.category !== 'Adventure');
 
     function renderSkillCards(list) {
+      const sess = skillSession[entityId] || {};
       return list.map(sk => {
         const rank = rankings[sk.skillId];
-        return `<div class="skill-card" onclick="void(0)">
+        const ti = tierInfo(sk.level);
+        const active = !!(sess[sk.skillId] && sess[sk.skillId].active);
+        return `<div class="skill-card tiered${active?' skill-active':''}" style="--tc:${ti.c};--tcbg:${ti.bg}" onclick="openSkillJourney('${entityId}',${sk.skillId})">
           <div class="skill-card-header">
-            <div class="skill-card-name">${escHtml(sk.name)}</div>
+            <div class="skill-card-name-wrap">
+              <span class="skill-card-name">${escHtml(sk.name)}</span>
+              <span class="skill-tier-badge">T${ti.t}</span>
+              ${active?'<span class="skill-active-badge">Active</span>':''}
+            </div>
             <div class="skill-card-level">${sk.level}</div>
           </div>
           <div class="skill-card-row">
@@ -1277,7 +1525,8 @@ function skillsSectionHtml(pData, rankData) {
       </div>
       ${professions.length?`<div class="category-label"><i class="ti ti-hammer"></i> Professions</div><div class="skills-grid">${renderSkillCards(professions)}</div>`:''}
       ${adventure.length?`<div class="category-label"><i class="ti ti-sword"></i> Adventure</div><div class="skills-grid">${renderSkillCards(adventure)}</div>`:''}
-      ${other.length?`<div class="category-label"><i class="ti ti-dots"></i> Other</div><div class="skills-grid">${renderSkillCards(other)}</div>`:''}`;
+      ${other.length?`<div class="category-label"><i class="ti ti-dots"></i> Other</div><div class="skills-grid">${renderSkillCards(other)}</div>`:''}
+      <div class="skill-journey-host" id="sj-${entityId}"></div>`;
 }
 
 // ── LIVE REFRESH ──
@@ -2085,7 +2334,7 @@ function renderTasksUI() {
     return first ? cap(first.toLowerCase()) : 'Traveler';
   }
 
-  function npcBlocksHtml(travTasks) {
+  function npcBlocksHtml(travTasks, entityId) {
   const byTrader = {};
   travTasks.forEach(t => {
     const key = extractTraderName(t);
@@ -2119,9 +2368,12 @@ function renderTasksUI() {
       }).join('')}
     </div>`;
 
-    return `<div class="task-npc-block">
-      <div class="task-npc-header">
-        <div style="display:flex;align-items:center;gap:.75rem">
+    const tkey = entityId + '|' + traderName;
+    const collapsed = taskTraderCollapsed.has(tkey);
+    return `<div class="task-npc-block" data-tkey="${escHtml(tkey)}">
+      <div class="task-npc-header" onclick="toggleTaskTrader(this)">
+        <div style="display:flex;align-items:center;gap:.6rem">
+          <i class="ti ti-chevron-${collapsed?'right':'down'} tnpc-chev"></i>
           <div>
             <div class="task-npc-name">${escHtml(traderName)}</div>
             <div class="task-npc-skill">${tasks.length} task${tasks.length!==1?'s':''} · ${escHtml(skillName)}</div>
@@ -2131,11 +2383,12 @@ function renderTasksUI() {
           ${allComplete
             ? '<span style="font-size:11px;font-weight:600;color:var(--green-light);background:rgba(99,153,34,.15);padding:3px 9px;border-radius:10px;display:flex;align-items:center;gap:4px"><i class="ti ti-circle-check"></i> All done</span>'
             : doneCount > 0 ? `<span style="font-size:11px;color:var(--amber-light);background:rgba(186,117,23,.12);padding:3px 9px;border-radius:10px">${doneCount}/${tasks.length} done</span>` : ''}
-          <i class="ti ti-chevron-down" style="color:var(--text3);font-size:14px"></i>
         </div>
       </div>
-      ${allComplete ? `<div style="display:flex;align-items:center;gap:.5rem;padding:.55rem 1rem;background:rgba(99,153,34,.08);border-top:1px solid rgba(99,153,34,.2);font-size:12px;font-weight:500;color:var(--green-light)"><i class="ti ti-circle-check"></i> All ${tasks.length} task${tasks.length!==1?'s':''} complete — ready to turn in</div>` : ''}
-      ${taskCols}
+      <div class="task-npc-body" style="display:${collapsed?'none':''}">
+        ${allComplete ? `<div style="display:flex;align-items:center;gap:.5rem;padding:.55rem 1rem;background:rgba(99,153,34,.08);border-top:1px solid rgba(99,153,34,.2);font-size:12px;font-weight:500;color:var(--green-light)"><i class="ti ti-circle-check"></i> All ${tasks.length} task${tasks.length!==1?'s':''} complete — ready to turn in</div>` : ''}
+        ${taskCols}
+      </div>
     </div>`;
   }).join('');
   }
@@ -2144,7 +2397,7 @@ function renderTasksUI() {
   const sections = trackedPlayers.map(p => {
     const tp = taskPlayersById[p.entityId];
     const inner = tp
-      ? (npcBlocksHtml(tp.travTasks) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No traveler tasks</span></div>')
+      ? (npcBlocksHtml(tp.travTasks, p.entityId) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No traveler tasks</span></div>')
       : loading();
     return playerSection(p, inner, 'psec-tasks-' + p.entityId);
   }).join('');
@@ -5322,6 +5575,8 @@ function slotContents(slot) {
   } catch(e) {}
   try { const c = JSON.parse(localStorage.getItem('bc_players_collapsed') || '[]'); if (Array.isArray(c)) playerCollapsed = new Set(c.map(String)); } catch(e) {}
   try { const pz = JSON.parse(localStorage.getItem('bc_players_paused') || '[]'); if (Array.isArray(pz)) playerPaused = new Set(pz.map(String)); } catch(e) {}
+  try { const tc = JSON.parse(localStorage.getItem('bc_task_traders_collapsed') || '[]'); if (Array.isArray(tc)) taskTraderCollapsed = new Set(tc); } catch(e) {}
+  try { const sc = JSON.parse(localStorage.getItem('bc_skill_calc') || '{}'); if (sc && typeof sc === 'object') skillCalcPrefs = sc; } catch(e) {}
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
