@@ -195,6 +195,30 @@ main.planner-mode{max-width:none;padding:1rem}
 .tc2-line{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--text3);border-top:1px solid var(--border)}
 .tc2-line b{color:var(--text);font-weight:700}
 .tc2-bad{font-size:12px;color:var(--amber-light);display:flex;align-items:center;gap:.4rem}
+/* alerts / notifications */
+.al-wrap{max-width:760px}
+.al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
+.al-toggle{display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:14px;color:var(--text)}
+.al-toggle input{width:16px;height:16px;cursor:pointer;accent-color:var(--teal)}
+.al-master i{color:var(--teal-light)}
+.al-vol{display:flex;align-items:center;gap:.5rem;color:var(--text3)}
+.al-vol input[type=range]{width:140px;accent-color:var(--teal)}
+.al-note{font-size:12px;color:var(--text3);line-height:1.5;display:flex;align-items:flex-start;gap:.4rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.6rem .75rem;margin-bottom:.9rem}
+.al-note i{margin-top:1px}
+.al-list{display:flex;flex-direction:column;gap:.6rem}
+.al-row{display:grid;grid-template-columns:1fr auto;grid-template-areas:'toggle controls' 'desc controls';gap:.15rem .75rem;align-items:center;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;transition:opacity .15s}
+.al-row.al-off{opacity:.55}
+.al-toggle{grid-area:toggle}
+.al-name{font-weight:600}
+.al-desc{grid-area:desc;font-size:11px;color:var(--text3);padding-left:1.9rem}
+.al-controls{grid-area:controls;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;justify-content:flex-end}
+.al-sound{width:110px}
+.al-extra{width:auto}
+.al-secs{font-size:12px;color:var(--text3);display:flex;align-items:center;gap:.3rem;white-space:nowrap}
+#alert-toasts{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:.5rem;z-index:9999;pointer-events:none}
+.alert-toast{display:flex;align-items:center;gap:.6rem;background:var(--bg3);border:1px solid var(--teal);border-left:3px solid var(--teal);border-radius:8px;padding:.6rem .9rem;color:var(--text);font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.4);transform:translateX(120%);opacity:0;transition:transform .3s ease,opacity .3s ease;max-width:320px}
+.alert-toast.show{transform:translateX(0);opacity:1}
+.alert-toast i{color:var(--teal-light);font-size:17px;flex-shrink:0}
 
 /* ── INVENTORY ── */
 .inv-group{margin-bottom:1rem}
@@ -577,6 +601,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div class="nav-item" data-tab="map" onclick="switchTab('map')"><i class="ti ti-map-2"></i> Map</div>
     <div class="nav-item" data-tab="planner" onclick="switchTab('planner')"><i class="ti ti-tool"></i> Planner</div>
     <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting</div>
+    <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><i class="ti ti-bell"></i> Alerts</div>
   </div>
 </aside>
 
@@ -597,6 +622,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
     <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
+    <div id="tab-alerts" style="display:none"><div id="alerts-content"></div></div>
   </main>
 </div>
 
@@ -1055,7 +1081,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -1090,6 +1116,7 @@ function switchTab(tab) {
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
   else if (tab === 'tools') renderToolCrafting();
+  else if (tab === 'alerts') renderAlerts();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
 }
@@ -1212,6 +1239,8 @@ function refreshPlayerTabs() {
     renderPlannerInventory();
     if (plannerInvOpen && trackedPlayers.length) loadPlannerInventory().then(() => { computePlannerInvMap(); renderPlannerInventory(); renderPlanPanel(); renderBuildingSteps(); });
   }
+  else if (currentTab === 'alerts') renderAlerts();
+  if (typeof restartAlerts === 'function') restartAlerts(); // roster changed → reset alert baselines
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -5852,6 +5881,171 @@ function slotContents(slot) {
 // Bootstrap. Pull any server-backed prefs FIRST (fills keys missing locally — restores a fresh or
 // cleared browser from the backup) so the initial render doesn't overwrite the backup with defaults.
 // restorePrefsFromServer has a short timeout, so a slow/absent backend never blocks the UI for long.
+// ══════════════════════════════════════════════════════════════════════════
+// ALERTS / NOTIFICATIONS
+// Background poller over tracked players: plays a sound + toast when a buff is lost (food or any
+// beneficial), a passive craft finishes, or a player goes idle. Each alert has its own on/off + sound,
+// with a shared master toggle and volume. (Stamina isn't exposed by the game API, so it's not offered.)
+// ══════════════════════════════════════════════════════════════════════════
+const ALERT_DEFAULTS = {
+  master: true, volume: 0.6,
+  types: {
+    buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
+    craftDone: { on:false, sound:'ding' },
+    idle:      { on:false, sound:'alarm', seconds:60 },
+  }
+};
+const ALERT_META = {
+  buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff' },
+  craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes' },
+  idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving' },
+};
+let alertSettings = null;
+function loadAlerts(){
+  if (alertSettings) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('bc_alerts') || '{}');
+    alertSettings = { ...ALERT_DEFAULTS, ...saved, types: {} };
+    for (const k of Object.keys(ALERT_DEFAULTS.types)) alertSettings.types[k] = { ...ALERT_DEFAULTS.types[k], ...((saved.types||{})[k]||{}) };
+  } catch(e) { alertSettings = JSON.parse(JSON.stringify(ALERT_DEFAULTS)); }
+}
+function saveAlerts(){ try { safeSetItem('bc_alerts', JSON.stringify(alertSettings)); } catch(e){} }
+
+// ── Sound engine (WebAudio; no audio files needed) ──
+let _actx = null;
+function actx(){ try { _actx = _actx || new (window.AudioContext||window.webkitAudioContext)(); if (_actx.state === 'suspended') _actx.resume(); } catch(e){} return _actx; }
+function _blip(c, t0, freq, dur, gain, type){
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type || 'sine'; o.frequency.value = freq;
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(gain, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(c.destination);
+  o.start(t0); o.stop(t0 + dur + 0.03);
+}
+const ALERT_SOUNDS = {
+  chime: (c,t,v)=>{ [660,880,1320].forEach((f,i)=>_blip(c,t+i*0.12,f,0.30,0.25*v,'sine')); },
+  ding:  (c,t,v)=>{ _blip(c,t,1050,0.5,0.32*v,'sine'); _blip(c,t,1575,0.5,0.11*v,'sine'); },
+  alarm: (c,t,v)=>{ for(let i=0;i<3;i++){ _blip(c,t+i*0.20,880,0.10,0.3*v,'square'); _blip(c,t+i*0.20+0.10,660,0.10,0.3*v,'square'); } },
+  beep:  (c,t,v)=>{ _blip(c,t,760,0.15,0.3*v,'triangle'); },
+  coin:  (c,t,v)=>{ _blip(c,t,988,0.08,0.28*v,'square'); _blip(c,t+0.08,1319,0.24,0.28*v,'square'); },
+  pluck: (c,t,v)=>{ _blip(c,t,523,0.16,0.3*v,'triangle'); _blip(c,t+0.14,784,0.32,0.28*v,'triangle'); },
+};
+const ALERT_SOUND_NAMES = Object.keys(ALERT_SOUNDS);
+function playAlertSound(name, volOverride){
+  loadAlerts();
+  const c = actx(); if (!c) return;
+  const v = Math.max(0, Math.min(1, volOverride != null ? volOverride : alertSettings.volume));
+  (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, c.currentTime + 0.03, v);
+}
+
+// ── Toast ──
+function alertToast(msg, icon){
+  let host = document.getElementById('alert-toasts');
+  if (!host){ host = document.createElement('div'); host.id = 'alert-toasts'; document.body.appendChild(host); }
+  const el = document.createElement('div');
+  el.className = 'alert-toast';
+  el.innerHTML = `<i class="ti ${icon||'ti-bell'}"></i><span>${escHtml(msg)}</span>`;
+  host.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(), 300); }, 5000);
+}
+function fireAlert(typeKey, msg){
+  const t = alertSettings.types[typeKey]; if (!t) return;
+  playAlertSound(t.sound);
+  alertToast(msg, (ALERT_META[typeKey]||{}).icon);
+}
+
+// ── Poller ──
+let alertTimer = null;
+let alertState = {}; // entityId -> tracking between polls (baselines)
+const ALERT_POLL_MS = 15000;
+function alertsEnabled(){ loadAlerts(); return alertSettings.master && trackedPlayers.length && Object.values(alertSettings.types).some(t=>t.on); }
+function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
+function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
+function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
+async function alertsTick(){
+  if (!alertsEnabled()){ stopAlerts(); return; }
+  const T = alertSettings.types;
+  if (T.craftDone.on){ try { await loadCraftingData(); } catch(e){} }
+  for (const p of activePlayers()){
+    const id = String(p.entityId);
+    const st = alertState[id] || (alertState[id] = {});
+    try {
+      if (T.buffLost.on){
+        const d = await apiFetch(`/api/players/${id}/buffs`);
+        const active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
+        const wanted = b => T.buffLost.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
+        const cur = new Set(active.filter(wanted).map(b => b.buffTypeName || b.buffName));
+        if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
+        st.buffs = cur;
+      }
+      if (T.idle.on){
+        const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
+        const now = Date.now();
+        const key = pl.signedIn ? ((pl.experience||[]).reduce((s,e)=>s+(e.quantity||0),0) + '|' + pl.locationX + '|' + pl.locationZ) : null;
+        if (!pl.signedIn){ st.actKey = null; st.actTs = now; st.idleFired = false; }
+        else if (key !== st.actKey){ st.actKey = key; st.actTs = now; st.idleFired = false; }
+        else if (st.actTs && !st.idleFired && (now - st.actTs) >= (T.idle.seconds||60)*1000){ st.idleFired = true; fireAlert('idle', `${playerName(p)} has been idle for ${T.idle.seconds||60}s`); }
+      }
+      if (T.craftDone.on){
+        const cd = await fetchPlayerCrafts(id);
+        const now = Math.floor(Date.now()/1000);
+        const pending = st.craftPending || {};
+        const next = {};
+        (cd.passive||[]).forEach(c => {
+          const done = passiveCompletionTs(c);
+          if (!done) return;
+          const key = (c.id||c.entityId||c.recipeId||'x') + ':' + done;
+          if (done > now) next[key] = done;               // still cooking → carry forward
+          else if (pending[key]) fireAlert('craftDone', `${playerName(p)} — a passive craft finished`); // was pending, now done
+        });
+        st.craftPending = next;
+      }
+    } catch(e){ /* skip this player this cycle */ }
+  }
+}
+
+// ── Settings UI ──
+function renderAlerts(){
+  const el = document.getElementById('alerts-content'); if (!el) return;
+  loadAlerts();
+  const soundOpts = sel => ALERT_SOUND_NAMES.map(n=>`<option value="${n}"${sel===n?' selected':''}>${cap(n)}</option>`).join('');
+  const typeRow = (key)=>{
+    const m = ALERT_META[key], t = alertSettings.types[key];
+    let extra = '';
+    if (key==='buffLost') extra = `<select class="sj-input al-extra" onchange="setAlertScope(this.value)"><option value="food"${t.scope==='food'?' selected':''}>Food buff only</option><option value="any"${t.scope==='any'?' selected':''}>Any buff</option></select>`;
+    if (key==='idle') extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${t.seconds}" class="sj-input" style="width:64px" onchange="setAlertIdleSecs(this.value)"> s</label>`;
+    return `<div class="al-row${t.on?'':' al-off'}">
+      <label class="al-toggle"><input type="checkbox" ${t.on?'checked':''} onchange="toggleAlertType('${key}',this.checked)"> <i class="ti ${m.icon}"></i> <span class="al-name">${m.label}</span></label>
+      <div class="al-desc">${m.desc}</div>
+      <div class="al-controls">
+        ${extra}
+        <select class="sj-input al-sound" onchange="setAlertSound('${key}',this.value)">${soundOpts(t.sound)}</select>
+        <button class="btn ctrl-btn" onclick="testAlert('${key}')" title="Test sound"><i class="ti ti-volume"></i></button>
+      </div>
+    </div>`;
+  };
+  el.innerHTML = `
+    <div class="al-wrap">
+      <div class="al-head">
+        <label class="al-toggle al-master"><input type="checkbox" ${alertSettings.master?'checked':''} onchange="toggleAlertMaster(this.checked)"> <i class="ti ti-bell"></i> <b>Sound alerts</b></label>
+        <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="playAlertSound('chime')">Test</button></div>
+      </div>
+      <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina isn't available</b> from the game API, so it can't be alerted on yet.</div>
+      <div class="al-list">
+        ${Object.keys(ALERT_META).map(typeRow).join('')}
+      </div>
+    </div>`;
+}
+function toggleAlertMaster(on){ loadAlerts(); alertSettings.master = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
+function setAlertVolume(v){ loadAlerts(); alertSettings.volume = parseFloat(v); saveAlerts(); }
+function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
+function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); playAlertSound(v); }
+function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
+function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); saveAlerts(); restartAlerts(); }
+function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
+
 (async () => {
   try { await restorePrefsFromServer(); } catch(e) {}
   try { const t = localStorage.getItem('bc_tab'); if (t && document.getElementById('tab-'+t)) currentTab = t; } catch(e) {}
@@ -5875,6 +6069,7 @@ function slotContents(slot) {
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
+  loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
 })();
 </script>
 </body>
