@@ -1195,6 +1195,7 @@ function removeTrackedPlayer(id) {
     toolTrackedInvs = null;
     tasksTrackedInvs = new Set(); tasksInvsInited = false;
     stopAllLive(); stopLiveRefresh();
+    if (typeof stopLive === 'function') stopLive();
   }
   renderPlayerArea();
   refreshPlayerTabs();
@@ -1241,6 +1242,7 @@ function refreshPlayerTabs() {
   }
   else if (currentTab === 'alerts') renderAlerts();
   if (typeof restartAlerts === 'function') restartAlerts(); // roster changed → reset alert baselines
+  if (typeof startLive === 'function') startLive();          // re-subscribe live feed to the new roster
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -1303,6 +1305,7 @@ function togglePlayerMonitor(id, iconEl){
   const section = iconEl.closest('.player-section');
   const badge = section ? section.querySelector('.psec-paused') : null;
   if (badge) badge.style.display = nowPaused ? '' : 'none';
+  if (typeof startLive === 'function') startLive();   // paused players drop out of the live feed
 }
 
 // ── XP / LEVEL HELPERS ──
@@ -1589,7 +1592,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
         const rank = rankings[sk.skillId];
         const ti = tierInfo(sk.level);
         const active = !!(sess[sk.skillId] && sess[sk.skillId].active);
-        return `<div class="skill-card tiered${active?' skill-active':''}" style="--tc:${ti.c};--tcbg:${ti.bg}" onclick="openSkillJourney('${entityId}',${sk.skillId})">
+        return `<div class="skill-card tiered${active?' skill-active':''}" data-skill="${sk.skillId}" style="--tc:${ti.c};--tcbg:${ti.bg}" onclick="openSkillJourney('${entityId}',${sk.skillId})">
           <div class="skill-card-header">
             <div class="skill-card-name-wrap">
               <span class="skill-card-name">${escHtml(sk.name)}</span>
@@ -5985,7 +5988,7 @@ async function alertsTick(){
         if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
         st.buffs = cur;
       }
-      if (T.stamina.on){
+      if (T.stamina.on && !liveConnected()){   // live feed handles stamina instantly when connected
         const d = await apiFetch(`/api/players/${id}/stats`);
         const v = d.stats && d.stats.values;
         const cur = v ? v[STAT_IDX.stamina] : undefined;
@@ -6062,6 +6065,87 @@ function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v;
 function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); saveAlerts(); restartAlerts(); }
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
+// ══════════════════════════════════════════════════════════════════════════
+// LIVE FEED — SSE relay of bitjita's realtime websocket (instant stamina / XP / buffs).
+// The proxy holds the upstream ws; we just consume /live?players=… as an EventSource.
+// ══════════════════════════════════════════════════════════════════════════
+let liveES = null, liveIdsKey = '';
+let liveStamina = {};        // entityId -> { current, max }
+window.__liveLog = [];       // last raw messages — inspect to confirm live payload shapes
+function liveConnected(){ return !!liveES && liveES.readyState === 1; }
+function liveNum(x){ if (x == null || x === '') return null; const n = +x; return isNaN(n) ? null : n; }
+function startLive(){
+  const ids = activePlayers().map(p => String(p.entityId));
+  const key = ids.join(',');
+  if (liveES && key === liveIdsKey && liveES.readyState !== 2) return; // already streaming this set
+  stopLive();
+  liveIdsKey = key;
+  if (!ids.length) return;
+  try {
+    liveES = new EventSource(API + '/live?players=' + encodeURIComponent(key));
+    liveES.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch(_){ return; } handleLiveMessage(m); };
+    liveES.onerror = () => {}; // EventSource reconnects on its own
+  } catch(e){}
+}
+function stopLive(){ if (liveES){ try { liveES.close(); } catch(_){} liveES = null; } liveIdsKey = ''; }
+function handleLiveMessage(m){
+  window.__liveLog.push(m); if (window.__liveLog.length > 50) window.__liveLog.shift();
+  const ch = m.channel || '';
+  const id = ch.includes(':') ? ch.split(':').pop() : (m.entityId || m.entity_id);
+  if (!id) return;
+  const data = m.data != null ? m.data : (m.payload != null ? m.payload : m);
+  if (ch.indexOf('stamina_state') === 0) onLiveStamina(String(id), data);
+  else if (ch.indexOf('experience_state') === 0) onLiveExperience(String(id), data);
+}
+function onLiveStamina(id, data){
+  if (!data || typeof data !== 'object') return;
+  const cur = liveNum(data.stamina ?? data.current ?? data.currentStamina ?? data.current_stamina ?? data.value);
+  const max = liveNum(data.maxStamina ?? data.max ?? data.max_stamina);
+  if (cur == null) return;
+  const prev = liveStamina[id] || {};
+  liveStamina[id] = { current: cur, max: (max != null ? max : prev.max) };
+  loadAlerts();
+  const t = alertSettings.types.stamina;
+  if (!(t && t.on && alertSettings.master) || isPlayerPaused(id) || !isPlayerTracked(id)) return;
+  const st = alertState[id] || (alertState[id] = {});
+  let ceiling = liveStamina[id].max;
+  if (ceiling == null){ st.stamRunMax = Math.max(st.stamRunMax || 0, cur); ceiling = st.stamRunMax; }
+  if (cur < ceiling) st.liveStamBelow = true;
+  else if (st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); }
+}
+function onLiveExperience(id, data){
+  const store = skillsByPlayer[id]; if (!store || !store.skills) return;
+  const rows = Array.isArray(data) ? data : (Array.isArray(data.experience) ? data.experience : (Array.isArray(data.stacks) ? data.stacks : [data]));
+  const changed = [];
+  rows.forEach(r => {
+    if (!r || typeof r !== 'object') return;
+    const sid = (r.skill_id != null ? r.skill_id : r.skillId);
+    const qty = liveNum(r.quantity != null ? r.quantity : (r.xp != null ? r.xp : r.total));
+    if (sid == null || qty == null) return;
+    const sk = store.skills.find(s => s.skillId === sid);
+    if (sk && qty !== sk.xp){ sk.xp = qty; sk.level = xpToLevel(qty); sk.pct = levelPct(qty); sk.toNext = xpToNext(qty); sk.intoLevel = xpIntoLevel(qty); changed.push(sk); }
+  });
+  if (!changed.length) return;
+  updateSkillSession(id, store.skills);
+  if (currentTab === 'skills') changed.forEach(sk => updateSkillCardLive(id, sk));
+}
+function updateSkillCardLive(id, sk){
+  const body = document.getElementById('psec-skills-' + id); if (!body) return;
+  const card = body.querySelector(`.skill-card[data-skill="${sk.skillId}"]`); if (!card) return;
+  const ti = tierInfo(sk.level);
+  const active = !!(skillSession[id] && skillSession[id][sk.skillId] && skillSession[id][sk.skillId].active);
+  card.style.setProperty('--tc', ti.c); card.style.setProperty('--tcbg', ti.bg);
+  card.classList.toggle('skill-active', active);
+  const lv = card.querySelector('.skill-card-level'); if (lv) lv.textContent = sk.level;
+  const tb = card.querySelector('.skill-tier-badge'); if (tb) tb.textContent = 'T' + ti.t;
+  const bar = card.querySelector('.skill-bar'); if (bar) bar.style.width = sk.pct + '%';
+  const pctEls = card.querySelectorAll('.skill-card-row span'); if (pctEls[1]) pctEls[1].textContent = sk.pct + '%';
+  const xpRow = card.querySelector('.skill-xp-row'); if (xpRow) xpRow.textContent = `${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP`;
+  let badge = card.querySelector('.skill-active-badge');
+  if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
+  else if (!active && badge){ badge.remove(); }
+}
+
 (async () => {
   try { await restorePrefsFromServer(); } catch(e) {}
   try { const t = localStorage.getItem('bc_tab'); if (t && document.getElementById('tab-'+t)) currentTab = t; } catch(e) {}
@@ -6086,6 +6170,7 @@ function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].s
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
+  startLive();                  // realtime feed for instant stamina / XP
 })();
 </script>
 </body>

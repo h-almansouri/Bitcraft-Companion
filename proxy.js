@@ -201,6 +201,38 @@ function serveFileCached(req, res, filePath, contentType) {
   res.end(fs.readFileSync(filePath));
 }
 
+// ── Live realtime relay ────────────────────────────────────────────────────
+// bitjita exposes a realtime websocket (wss://live.bitjita.com) that rebroadcasts the game's
+// SpacetimeDB state. We hold ONE upstream connection here and fan updates out to browsers over SSE
+// (GET /live?players=id1,id2). This gives instant stamina / XP / buff updates instead of polling.
+// (Uses the global WebSocket client, hence Node >=22.)
+const LIVE_URL = 'wss://live.bitjita.com';
+const LIVE_CHANNELS = ['stamina_state', 'experience_state', 'buffs_state', 'health_state', 'satiation_state'];
+let liveWs = null, liveReady = false, liveBackoff = 1000;
+const liveClients = new Set();   // SSE res objects; each carries ._ids (Set) and ._chans (array)
+const liveChanRefs = new Map();  // channel -> ref count (union across clients)
+function liveEnsure() {
+  if (liveWs || !liveClients.size) return;
+  let ws;
+  try { ws = new WebSocket(LIVE_URL); } catch (e) { setTimeout(liveEnsure, liveBackoff); return; }
+  liveWs = ws;
+  ws.onopen = () => { liveReady = true; liveBackoff = 1000; const chans = [...liveChanRefs.keys()]; if (chans.length) liveWsSend({ type: 'subscribe', channels: chans }); };
+  ws.onmessage = (e) => liveFanout(typeof e.data === 'string' ? e.data : String(e.data));
+  ws.onclose = () => { liveReady = false; liveWs = null; if (liveClients.size) { liveBackoff = Math.min(liveBackoff * 2, 15000); setTimeout(liveEnsure, liveBackoff); } };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+function liveWsSend(obj) { if (liveReady && liveWs) { try { liveWs.send(JSON.stringify(obj)); } catch (_) {} } }
+function liveFanout(raw) {
+  let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
+  if (msg.type === 'subscribed' || msg.type === 'unsubscribed' || msg.type === 'error' || msg.type === 'pong') return;
+  const ch = msg.channel || '';
+  const id = ch.includes(':') ? ch.split(':').pop() : null;   // route by entityId when present
+  liveClients.forEach(res => { if (!id || res._ids.has(id)) { try { res.write('data: ' + raw + '\n\n'); } catch (_) {} } });
+}
+function liveChannelsFor(ids) { const out = []; ids.forEach(id => LIVE_CHANNELS.forEach(c => out.push(c + ':' + id))); return out; }
+function liveAddRefs(chans) { const sub = []; chans.forEach(c => { const n = liveChanRefs.get(c) || 0; if (!n) sub.push(c); liveChanRefs.set(c, n + 1); }); if (sub.length) liveWsSend({ type: 'subscribe', channels: sub }); }
+function liveRemoveRefs(chans) { const un = []; chans.forEach(c => { const n = liveChanRefs.get(c) || 0; if (n <= 1) { liveChanRefs.delete(c); un.push(c); } else liveChanRefs.set(c, n - 1); }); if (un.length) liveWsSend({ type: 'unsubscribe', channels: un }); }
+
 http.createServer((req, res) => {
   res.on('error', () => {}); // client aborted mid-response (common under bursty load) — ignore, don't crash
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -210,6 +242,21 @@ http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
+    return;
+  }
+
+  // Live feed (SSE): stream realtime updates for the given players from bitjita's websocket.
+  if (req.url.split('?')[0] === '/live') {
+    const ids = (new URL(req.url, 'http://x').searchParams.get('players') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.write(': connected\n\n');
+    const chans = liveChannelsFor(ids);
+    res._ids = new Set(ids); res._chans = chans;
+    liveClients.add(res);
+    liveEnsure(); liveAddRefs(chans);
+    const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
+    const cleanup = () => { clearInterval(hb); if (liveClients.delete(res)) liveRemoveRefs(chans); };
+    req.on('close', cleanup); res.on('close', cleanup);
     return;
   }
 
