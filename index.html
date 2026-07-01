@@ -1255,21 +1255,28 @@ function xpIntoLevel(xp) {
   return xp - floor;
 }
 
-// ── SKILL TIERS / COLORS ──  tier = floor(level/10) (Lv39 -> T3, next tier at Lv40)
+// ── SKILL TIERS / COLORS ──  Tier 1 = levels 1-20 (grey); each 10 levels above 20 is the next tier.
+// Array is indexed by tier number (index 0 is an unused fallback), so TIER_COLORS[1] == Tier 1.
 const TIER_COLORS = [
-  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // T0  (1-9)   grey
-  {c:'#4ac26b', bg:'rgba(74,194,107,.15)'},   // T1  (10-19) green
-  {c:'#1fc7c7', bg:'rgba(31,199,199,.15)'},   // T2         teal
-  {c:'#4c8dff', bg:'rgba(76,141,255,.16)'},   // T3         blue
-  {c:'#8a5cff', bg:'rgba(138,92,255,.17)'},   // T4         violet
-  {c:'#c85cff', bg:'rgba(200,92,255,.17)'},   // T5         magenta
-  {c:'#ff5cae', bg:'rgba(255,92,174,.17)'},   // T6         pink
-  {c:'#ff5c5c', bg:'rgba(255,92,92,.17)'},    // T7         red
-  {c:'#ff8f3b', bg:'rgba(255,143,59,.18)'},   // T8         orange
-  {c:'#ffc933', bg:'rgba(255,201,51,.18)'},   // T9         amber
-  {c:'#ffe873', bg:'rgba(255,232,115,.20)'},  // T10 (100+) gold
+  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // (fallback)  grey
+  {c:'#9aa4b2', bg:'rgba(154,164,178,.10)'},  // T1  (1-20)    grey
+  {c:'#4ac26b', bg:'rgba(74,194,107,.15)'},   // T2  (21-30)   green
+  {c:'#1fc7c7', bg:'rgba(31,199,199,.15)'},   // T3  (31-40)   teal
+  {c:'#4c8dff', bg:'rgba(76,141,255,.16)'},   // T4  (41-50)   blue
+  {c:'#8a5cff', bg:'rgba(138,92,255,.17)'},   // T5  (51-60)   violet
+  {c:'#c85cff', bg:'rgba(200,92,255,.17)'},   // T6  (61-70)   magenta
+  {c:'#ff5cae', bg:'rgba(255,92,174,.17)'},   // T7  (71-80)   pink
+  {c:'#ff5c5c', bg:'rgba(255,92,92,.17)'},    // T8  (81-90)   red
+  {c:'#ff8f3b', bg:'rgba(255,143,59,.18)'},   // T9  (91-100)  orange
+  {c:'#ffc933', bg:'rgba(255,201,51,.18)'},   // T10 (101-110) amber
+  {c:'#ffe873', bg:'rgba(255,232,115,.20)'},  // T11 (111+)    gold
 ];
-function tierInfo(level){ const t = Math.max(0, Math.min(TIER_COLORS.length-1, Math.floor((level||0)/10))); return {t, c:TIER_COLORS[t].c, bg:TIER_COLORS[t].bg}; }
+function tierInfo(level){
+  level = level || 0;
+  const t = level <= 20 ? 1 : Math.floor((level - 1) / 10);
+  const idx = Math.max(1, Math.min(TIER_COLORS.length - 1, t));
+  return {t, c:TIER_COLORS[idx].c, bg:TIER_COLORS[idx].bg};
+}
 
 // ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
 function updateSkillSession(entityId, skills){
