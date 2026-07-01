@@ -160,6 +160,22 @@ main.planner-mode{max-width:none;padding:1rem}
 .sj-field label{display:block;font-size:10px;color:var(--text3);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.04em}
 /* task trader collapse chevron */
 .task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
+/* tool crafting grid */
+.tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
+.tool-grid-row{display:grid;grid-template-columns:70px repeat(5,1fr);gap:6px;align-items:stretch}
+.tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
+.tool-per{color:var(--text3);font-weight:500;margin-left:3px;text-transform:none}
+.tool-tier-cell{display:flex;align-items:center;justify-content:center;border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;background:var(--bg3)}
+.tool-tier-badge{font-size:14px;font-weight:800;color:var(--tc,var(--text))}
+.tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:9px 6px}
+.tool-have{font-size:15px;font-weight:700;color:var(--text)}
+.tool-cell.tool-ok .tool-have{color:var(--green-light)}
+.tool-cell.tool-low .tool-have{color:var(--amber-light)}
+.tool-cell.tool-zero{opacity:.5}
+.tool-cell.tool-zero .tool-have{color:var(--text3)}
+.tool-cell.tool-tools{background:var(--bg4)}
+.tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
+@media(max-width:720px){.tool-grid-row{grid-template-columns:44px repeat(5,1fr);gap:4px}.tool-cell{flex-direction:column;gap:2px;padding:6px 2px}.tool-hcell{font-size:9px}.tool-have{font-size:13px}}
 
 /* ── INVENTORY ── */
 .inv-group{margin-bottom:1rem}
@@ -541,6 +557,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div class="nav-item" data-tab="shopping" onclick="switchTab('shopping')"><i class="ti ti-shopping-cart"></i> Shopping List</div>
     <div class="nav-item" data-tab="map" onclick="switchTab('map')"><i class="ti ti-map-2"></i> Map</div>
     <div class="nav-item" data-tab="planner" onclick="switchTab('planner')"><i class="ti ti-tool"></i> Planner</div>
+    <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting</div>
   </div>
 </aside>
 
@@ -560,6 +577,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div id="tab-shopping" style="display:none"><div id="shopping-content"></div></div>
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
+    <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
   </main>
 </div>
 
@@ -732,10 +750,14 @@ let plannerTrackedInvs = null; // Set of inventory indices being tracked (null =
 let plannerInvMap = {};        // itemId -> total qty from tracked inventories
 let plannerInvOpen = false;    // whether inventory section is expanded
 let taskInvOpen = false;       // whether task inventory section is expanded
+let toolTrackedInvs = null;    // Set of merged-invData indices tracked for Tool crafting (null = not init)
+let toolInvOpen = false;       // whether the Tool crafting inventory selector is expanded
 
 // ── Inventory tracking persistence helpers ──
+// Include owner id so identically-named inventories from different players don't collide (the merged
+// invData used by Planner + Tool crafting spans all tracked players).
 function _invNameKey(inv) {
-  return (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
+  return (inv._ownerId || '') + '||' + (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
 }
 function _resolveTrackedByName(invs, names) {
   const nameSet = new Set(names);
@@ -1014,7 +1036,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting'};
 function switchTab(tab) {
   stopLiveRefresh();
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -1048,6 +1070,7 @@ function switchTab(tab) {
   else if (tab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
+  else if (tab === 'tools') renderToolCrafting();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
 }
@@ -1123,6 +1146,7 @@ function removeTrackedPlayer(id) {
   savePlayers();
   if (!trackedPlayers.length) {
     invData = null; plannerTrackedInvs = null; plannerInvMap = {};
+    toolTrackedInvs = null;
     tasksTrackedInvs = new Set(); tasksInvsInited = false;
     stopAllLive(); stopLiveRefresh();
   }
@@ -1154,6 +1178,9 @@ function renderPlayerArea() {
 }
 // Re-render the active player tab after the tracked list changes.
 function refreshPlayerTabs() {
+  // The merged inventory shared by Planner + Tool crafting depends on the tracked roster — invalidate
+  // it so it reloads; tracked selections re-resolve from their persisted (owner-aware) names.
+  invData = null; plannerTrackedInvs = null; toolTrackedInvs = null; plannerInvMap = {};
   if (!trackedPlayers.length) {
     ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
   }
@@ -1161,6 +1188,11 @@ function refreshPlayerTabs() {
   else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
   else if (currentTab === 'inventory') renderInventoryTab();
   else if (currentTab === 'crafting') renderCraftingTab();
+  else if (currentTab === 'tools') renderToolCrafting();
+  else if (currentTab === 'planner') {
+    renderPlannerInventory();
+    if (plannerInvOpen && trackedPlayers.length) loadPlannerInventory().then(() => { computePlannerInvMap(); renderPlannerInventory(); renderPlanPanel(); renderBuildingSteps(); });
+  }
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -1571,6 +1603,7 @@ function toggleTabLive(tab) {
       if (document.hidden) return;
       if (tab === 'tasks')   loadTasks(currentPlayer?.entityId, true);
       else if (tab === 'planner') refreshPlannerInv();
+      else if (tab === 'tools') refreshToolInv();
       else if (tab === 'shopping') fetchAllShoppingPrices();
       else loadTab(tab, true);
     }, ms);
@@ -1586,7 +1619,7 @@ function stopAllLive() {
 }
 
 function updateLiveBtns() {
-  ['inventory', 'crafting', 'tasks', 'planner', 'shopping'].forEach(tab => {
+  ['inventory', 'crafting', 'tasks', 'planner', 'shopping', 'tools'].forEach(tab => {
     const btn = document.getElementById('live-btn-' + tab);
     if (!btn) return;
     const on = isTabLive(tab);
@@ -1598,28 +1631,12 @@ function updateLiveBtns() {
 }
 
 async function refreshPlannerInv() {
-  // Preserve tracked inventory names so selections survive a refresh
-  const trackedNames = new Set();
-  if (plannerTrackedInvs && invData) {
-    (invData.inventories || []).forEach((inv, i) => {
-      if (plannerTrackedInvs.has(i)) {
-        trackedNames.add((inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || ''));
-      }
-    });
-  }
+  // Preserve tracked inventory names so selections survive a refresh (owner-aware keys)
+  const savedNames = [];
+  if (plannerTrackedInvs && invData) (invData.inventories || []).forEach((inv, i) => { if (plannerTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
   invData = null;
   await loadPlannerInventory();
-  // Restore selections by name
-  if (invData && trackedNames.size > 0) {
-    const invs = invData.inventories || [];
-    plannerTrackedInvs = new Set();
-    invs.forEach((inv, i) => {
-      const key = (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
-      if (trackedNames.has(key)) plannerTrackedInvs.add(i);
-    });
-  } else {
-    plannerTrackedInvs = new Set(); // default: none selected
-  }
+  plannerTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories || [], savedNames) : new Set();
   computePlannerInvMap();
   renderPlannerInventory();
   renderPlanPanel();
@@ -5116,48 +5133,21 @@ async function renderCraftVsBuy(){
 }
 
 // ── PLANNER INVENTORY ──
+// Load ALL tracked players' inventories, merged into one invData tagged by owner. Shared by the
+// Planner and Tool crafting tabs (both index into invData.inventories with their own tracked Set).
 async function loadPlannerInventory() {
-  if (!currentPlayer) return;
-  if (invData) return; // already loaded (e.g. from Inventory tab)
-  try {
-    const id = currentPlayer.entityId;
-    // Fetch main inventories + housing in parallel (same as loadInventory)
-    const [d, housingList] = await Promise.all([
-      apiFetch(`/api/players/${id}/inventories`),
-      apiFetch(`/api/players/${id}/housing`).catch(() => [])
-    ]);
-    const houses = Array.isArray(housingList) ? housingList.filter(h => !h.isEmpty) : [];
-    const houseDetails = await Promise.all(
-      houses.map(h => apiFetch(`/api/players/${id}/housing/${h.buildingEntityId}`).catch(() => null))
-    );
-    const housingInvs = [];
-    houseDetails.forEach((hd, i) => {
-      if (!hd) return;
-      const house = houses[i];
-      (hd.items  || []).forEach(item  => { d.items [item.id]  = item;  });
-      (hd.cargos || []).forEach(cargo => { d.cargos[cargo.id] = cargo; });
-      (hd.inventories || []).forEach(inv => {
-        const slots = (inv.inventory || [])
-          .filter(slot => slot.contents && slot.contents.item_id)
-          .map(slot => ({
-            contents: {
-              itemId:   slot.contents.item_id,
-              itemType: (slot.contents.item_type === 'cargo' || slot.contents.item_type === 1) ? 1 : 0,
-              quantity: slot.contents.quantity
-            }
-          }));
-        if (!slots.length) return;
-        housingInvs.push({
-          inventoryName: inv.buildingNickname || inv.buildingName || hd.buildingName || 'House',
-          claimName:     hd.claimName  || house.claimName  || 'Housing',
-          regionId:      hd.regionId   || house.regionId   || null,
-          _isHousing: true,
-          pockets: slots
-        });
-      });
-    });
-    invData = { ...d, inventories: [...(d.inventories || []), ...housingInvs] };
-  } catch(e) { /* silently ignore */ }
+  if (!trackedPlayers.length) return;
+  if (invData) return; // already loaded
+  const merged = { inventories: [], items: {}, cargos: {} };
+  const results = await Promise.all(trackedPlayers.map(p =>
+    fetchPlayerInv(p.entityId).then(inv => ({ p, inv })).catch(() => ({ p, inv: { inventories: [], items: {}, cargos: {} } }))
+  ));
+  results.forEach(({ p, inv }) => {
+    Object.assign(merged.items, inv.items || {});
+    Object.assign(merged.cargos, inv.cargos || {});
+    (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
+  });
+  invData = merged;
 }
 
 function computePlannerInvMap() {
@@ -5190,10 +5180,52 @@ function computePlannerInvMap() {
   plannerInvMap = map;
 }
 
+// Grouped-by-player inventory chips (shared by Planner + Tool crafting). `trackedSet` is a Set of
+// indices into the merged invData.inventories; `toggleFn` is the name of the per-index click handler.
+function renderTrackedInvChips(trackedSet, toggleFn) {
+  if (!invData) return '';
+  const groups = {};
+  (invData.inventories || []).forEach((inv, idx) => {
+    const oid = inv._ownerId || '?';
+    if (!groups[oid]) groups[oid] = { personal: [], house: [], bank: [] };
+    const c = inv._isHousing ? 'house' : (inv.claimName ? 'bank' : 'personal');
+    const on = trackedSet.has(idx);
+    const label = escHtml(inv.inventoryName || inv.buildingName || 'Unknown');
+    const claim = (!inv._isHousing && inv.claimName) ? `<span class="inv-loc-claim">${escHtml(inv.claimName)}</span>` : '';
+    groups[oid][c].push(`<span class="planner-inv-loc${on ? ' active' : ''}" onclick="${toggleFn}(${idx})"><i class="ti ti-${on ? 'checkbox' : 'square'}" style="font-size:13px"></i> ${label}${claim}</span>`);
+  });
+  const cat = (title, icon, arr) => !arr.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${arr.join('')}</div></div>`;
+  const out = trackedPlayers.map(p => {
+    const g = groups[String(p.entityId)];
+    if (!g) return '';
+    return `<div style="margin-bottom:.55rem">
+      <div style="font-size:12px;font-weight:600;color:var(--teal-light);margin-bottom:.25rem"><i class="ti ti-user" style="font-size:12px"></i> ${escHtml(playerName(p))}</div>
+      ${cat('Personal','ti-user',g.personal)}${cat('House','ti-home',g.house)}${cat('Town Banks','ti-building-bank',g.bank)}
+    </div>`;
+  }).join('');
+  return out || '<div style="font-size:12px;color:var(--text3)">No inventory locations found</div>';
+}
+// Pool item counts (by lowercase name) across the selected merged inventories.
+function poolInvByIndices(trackedSet) {
+  const byName = {};
+  if (!invData) return byName;
+  const { inventories = [], items = {}, cargos = {} } = invData;
+  inventories.forEach((inv, idx) => {
+    if (!trackedSet.has(idx)) return;
+    (inv.pockets || []).forEach(pk => {
+      const s = slotContents(pk); if (!s) return;
+      const meta = s.itemType === 1 ? cargos[s.itemId] : items[s.itemId];
+      const nm = (meta?.name || meta?.itemName || '').toLowerCase();
+      if (nm) byName[nm] = (byName[nm] || 0) + s.quantity;
+    });
+  });
+  return byName;
+}
+
 function renderPlannerInventory() {
   const el = document.getElementById('planner-inv-body');
   if (!el) return;
-  if (!currentPlayer) {
+  if (!trackedPlayers.length) {
     el.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:.25rem 0"><i class="ti ti-user-x"></i> Search for a player to load inventory</div>';
     return;
   }
@@ -5215,42 +5247,9 @@ function renderPlannerInventory() {
     computePlannerInvMap();
   }
 
-  // Categorize inventories into 3 groups
-  const cats = { personal: [], house: [], bank: [] };
-  invs.forEach((inv, idx) => {
-    if (inv._isHousing)      cats.house.push({ inv, idx });
-    else if (inv.claimName)  cats.bank.push({ inv, idx });
-    else                     cats.personal.push({ inv, idx });
-  });
-
-  const makeChip = ({ inv, idx }) => {
-    const name   = escHtml(inv.inventoryName || inv.buildingName || 'Inventory');
-    // Only show claim name for bank/storage, not for housing
-    const claim  = (!inv._isHousing && inv.claimName) ? `<span class="inv-loc-claim">· ${escHtml(inv.claimName)}</span>` : '';
-    const slots  = (inv.pockets || []).filter(p => slotContents(p)).length;
-    const active = plannerTrackedInvs.has(idx);
-    const icon   = active ? 'ti-checkbox' : 'ti-square';
-    return `<span class="planner-inv-loc${active ? ' active' : ''}" onclick="togglePlannerInvLoc(${idx})">
-      <i class="ti ${icon}" style="font-size:13px"></i>${name}${claim}
-      <span class="inv-loc-count">${slots}</span>
-    </span>`;
-  };
-
-  const renderCat = (label, icon, items) => {
-    if (!items.length) return '';
-    return `<div class="planner-inv-cat">
-      <div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${label}</div>
-      <div class="planner-inv-chips">${items.map(makeChip).join('')}</div>
-    </div>`;
-  };
-
   const trackedQty = Object.values(plannerInvMap).reduce((s, v) => s + v, 0);
   el.innerHTML = `
-    <div class="planner-inv-cats">
-      ${renderCat('Personal', 'ti-user', cats.personal)}
-      ${renderCat('House', 'ti-home', cats.house)}
-      ${renderCat('Town Banks', 'ti-building-bank', cats.bank)}
-    </div>
+    <div class="planner-inv-cats">${renderTrackedInvChips(plannerTrackedInvs, 'togglePlannerInvLoc')}</div>
     <div class="planner-inv-footer">
       <span>${plannerTrackedInvs.size}/${invs.length} tracked · ${fmtCount(trackedQty)} items</span>
       <span class="planner-inv-toggle" onclick="toggleAllPlannerInvs(true)">All</span>
@@ -5269,7 +5268,7 @@ function togglePlannerInvSection() {
   const chevron = document.getElementById('planner-inv-chevron');
   if (body) body.style.display = plannerInvOpen ? '' : 'none';
   if (chevron) chevron.className = `ti ti-chevron-${plannerInvOpen?'down':'right'}`;
-  if (plannerInvOpen && currentPlayer && !invData) {
+  if (plannerInvOpen && trackedPlayers.length && !invData) {
     loadPlannerInventory().then(() => {
       if (plannerTrackedInvs === null && invData) {
         const saved = _loadPlannerTrackedNames();
@@ -5305,6 +5304,102 @@ function toggleAllPlannerInvs(all) {
   renderPlannerInventory();
   renderPlanPanel();
   renderBuildingSteps();
+}
+
+// ── TOOL CRAFTING ──
+// Tools take 4 ingots, 2 planks, 2 leather, 2 rope per tier (T2+ also needs the previous-tier tool).
+// Ingots use the metal name per tier; planks/leather/rope use the "adjective" tier name.
+const TOOL_METAL = ['Ferralith','Pyrelite','Emarium','Elenvar','Luminite','Rathium','Aurumite','Celestium','Umbracite','Astralite'];
+const TOOL_ADJ   = ['Rough','Simple','Sturdy','Fine','Exquisite','Peerless','Ornate','Pristine','Magnificent','Flawless'];
+const TOOL_COLS = [
+  { label:'Ingot',   per:4, name:t=>`${TOOL_METAL[t-1]} Ingot` },
+  { label:'Plank',   per:2, name:t=>`${TOOL_ADJ[t-1]} Plank` },
+  { label:'Leather', per:2, name:t=>`${TOOL_ADJ[t-1]} Leather` },
+  { label:'Rope',    per:2, name:t=>`${TOOL_ADJ[t-1]} Rope` },
+];
+function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
+function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(names)); }
+function toggleToolInvLoc(idx){ if (!toolTrackedInvs) toolTrackedInvs = new Set(); if (toolTrackedInvs.has(idx)) toolTrackedInvs.delete(idx); else toolTrackedInvs.add(idx); _saveToolTrackedNames(); renderToolCrafting(); }
+function toggleAllToolInvs(all){ if (!invData) return; toolTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveToolTrackedNames(); renderToolCrafting(); }
+function toggleToolInvPanel(){ toolInvOpen = !toolInvOpen; const b = document.querySelector('#tool-inv-wrap .planner-inv-body'); const c = document.getElementById('tool-inv-chevron'); if (b) b.style.display = toolInvOpen ? '' : 'none'; if (c) c.className = 'ti ti-chevron-'+(toolInvOpen?'down':'right'); }
+async function refreshToolInv(){
+  const savedNames = [];
+  if (toolTrackedInvs && invData) (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
+  invData = null;
+  await loadPlannerInventory();
+  toolTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories||[], savedNames) : new Set();
+  renderToolCrafting();
+}
+function toolInvSelectorHtml(){
+  const invs = invData ? (invData.inventories||[]) : [];
+  const total = invs.length;
+  const tracked = toolTrackedInvs ? toolTrackedInvs.size : 0;
+  return `<div id="tool-inv-wrap" class="task-inv-selector planner-inv-section">
+    <div class="planner-inv-hdr" onclick="toggleToolInvPanel()">
+      <i id="tool-inv-chevron" class="ti ti-chevron-${toolInvOpen?'down':'right'}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+      <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventory <span style="font-size:11px;font-weight:400;color:var(--text3)">(material counts, pooled)</span></div>
+      <span class="planner-inv-hdr-sub">${tracked}/${total} tracked</span>
+    </div>
+    <div class="planner-inv-body" style="display:${toolInvOpen?'':'none'}">
+      <div class="planner-inv-cats">${invData ? renderTrackedInvChips(toolTrackedInvs||new Set(), 'toggleToolInvLoc') : '<div style="font-size:12px;color:var(--text3)"><span class="dot-spin"></span> Loading…</div>'}</div>
+      <div class="planner-inv-footer">
+        <span>${tracked}/${total} tracked</span>
+        <span class="planner-inv-toggle" onclick="toggleAllToolInvs(true)">All</span>
+        <span style="color:var(--text3)">·</span>
+        <span class="planner-inv-toggle" onclick="toggleAllToolInvs(false)">None</span>
+        <span style="flex:1"></span>
+        <button id="live-btn-tools" class="btn live-btn" onclick="toggleTabLive('tools')"><i class="ti ti-player-play"></i> Live</button>
+        <button class="btn ctrl-btn" onclick="refreshToolInv()"><i class="ti ti-refresh"></i> Refresh</button>
+      </div>
+    </div>
+  </div>`;
+}
+async function renderToolCrafting(){
+  const el = document.getElementById('tool-content');
+  if (!el) return;
+  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  try { await loadCraftingData(); } catch(e) {}
+  if (!invData) {
+    el.innerHTML = toolInvSelectorHtml() + '<div class="empty" style="padding:1.5rem"><span class="dot-spin"></span><span>Loading inventory…</span></div>';
+    loadPlannerInventory().then(() => renderToolCrafting());
+    return;
+  }
+  const invs = invData.inventories || [];
+  if (toolTrackedInvs === null) {
+    const saved = _loadToolTrackedNames();
+    if (saved === 'all') toolTrackedInvs = new Set(invs.map((_,i)=>i));
+    else if (saved !== null) toolTrackedInvs = _resolveTrackedByName(invs, saved);
+    else toolTrackedInvs = new Set();
+  }
+  const pool = poolInvByIndices(toolTrackedInvs);
+  const nameIcon = {};
+  if (craftingData) craftingData.items.forEach(i => { if (i.name) nameIcon[i.name.toLowerCase()] = i.iconAssetName; });
+  const have = nm => pool[nm.toLowerCase()] || 0;
+
+  const header = `<div class="tool-grid-row tool-grid-head">
+    <div class="tool-hcell">Tier</div>
+    ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
+    <div class="tool-hcell">Tools</div>
+  </div>`;
+  const rows = [];
+  for (let t=1; t<=10; t++){
+    const tc = (TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1]).c;
+    const cells = TOOL_COLS.map(c => {
+      const nm = c.name(t), h = have(nm);
+      const cls = h===0 ? 'tool-zero' : (h>=c.per ? 'tool-ok' : 'tool-low');
+      return `<div class="tool-cell ${cls}" title="${escHtml(nm)} — need ${c.per} per tool">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
+    }).join('');
+    const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
+    rows.push(`<div class="tool-grid-row">
+      <div class="tool-tier-cell" style="--tc:${tc}"><span class="tool-tier-badge">T${t}</span></div>
+      ${cells}
+      <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
+    </div>`);
+  }
+  el.innerHTML = toolInvSelectorHtml() + `
+    <div class="tool-grid">${header}${rows.join('')}</div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown, ignoring the previous-tier tool requirement.</div>`;
+  updateLiveBtns();
 }
 
 function invAwareChip(qty, itemId, extraCls, plain) {
