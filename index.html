@@ -5616,7 +5616,7 @@ function renderToolCalcResult(){
     if (s.type === 'upgrade') return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrade to <b>T${s.to}</b> <span class="tc2-sub">(each tier upgrade also rolls rarity for free)</span></div>`;
     const p = RARITY_UP_CHANCE[s.to-1], each = toolRerollCost(s.tier, s.to), rolls = 1/p;
     if (toolSolventPartial(s.tier)) anyPartialSolvent = true;
-    return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-dice" style="color:var(--purple-light)"></i> Reroll at <b>T${s.tier}</b> → <b>${RARITY_NAMES[s.to]}</b> <span class="tc2-sub">~${rolls.toFixed(rolls<20?1:0)} rolls × ${fmtCoin(Math.round(each))} = ${fmtCoin(Math.round(rolls*each))}</span></div>`;
+    return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-dice" style="color:var(--purple-light)"></i> Reroll at <b>T${s.tier}</b> → <b>${RARITY_NAMES[s.to]}</b> <span class="tc2-sub">~${Math.round(rolls)} rolls × ${fmtCoin(Math.round(each))} = ${fmtCoin(Math.round(rolls*each))}</span></div>`;
   }).join('');
   el.innerHTML = `
     <div class="tc2-headline">Cheapest path to ${art} <b style="color:var(--teal-light)">${rn}</b> <b>T${T}</b> tool</div>
@@ -5632,7 +5632,7 @@ function toolCalcHtml(){
   const rarOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolCalc.target===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
   const tierOpts = [1,2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolCalc.tier===t?' selected':''}>T${t}</option>`).join('');
   return `<div class="tool-calc">
-    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity reroll planner</div>
+    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity reroll planner <span class="tc-wip">work in progress</span></div>
     <div class="tc2-controls">
       <div class="tc-field"><label>I want a…</label><select id="tc-target" class="sj-input" onchange="setToolTarget(this.value)">${rarOpts}</select></div>
       <div class="tc-field"><label>…tool at tier</label><select id="tc-tier" class="sj-input" onchange="setToolTier(this.value)">${tierOpts}</select></div>
@@ -5739,13 +5739,14 @@ function renderToolBatchResult(){
   if (want > Math.min(maxTier,6)){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${RARITY_NAMES[want]} needs at least tier ${want} — raise the max tier.</div>`; return; }
   const inv = toolBatchInventory(maxTier);
   const sim = simulateBatch(count, want, maxTier, inv);
-  const fmtN = n => n>=10 ? Math.round(n).toString() : (Math.round(n*10)/10).toString();
+  const fmtN = n => Math.round(n).toString();                              // whole tools/solvents
+  const fmtP = n => (n > 0 && n < 0.5) ? '<1' : Math.round(n).toString();  // small "promoted" counts
   const tiersHtml = sim.tiers.map(tg => {
-    const bands = Object.keys(tg.arrival).map(Number).sort((a,b)=>a-b).map(r =>
+    const bands = Object.keys(tg.arrival).map(Number).filter(r => tg.arrival[r] >= 0.5).sort((a,b)=>a-b).map(r =>
       `<b class="tcb-cnt" style="min-width:0">${fmtN(tg.arrival[r])}×</b> <span class="tcb-rar" style="color:${RARITY_COLORS[r]}">${RARITY_NAMES[r]}</span>`).join('&nbsp;&nbsp;&nbsp;');
     let rec = '';
     if (tg.rerolls >= 0.05){
-      rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub"><i class="ti ti-dice" style="color:var(--purple-light)"></i> Scrap <b style="color:var(--amber-light)">${fmtN(tg.scrapped)}</b> laggards → reroll <b style="color:var(--purple-light)">${fmtN(tg.rerolls)}</b> <span style="color:var(--text3)">(${fmtN(tg.solvent)} solvents avail)</span> → ~<b style="color:var(--green-light)">${fmtN(tg.promoted)}</b> promoted up</span></div>`;
+      rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub"><i class="ti ti-dice" style="color:var(--purple-light)"></i> Scrap <b style="color:var(--amber-light)">${fmtN(tg.scrapped)}</b> laggards → reroll <b style="color:var(--purple-light)">${fmtN(tg.rerolls)}</b> <span style="color:var(--text3)">(${fmtN(tg.solvent)} solvents avail)</span> → ~<b style="color:var(--green-light)">${fmtP(tg.promoted)}</b> promoted up</span></div>`;
     } else if (tg.solvent < 0.5 && Math.min(tg.t,6) < want && tg.t < maxTier){
       rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub" style="color:var(--text3)">No T${tg.t} solvents — blind-upgrade only</span></div>`;
     }
@@ -5763,7 +5764,7 @@ function toolBatchHtml(){
   const tierOpts = [2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolBatch.maxTier===t?' selected':''}>T${t}</option>`).join('');
   const wantOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolBatch.want===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
   return `<div class="tool-calc" style="margin-top:1rem">
-    <div class="tool-calc-hdr"><i class="ti ti-stack-2"></i> Batch upgrade advisor</div>
+    <div class="tool-calc-hdr"><i class="ti ti-stack-2"></i> Batch upgrade advisor <span class="tc-wip">work in progress</span></div>
     <div class="tcb-controls" style="grid-template-columns:1fr 1fr 1fr">
       <div class="tc-field"><label># tools (crafted at T1)</label><input type="number" min="1" max="100000" class="sj-input" value="${toolBatch.count}" onchange="setToolBatch('count',this.value)"></div>
       <div class="tc-field"><label>Max tier</label><select class="sj-input" onchange="setToolBatch('maxTier',this.value)">${tierOpts}</select></div>
