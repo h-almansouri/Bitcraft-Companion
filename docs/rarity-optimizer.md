@@ -1,9 +1,29 @@
 # Tool Rarity Optimizer — design doc
 
-Status: **design / not yet built**. Lives in the Tool Crafting tab. Revisits the shelved
-"Reroll column + Rarity roll planner." All costs are in **hex (market buy price)**, sourced live from
-the market data the app already fetches. Everything here is computable from the local
-`craftingData.json`; the few values to double-check are listed in §7.
+Status: **design / not yet built. Data layer verified against `craftingData.json` (see §7).** Lives in
+the Tool Crafting tab. Revisits the shelved "Reroll column + Rarity roll planner." All costs are in
+**hex (market buy price)**, sourced live from the market data the app already fetches. Everything except
+the per-attempt odds is computable from the local `craftingData.json`.
+
+### How the crafting data represents things (verified — important for implementation)
+
+Rarity is a **string** on each item (`"Common"`…`"Mythic"`), and each (tool, rarity) is a distinct item
+id. Recipes come in three shapes we care about:
+
+- **Fresh craft** (T1 only): a single `"Craft {tool}"` recipe from raw mats → **Common** (e.g. Flint
+  Axe = Knapped Flint + Stick → Common). No rarity roll on a fresh craft.
+- **Tier upgrade**: also named `"Craft {tool}"`, but it **consumes the previous-tier tool** + mats
+  (e.g. `Craft Aurumite Hammer` = `1× Rathium Hammer[T6] + 4× Aurumite Ingot + …` → Aurumite Hammer
+  T7). There is **one variant per input rarity**, and each maps input rarity → **same** output rarity
+  (Common→Common, Epic→Epic, …). Mats are the same across the rarity variants (upgrade cost depends on
+  tier, not rarity).
+- **Reroll**: `"Recraft {tool}"` — consumes `1× tool + N(r)× Tool Scrap + K(r)× Reforging Solvent` at
+  the tool's tier → same tool, **same** output rarity.
+
+**The rarity *increase* is NOT in the recipe data** — both upgrade and reroll recipes encode only the
+base (same-rarity) result. The `p(r)` chance to bump one level is an engine overlay we apply ourselves
+(hardcode the odds from the wiki). So the data gives us **costs + tier transitions + caps + salvage
+yields**; we supply **the probabilities**.
 
 ---
 
@@ -56,14 +76,16 @@ rarity step, not the tier:
 
 | Step | Scrap `N(r)` | Solvent `K(r)` |
 |---|---|---|
-| Common → Uncommon | ~1–3 † | 1 |
+| Common → Uncommon | **3** | 1 |
 | Uncommon → Rare | 5 | 1 |
 | Rare → Epic | 15 | 1 |
 | Epic → Legendary | 30 | 1 |
 | Legendary → Mythic | 50 | 2 |
 
-† Read the exact value from each tool's recipe (a rarity-enum off-by-one left this ambiguous: data read
-as 3, user recalls 1).
+Verified across all 420 tool "Recraft" recipes in `craftingData.json` — cost depends only on the rarity
+step, and scrap+solvent tier **always** matches the tool tier (0 mismatches). Common→Uncommon is **3**
+scrap in the data (not 1 as recalled) — worth an in-game sanity check, but the app reads it from the
+recipe regardless. Gate: bench `buildingType 127749503`, `skillId 6`, level 1.
 
 **Tier / scrap / solvent naming** (index by tier):
 
@@ -72,8 +94,9 @@ as 3, user recalls 1).
 | Tool Scrap | Rough | Simple | Sturdy | Fine | Exquisite | Peerless | Ornate | Pristine | Magnificent | Flawless |
 | Reforging Solvent | Basic | Simple | Infused | Fine | Exquisite | Peerless | Ornate | Pristine | Magnificent | Flawless |
 
-**Salvage yield** (scrap returned by scrapping a tool of rarity `r`): Common 1, Uncommon 3, Rare 15,
-Epic 50 (Legendary/Mythic: read from `deconstruction_recipe_desc`). Rarer tools give far more scrap.
+**Salvage yield** (scrap returned by a `"Scrap {tool}"` recipe — 528 of them in `craftingData.json`,
+verified): Common **1**, Uncommon **3**, Rare **15**, Epic **50**, Legendary **150**, Mythic **500**.
+Rarer tools give far more scrap. (Note: salvaging a Rare = 15 scrap = the cost to reroll Rare→Epic once.)
 
 **Rarity stat impact** (Steam equipment guide, for value approximation): +30% Unc, +40% Rare, +50%
 Epic, +30% Leg, +20% Myth (compounding); +10% per tier. T10 Mythic ≈ +260% over T1 Common — rarity
@@ -185,31 +208,48 @@ knows what to feed the grinder to fund rerolls.
 
 ---
 
-## 7. Assumptions to verify before coding (all in `craftingData.json` / GameData)
+## 7. Data-layer verification (RESOLVED against `craftingData.json`)
 
-1. **Fresh craft rarity** — assumed a new tool is Common (rarity only rolls on upgrade/reroll). The
-   Steam guide says odds apply "when crafting *or* rerolling," so initial craft may also roll — if so,
-   add a craft-roll term. Confirm from the craft recipe output.
-2. **Exact `N(Common→Uncommon)`** (1 vs 3) — read per-tool from the recipe.
-3. **Salvage yields for Legendary/Mythic** — from `deconstruction_recipe_desc`.
-4. **Reroll tier constraint** — confirm scrap/solvent must match the tool's current tier (all sampled
-   recipes did).
-5. **Building/skill gates** — recraft bench + level reqs (present in the recipe) for a "can't do this
-   yet" hint.
-6. **Thin-market `V_sell`** — low-rarity high-tier tools may have no listings. Approved to approximate:
-   estimate from the stat multipliers (§2) × a base price when listings are missing.
+All confirmed by reading the app's own `craftingData.json` (items carry a **string** `rarity`, so no
+enum ambiguity):
+
+1. **Fresh craft rarity — RESOLVED.** A true fresh craft (T1, from raw mats) is **Common only** (single
+   recipe). No initial rarity roll. Higher-rarity tools are never crafted from raw mats — rarity comes
+   only from the `p(r)` roll on upgrade/reroll. (The higher-tier "Craft {tool}" recipes are *upgrades*
+   that consume the prev-tier tool; see the intro §.)
+2. **`N(Common→Uncommon)` — RESOLVED = 3** scrap (data). Full ladder 3/5/15/30/50; solvent 1/1/1/1/2.
+3. **Salvage yields — RESOLVED, in local data:** Common 1, Uncommon 3, Rare 15, Epic 50, Legendary 150,
+   Mythic 500. (No dependency on the external `deconstruction_recipe_desc`.)
+4. **Reroll tier constraint — RESOLVED.** Scrap & solvent tier == tool tier in all 420 tool recrafts
+   (0 mismatches).
+5. **Building/skill gate — RESOLVED.** Recraft bench `buildingType 127749503`, `skillId 6`, level 1
+   (available for a "can't do this yet" hint).
+6. **Caps — RESOLVED = `cap(t)=min(t−1,5)`.** Highest reroll-from rarity per tier: T2 Common(→Unc),
+   T3 Unc(→Rare), T4 Rare(→Epic), T5 Epic(→Leg), T6+ Leg(→Myth). No reroll at T1.
+7. **Upgrade cost is rarity-independent** — the per-rarity "Craft {tool}" upgrade variants share the
+   same mats, so `C_up` depends on tier only (like the reroll scrap ladder depends on step only).
+
+**Still an approximation (accepted):** thin-market `V_sell` — low-rarity high-tier tools may have no
+listings; estimate from the stat multipliers (§2) × a base price when listings are missing.
+
+**One thing the data does NOT contain:** the `p(r)` upgrade/bump probabilities — hardcode from the wiki
+(§2 table).
 
 ---
 
 ## 8. Data sources
 
-- Reroll recipes: `crafting_recipe_desc` entries named `"Recraft {tool}"` (also present in the app's
-  `craftingData.json`). Consumed stacks give `N(r)`, `K(r)`; the tool item's rarity gives the step.
-- Scrap/solvent items: `item_desc` (tiered "Tool Scrap" / "Reforging Solvent"; also a "Reforging
-  Stabilizer" to investigate).
-- Salvage yields: `deconstruction_recipe_desc`.
+All in the app's local `craftingData.json` (`{items, recipes}`; items have string `rarity` + `tier`):
+- Reroll recipes: `recipes` named `"Recraft {tool}"`. Inputs give the tool + `N(r)` Tool Scrap +
+  `K(r)` Reforging Solvent; the input tool's rarity gives the step.
+- Tier upgrades: `recipes` named `"Craft {tool}"` that consume the prev-tier tool; non-tool inputs =
+  `C_up`. Fresh craft = the T1 `"Craft {tool}"` from raw mats.
+- Salvage yields: `recipes` named `"Scrap {tool}"` (input tool rarity → scrap output qty).
+- Scrap/solvent items: `items` (tiered "Tool Scrap" / "Reforging Solvent"; also a "Reforging
+  Stabilizer" worth investigating).
 - Prices: existing market fetch in the app.
-- Reference: https://bitcraft.wiki.gg/wiki/Rarity ; Steam equipment guide id 3529143157.
+- Probabilities `p(r)`: NOT in data — hardcode from https://bitcraft.wiki.gg/wiki/Rarity (Steam
+  equipment guide id 3529143157 corroborates).
 
 ---
 
