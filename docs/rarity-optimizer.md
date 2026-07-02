@@ -259,10 +259,19 @@ All in the app's local `craftingData.json` (`{items, recipes}`; items have strin
 - **Thin market:** approximating `V_sell` is acceptable (§7.6).
 - **Scope:** combine A + B, including the computed cull tiers.
 
-## 10. Build order (proposed)
+## 10. Build order
 
-1. Data layer: read Recraft recipes + scrap/solvent items + salvage yields from `craftingData.json`;
-   verify §7 assumptions.
-2. Optimizer A (cost-min DP) + step-list UI + p50/p90.
-3. Optimizer B (value-max DP) + advisor badges + cull-tier grid.
-4. Fold catalyst/scrap needs into the existing per-tier mats grid + Shopping List.
+1. ✅ Data layer verified against `craftingData.json` (§7).
+2. ✅ **Optimizer A shipped** — cost-min DP over (t, r) + step-list UI + p50/p90 Monte-Carlo +
+   "vs. reroll-all-at-T" comparison, in the Tool Crafting tab ("Rarity reroll planner"). Prices scrap
+   from the market with a craft-and-salvage-a-Common fallback; solvent priced from market (excluded +
+   flagged where unlisted). Target = (rarity, tier).
+3. ⬜ Optimizer B (value-max DP) + advisor badges + cull-tier grid.
+4. ⬜ Fold catalyst/scrap needs into the existing per-tier mats grid + Shopping List.
+
+### Known v1 approximations (Optimizer A)
+- Solvent cost is excluded at tiers where it isn't listed on the market (flagged in the UI). Could fall
+  back to its Scholar craft cost via `craftingData`.
+- Scrap fallback prices a Common tool's full craft cost (salvage yield 1). A market listing, when
+  present, overrides it (we take the min). Higher-rarity salvage (more scrap/tool) isn't considered as a
+  cheaper source yet.

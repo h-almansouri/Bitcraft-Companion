@@ -5428,9 +5428,8 @@ function toggleAllPlannerInvs(all) {
 // Ingots use the metal name per tier; planks/leather/rope use the "adjective" tier name.
 const TOOL_METAL = ['Ferralith','Pyrelite','Emarium','Elenvar','Luminite','Rathium','Aurumite','Celestium','Umbracite','Astralite'];
 const TOOL_ADJ   = ['Rough','Simple','Sturdy','Fine','Exquisite','Peerless','Ornate','Pristine','Magnificent','Flawless'];
-// Consumables (seeds, fish oil) use a different tier-adjective set than the tool mats.
+// Reforging Solvent tiers use this adjective set (Basic/Infused differ from the tool mats' adjectives).
 const CONSUMABLE_ADJ = ['Basic','Simple','Infused','Fine','Exquisite','Peerless','Ornate','Pristine','Magnificent','Flawless'];
-const SEED_CROPS = ['Embergrain','Starbulb','Wispweave']; // reroll accepts any of these; we use the cheapest
 const TOOL_COLS = [
   { label:'Ingot',   per:4, name:t=>`${TOOL_METAL[t-1]} Ingot` },
   { label:'Plank',   per:2, name:t=>`${TOOL_ADJ[t-1]} Plank` },
@@ -5457,8 +5456,8 @@ async function fetchToolPrices(){
   const names = new Set();
   for (let t=1;t<=10;t++){
     TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));
-    names.add((CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase());
-    SEED_CROPS.forEach(k=>names.add((CONSUMABLE_ADJ[t-1]+' '+k+' Seeds').toLowerCase()));
+    names.add(toolScrapName(t).toLowerCase());     // Tool Scrap — reroll input
+    names.add(toolSolventName(t).toLowerCase());   // Reforging Solvent — reroll input
   }
   const queue = [...names].filter(nm => toolPrice[nm] === undefined);
   const worker = async () => {
@@ -5478,108 +5477,141 @@ async function fetchToolPrices(){
   if (currentTab === 'tools') renderToolCrafting();
 }
 
-// ── Rarity roll economics ──  (RARITY_NAMES is declared once, later in the file)
-const RARITY_UP_CHANCE = { 1:0.30, 2:0.15, 3:0.075, 4:0.0375, 5:0.01875 }; // chance to go rarity r -> r+1
-const SCRAP_TO_REACH = { 2:3, 3:5, 4:15, 5:30, 6:60 }; // scrap consumed per reroll attempt toward rarity R (Mythic=60 is a guess)
-let toolCalc = null; // { target, maxTier }
-function loadToolCalc(){ if (toolCalc) return; try { toolCalc = Object.assign({ target:4, maxTier:6 }, JSON.parse(localStorage.getItem('bc_tool_calc_v2')||'{}')); } catch(e){ toolCalc = { target:4, maxTier:6 }; } }
-function saveToolCalc(){ try { safeSetItem('bc_tool_calc_v2', JSON.stringify(toolCalc)); } catch(e){} }
+// ── Rarity roll economics ──  Verified against craftingData.json; see docs/rarity-optimizer.md.
+// RARITY_NAMES (declared later) is 1-indexed: 1 Common .. 6 Mythic. cap(t)=min(t,6); rarity R needs tier>=R.
+const RARITY_UP_CHANCE = { 1:0.30, 2:0.15, 3:0.075, 4:0.0375, 5:0.01875 }; // chance to roll rarity r -> r+1
+// Reroll ("Recraft") cost keyed by the rarity you roll TOWARD: N Tool Scrap + K Reforging Solvent, at the tool's tier.
+const REROLL_SCRAP   = { 2:3, 3:5, 4:15, 5:30, 6:50 };
+const REROLL_SOLVENT = { 2:1, 3:1, 4:1, 5:1, 6:2 };
+const SALVAGE_YIELD  = { 1:1, 2:3, 3:15, 4:50, 5:150, 6:500 }; // scrap from salvaging a rarity-r tool
+let toolCalc = null; // { target, tier }
+function loadToolCalc(){ if (toolCalc) return; try { toolCalc = Object.assign({ target:3, tier:6 }, JSON.parse(localStorage.getItem('bc_tool_calc_v3')||'{}')); } catch(e){ toolCalc = { target:3, tier:6 }; } }
+function saveToolCalc(){ try { safeSetItem('bc_tool_calc_v3', JSON.stringify(toolCalc)); } catch(e){} }
 
-// Cost helpers (all in hex coins, from market). matCost = one tier's mats; cumCost = built up from T1.
+// Cost helpers (all hex, from live market). matCost = one tier's upgrade mats; cumCost = full build cost of a tier-t tool.
 function toolMatCost(t){ let s=0; for (const c of TOOL_COLS){ const p = toolPrice[c.name(t).toLowerCase()]; s += (p||0)*c.per; } return s; }
 function toolCumCost(t){ let s=0; for (let i=1;i<=t;i++) s += toolMatCost(i); return s; }
-function toolSeedPrice(t){ const adj=CONSUMABLE_ADJ[t-1]; const c=SEED_CROPS.map(k=>toolPrice[(adj+' '+k+' Seeds').toLowerCase()]).filter(v=>v!==undefined && v>0); return c.length?Math.min(...c):0; }
-function toolFishOilPrice(t){ return toolPrice[(CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase()] || 0; }
-function toolConsumablesCost(t){ return 100*toolSeedPrice(t) + 20*toolFishOilPrice(t) + 75; }
-// One reroll attempt on a tier-T tool, rolling toward rarity R (scrap = R's requirement × cheapest same-tier common tool).
-function toolRerollCost(t, R){ return toolConsumablesCost(t) + (SCRAP_TO_REACH[R]||0) * toolCumCost(t); }
+// Tool Scrap uses the tool tier-adjective; Reforging Solvent uses the consumable tier-adjective (both verified).
+function toolScrapName(t){ return TOOL_ADJ[t-1]+' Tool Scrap'; }
+function toolSolventName(t){ return CONSUMABLE_ADJ[t-1]+' Reforging Solvent'; }
+// Cheapest hex per Tool Scrap at tier t: buy on the market, else craft+salvage a Common tool (yields 1 scrap).
+function toolScrapUnit(t){ const m = toolPrice[toolScrapName(t).toLowerCase()]; const salv = toolCumCost(t); return (m && m>0) ? Math.min(m, salv) : salv; }
+// Cheapest hex per Reforging Solvent at tier t (market; null when unlisted → its cost is excluded + flagged).
+function toolSolventUnit(t){ const m = toolPrice[toolSolventName(t).toLowerCase()]; return (m && m>0) ? m : null; }
+// One reroll attempt on a tier-t tool, rolling TOWARD rarity R (2..6).
+function toolRerollCost(t, R){ const sv = toolSolventUnit(t); return (REROLL_SCRAP[R]||0)*toolScrapUnit(t) + (REROLL_SOLVENT[R]||0)*(sv||0); }
+function toolSolventMissing(t, R){ return (REROLL_SOLVENT[R]||0) > 0 && toolSolventUnit(t) == null; }
 function toolPricesReady(){ for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()] === undefined) return false; return true; }
 
-// Expected-value solver: cheapest way to end up with a `target`-rarity tool, only upgrading up to `maxTier`.
-// State (tier, rarity). Two actions per rarity step (both share the static chance): reroll here, or upgrade a tier
-// (which auto-rolls for free). Returns { possible, cost, switchTier } where switchTier is where rerolling begins.
-function solveRarity(target, maxTier){
-  if (maxTier < target) return { possible:false };
-  const M = maxTier;
-  const E = Array.from({length:M+1}, () => new Array(target+1).fill(Infinity));
-  const act = Array.from({length:M+1}, () => new Array(target+1).fill(null));
-  for (let t=1;t<=M;t++) E[t][target] = 0;
-  for (let r=target-1; r>=1; r--){
-    for (let t=M; t>=1; t--){
-      const p = RARITY_UP_CHANCE[r];
+// ── Optimizer A: cheapest expected hex to reach (tier T, rarity R) ──  DP over states (t, r).
+// Actions: reroll (fixed price at this tier, p(r) chance +1 rarity) or upgrade (mats, +1 tier, a free p(r) roll).
+function solveRarity(T, R){
+  if (R > Math.min(T,6)) return { possible:false, reason:'cap' };
+  const EC  = Array.from({length:T+1}, () => new Array(R+1).fill(Infinity));
+  const act = Array.from({length:T+1}, () => new Array(R+1).fill(null));
+  EC[T][R] = 0;
+  for (let t=T; t>=1; t--){
+    for (let r=Math.min(t,R); r>=1; r--){
+      if (t===T && r===R){ EC[t][r]=0; continue; }
+      const p = RARITY_UP_CHANCE[r] || 0;
       let best = Infinity, ba = null;
-      if (t >= r+1){ // tier supports rarity r+1 → can reroll toward it
-        const c = toolRerollCost(t, r+1)/p + E[t][r+1];
+      if (r < R && t >= r+1 && p > 0){                 // reroll toward r+1 (tier must be able to hold r+1)
+        const c = toolRerollCost(t, r+1)/p + EC[t][r+1];
         if (c < best){ best = c; ba = 'reroll'; }
       }
-      if (t < M){ // upgrade a tier (free roll)
-        const c = toolMatCost(t+1) + p*E[t+1][r+1] + (1-p)*E[t+1][r];
+      if (t < T){                                       // upgrade one tier (a free rarity roll rides along)
+        const up = Math.min(r+1, R, t+1);               // rarity capped by the new tier and by the target
+        const c = toolMatCost(t+1) + p*EC[t+1][up] + (1-p)*EC[t+1][r];
         if (c < best){ best = c; ba = 'upgrade'; }
       }
-      E[t][r] = best; act[t][r] = ba;
+      EC[t][r] = best; act[t][r] = ba;
     }
   }
-  const cost = toolMatCost(1) + E[1][1];
-  return { possible:isFinite(cost), cost, act };
+  const cost = toolMatCost(1) + EC[1][1];
+  return { possible:isFinite(cost), cost, act, T, R };
 }
-// Trace the optimal policy along the "unlucky" line (rarity only advances when you reroll) to produce a
-// concrete step list. Upgrades never guarantee a rarity bump, so every rarity step ends in a reroll here;
-// in practice free upgrade-rolls often succeed and save you some of those rerolls (hence "expected" cost).
-function reconstructPlan(act, target){
-  const steps = []; let t = 1, r = 1, guard = 0, upTo = null;
-  while (r < target && guard++ < 200){
-    const a = act[t] && act[t][r];
-    if (a === 'upgrade'){ t++; upTo = t; }
-    else if (a === 'reroll'){
-      if (upTo){ steps.push({ type:'upgrade', tier:upTo }); upTo = null; }
-      steps.push({ type:'reroll', tier:t, to:r+1 });
-      r++;
-    } else break;
+// Deterministic "planned" trace: rarity only advances on rerolls (free upgrade-rolls are the upside baked
+// into the expected cost). Batches consecutive upgrades into one "upgrade to Tk" step.
+function reconstructPlan(res){
+  const { act, T, R } = res;
+  const steps = []; let t=1, r=1, lastTier=1, guard=0;
+  const emitUp = () => { if (t > lastTier){ steps.push({ type:'upgrade', to:t }); lastTier=t; } };
+  while (!(t===T && r>=R) && guard++ < 300){
+    const a = act[t][Math.min(r,R)];
+    if (a === 'upgrade'){ t++; }
+    else if (a === 'reroll'){ emitUp(); steps.push({ type:'reroll', tier:t, to:r+1 }); r++; }
+    else break;
   }
-  if (upTo) steps.push({ type:'upgrade', tier:upTo });
+  emitUp();
   return steps;
+}
+// Monte-Carlo the optimal policy with real RNG to get the spread (p50/p90 hex).
+function simulateToolPlan(res, trials){
+  const { act, T, R } = res; const costs = new Array(trials);
+  for (let n=0; n<trials; n++){
+    let t=1, r=1, cost=toolMatCost(1), guard=0;
+    while (!(t===T && r>=R) && guard++ < 400){
+      const a = act[t][Math.min(r,R)];
+      if (a === 'upgrade'){ const p=RARITY_UP_CHANCE[r]||0; cost += toolMatCost(t+1); t++; if (Math.random()<p) r=Math.min(r+1, t, R); }
+      else if (a === 'reroll'){ const p=RARITY_UP_CHANCE[r]||0; cost += toolRerollCost(t, r+1); if (Math.random()<p) r=Math.min(r+1, R); }
+      else break;
+    }
+    costs[n]=cost;
+  }
+  costs.sort((a,b)=>a-b);
+  const q = f => costs[Math.min(trials-1, Math.floor(trials*f))];
+  return { p50:q(0.5), p90:q(0.9) };
+}
+// Baseline for comparison: craft straight to tier T, then buy ALL the rarity via rerolls at T (no free rolls).
+function toolBaselineCost(T, R){
+  let c = toolCumCost(T);
+  for (let r=1; r<R; r++){ const p=RARITY_UP_CHANCE[r]||0; if (p<=0) return Infinity; c += toolRerollCost(T, r+1)/p; }
+  return c;
 }
 
 function setToolTarget(v){ loadToolCalc(); toolCalc.target = +v; saveToolCalc(); renderToolCalcResult(); }
-function setToolMaxTier(v){ loadToolCalc(); toolCalc.maxTier = +v; saveToolCalc(); renderToolCalcResult(); }
+function setToolTier(v){ loadToolCalc(); toolCalc.tier = +v; saveToolCalc(); renderToolCalcResult(); }
 function renderToolCalcResult(){
   const el = document.getElementById('tool-calc-result');
   if (!el) return;
   loadToolCalc();
   if (!toolPricesReady()){ el.innerHTML = '<span class="dot-spin"></span> loading market prices…'; return; }
-  const target = toolCalc.target, M = toolCalc.maxTier;
-  const rn = RARITY_NAMES[target];
-  const res = solveRarity(target, M);
+  const R = toolCalc.target, T = toolCalc.tier, rn = RARITY_NAMES[R];
   const art = /^[aeiou]/i.test(rn) ? 'an' : 'a';
-  if (!res.possible){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${art.charAt(0).toUpperCase()+art.slice(1)} ${rn} tool needs at least tier ${target}. Raise the max tier.</div>`; return; }
-  const plan = reconstructPlan(res.act, target);
+  const res = solveRarity(T, R);
+  if (!res.possible){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${rn} rarity needs at least tier ${R} — a T${T} tool caps at ${RARITY_NAMES[Math.min(T,6)]}.</div>`; return; }
+  const plan = reconstructPlan(res);
+  const sim = simulateToolPlan(res, 4000);
+  const base = toolBaselineCost(T, R);
+  const saved = (isFinite(base) && base>0) ? Math.round((1 - res.cost/base)*100) : 0;
+  let anyMissingSolvent = false;
   const stepHtml = plan.map((s, i) => {
-    if (s.type === 'upgrade') return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrade up to <b>T${s.tier}</b> <span class="tc2-sub">(free rarity roll)</span></div>`;
-    const p = RARITY_UP_CHANCE[s.to-1];
-    const each = toolRerollCost(s.tier, s.to);
-    const rolls = 1/p;
+    if (s.type === 'upgrade') return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrade to <b>T${s.to}</b> <span class="tc2-sub">(each tier upgrade also rolls rarity for free)</span></div>`;
+    const p = RARITY_UP_CHANCE[s.to-1], each = toolRerollCost(s.tier, s.to), rolls = 1/p;
+    if (toolSolventMissing(s.tier, s.to)) anyMissingSolvent = true;
     return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-dice" style="color:var(--purple-light)"></i> Reroll at <b>T${s.tier}</b> → <b>${RARITY_NAMES[s.to]}</b> <span class="tc2-sub">~${rolls.toFixed(rolls<20?1:0)} rolls × ${fmtCoin(Math.round(each))} = ${fmtCoin(Math.round(rolls*each))}</span></div>`;
   }).join('');
   el.innerHTML = `
-    <div class="tc2-headline">Cheapest path to ${art} <b style="color:var(--teal-light)">${rn}</b> tool <span class="tc2-sub">(max tier T${M})</span></div>
+    <div class="tc2-headline">Cheapest path to ${art} <b style="color:var(--teal-light)">${rn}</b> <b>T${T}</b> tool</div>
     <div class="tc2-cost">${fmtCoin(Math.round(res.cost))} <span class="tc2-sub" style="font-size:12px">expected total</span></div>
-    <div class="tc2-steps">${stepHtml || '<div class="tc2-sub">Already attainable.</div>'}</div>
-    <div class="tc2-sub" style="margin-bottom:.6rem">Each upgrade also rolls rarity for free, so the expected total above is a bit less than the sum of the reroll steps.</div>
-    <div class="tc2-line"><span>Scrap per ${rn} reroll</span><b>${SCRAP_TO_REACH[target]} tools</b></div>
-    <div class="tc2-line"><span>Roll chance ${RARITY_NAMES[target-1]}→${rn}</span><b>${(RARITY_UP_CHANCE[target-1]*100).toFixed(RARITY_UP_CHANCE[target-1]<0.1?3:1)}%</b></div>`;
+    <div class="tc2-line"><span>Likely spend (p50 – p90)</span><b>${fmtCoin(Math.round(sim.p50))} – ${fmtCoin(Math.round(sim.p90))}</b></div>
+    <div class="tc2-steps">${stepHtml || '<div class="tc2-sub">Already attainable — just craft it.</div>'}</div>
+    ${isFinite(base) ? `<div class="tc2-line"><span>vs. tier-up then reroll all at T${T}</span><b style="color:${saved>0?'var(--green-light)':'var(--text2)'}">${saved>0?saved+'% cheaper':'≈ same'}</b></div>` : ''}
+    <div class="tc2-line"><span>Roll chance ${RARITY_NAMES[R-1]} → ${rn}</span><b>${(RARITY_UP_CHANCE[R-1]*100).toFixed(RARITY_UP_CHANCE[R-1]<0.1?3:1)}%</b></div>
+    ${anyMissingSolvent ? '<div class="tc2-sub" style="margin-top:.5rem;color:var(--amber-light)"><i class="ti ti-info-circle"></i> Reforging Solvent isn\'t listed on the market at some tiers, so its (usually small) cost is excluded here.</div>' : ''}`;
 }
 function toolCalcHtml(){
   loadToolCalc();
   const rarOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolCalc.target===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
-  const tierOpts = [1,2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolCalc.maxTier===t?' selected':''}>T${t}</option>`).join('');
+  const tierOpts = [1,2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolCalc.tier===t?' selected':''}>T${t}</option>`).join('');
   return `<div class="tool-calc">
-    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity roll planner <span class="tc-wip">work in progress</span></div>
+    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity reroll planner</div>
     <div class="tc2-controls">
       <div class="tc-field"><label>I want a…</label><select id="tc-target" class="sj-input" onchange="setToolTarget(this.value)">${rarOpts}</select></div>
-      <div class="tc-field"><label>Max tier I can use</label><select id="tc-maxtier" class="sj-input" onchange="setToolMaxTier(this.value)">${tierOpts}</select></div>
+      <div class="tc-field"><label>…tool at tier</label><select id="tc-tier" class="sj-input" onchange="setToolTier(this.value)">${tierOpts}</select></div>
     </div>
     <div class="tc2-result" id="tool-calc-result"></div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Since a reroll burns <b>scrap</b> (whole tools) while a tier-upgrade rolls rarity for the mat cost alone, upgrading is almost always the cheaper rarity attempt — so the plan is to upgrade as far as your max tier allows, then reroll for the rest. Costs use live market prices; expected values use the static roll chances. Scrap for Mythic (60) is a guess.</div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Rarity comes only from RNG rolls: every tier-upgrade rolls for free, and a <b>reroll</b> ("Recraft") spends <b>Tool Scrap</b> + a <b>Reforging Solvent</b> for another roll at fixed odds. The planner finds the cheapest mix using live market prices (scrap falls back to craft-and-salvage a Common tool when unlisted). Expected values use the real per-roll odds.</div>
   </div>`;
 }
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
@@ -5671,7 +5703,9 @@ async function renderToolCrafting(){
   }
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats.</div>`;
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats.</div>`
+    + toolCalcHtml();
+  renderToolCalcResult();
   updateLiveBtns();
   // Kick off market pricing for any materials not yet priced.
   const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
