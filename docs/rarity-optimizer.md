@@ -280,9 +280,14 @@ All in the app's local `craftingData.json` (`{items, recipes}`; items have strin
      inventory scrap*; cannibalizing the batch for fuel is usually net-negative (the Commons you'd shred
      still have real keeper odds via free upgrade rolls), so it's done sparingly.
    - Output: tier-by-tier arrival distribution + a "Scrap N → reroll M → ~P promoted" line per tier, and
-     a summary (keepers / solvents used / tools scrapped). No hex/market prices needed — it's all
-     resource units. (Superseded the earlier value-max v1, which assumed infinite market depth and just
-     recommended rerolling everything up to sell.)
+     a summary (keepers / solvents used / tools scrapped). (Superseded the earlier value-max v1, which
+     assumed infinite market depth and just recommended rerolling everything up to sell.)
+   - **Cost-per-keeper overlay (the "don't upgrade the Commons" rule).** Each below-target band shows
+     `remaining upgrade mats ÷ its keeper chance Pk(t,r)` and is flagged **leave** when that exceeds a
+     fresh tool's cost-per-keeper (`cumCost(maxT) ÷ Pk(1,Common)`) — i.e. the mats are better spent on a
+     fresh tool. Reproduces the folklore: T2 Common ≈ 25k/keeper (leave) vs T2 Uncommon ≈ 10k/keeper
+     (keep), fresh ≈ 18k. Advisory only — needs live mat prices; the keeper count still assumes you
+     upgrade everything (leaving flagged bands trades a few keepers for saved mats).
 4. ⬜ Fold catalyst/scrap needs into the existing per-tier mats grid + Shopping List.
 
 ### Known v1 approximations (Optimizer A)

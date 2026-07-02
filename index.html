@@ -209,6 +209,9 @@ main.planner-mode{max-width:none;padding:1rem}
 .tcb-v-reroll{background:rgba(151,109,230,.16);color:var(--purple-light)}
 .tcb-v-scrap{background:rgba(186,117,23,.16);color:var(--amber-light)}
 .tcb-v-sell{background:rgba(80,120,200,.18);color:#a9c2f5}
+.tcb-v-keeper{background:rgba(99,196,90,.18);color:#8fd66f}
+.tcb-v-keep{background:rgba(29,158,117,.16);color:var(--teal-light)}
+.tcb-v-leave{background:rgba(186,117,23,.2);color:var(--amber-light)}
 .tcb-sub{font-size:10px;color:var(--text3)}
 .tcb-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem}
 .tcb-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .55rem;font-size:11px;color:var(--text2)}
@@ -5741,16 +5744,36 @@ function renderToolBatchResult(){
   const sim = simulateBatch(count, want, maxTier, inv);
   const fmtN = n => Math.round(n).toString();                              // whole tools/solvents
   const fmtP = n => (n > 0 && n < 0.5) ? '<1' : Math.round(n).toString();  // small "promoted" counts
+  // Cost-per-keeper: finishing a laggard band = (remaining upgrade mats) / (its keeper chance). "Leave" it
+  // when that's worse than a fresh tool (full build ÷ a fresh Common's keeper chance) — i.e. the mats are
+  // better spent elsewhere. Needs live mat prices; without them we can't judge, so default to "keep".
+  const Pk = keeperProb(want, maxTier);
+  const ready = toolPricesReady();
+  const cumMax = toolCumCost(maxTier);
+  const freshCPK = (ready && Pk[1] && Pk[1][1] > 0) ? cumMax / Pk[1][1] : null;
+  const bandRow = (t, r, n) => {
+    let vcls = 'keeper', vlabel = 'keeper', cpkTxt = '';
+    if (r < want){
+      const pk = (Pk[t] && Pk[t][r]) || 0;
+      if (pk <= 0.001){ vcls = 'leave'; vlabel = 'leave'; cpkTxt = "can't reach in time"; }
+      else {
+        const cpk = (cumMax - toolCumCost(t)) / pk;
+        const leave = ready && freshCPK && cpk > freshCPK;
+        vcls = leave ? 'leave' : 'keep'; vlabel = leave ? 'leave' : 'keep';
+        cpkTxt = ready ? `${fmtCoin(Math.round(cpk))} / keeper · ${Math.round(pk*100)}% make it` : `${Math.round(pk*100)}% make it`;
+      }
+    }
+    return `<div class="tcb-band"><b class="tcb-cnt">${fmtN(n)}×</b><span class="tcb-rar" style="color:${RARITY_COLORS[r]}">${RARITY_NAMES[r]}</span><span class="tcb-sub">${cpkTxt}</span><span class="tcb-verdict tcb-v-${vcls}">${vlabel}</span></div>`;
+  };
   const tiersHtml = sim.tiers.map(tg => {
-    const bands = Object.keys(tg.arrival).map(Number).filter(r => tg.arrival[r] >= 0.5).sort((a,b)=>a-b).map(r =>
-      `<b class="tcb-cnt" style="min-width:0">${fmtN(tg.arrival[r])}×</b> <span class="tcb-rar" style="color:${RARITY_COLORS[r]}">${RARITY_NAMES[r]}</span>`).join('&nbsp;&nbsp;&nbsp;');
+    const bands = Object.keys(tg.arrival).map(Number).filter(r => tg.arrival[r] >= 0.5).sort((a,b)=>a-b).map(r => bandRow(tg.t, r, tg.arrival[r])).join('');
     let rec = '';
     if (tg.rerolls >= 0.05){
       rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub"><i class="ti ti-dice" style="color:var(--purple-light)"></i> Scrap <b style="color:var(--amber-light)">${fmtN(tg.scrapped)}</b> laggards → reroll <b style="color:var(--purple-light)">${fmtN(tg.rerolls)}</b> <span style="color:var(--text3)">(${fmtN(tg.solvent)} solvents avail)</span> → ~<b style="color:var(--green-light)">${fmtP(tg.promoted)}</b> promoted up</span></div>`;
     } else if (tg.solvent < 0.5 && Math.min(tg.t,6) < want && tg.t < maxTier){
       rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub" style="color:var(--text3)">No T${tg.t} solvents — blind-upgrade only</span></div>`;
     }
-    return `<div class="tcb-tier"><div class="tcb-tier-hdr"><i class="ti ti-arrow-big-up-lines" style="font-size:13px"></i> Tier ${tg.t}</div><div class="tcb-band" style="display:block">${bands}</div>${rec}</div>`;
+    return `<div class="tcb-tier"><div class="tcb-tier-hdr"><i class="ti ti-arrow-big-up-lines" style="font-size:13px"></i> Tier ${tg.t}</div>${bands}${rec}</div>`;
   }).join('');
   const o = sim.out;
   el.innerHTML = tiersHtml + `<div class="tcb-summary">
@@ -5771,7 +5794,7 @@ function toolBatchHtml(){
       <div class="tc-field"><label>Rarity wanted</label><select class="sj-input" onchange="setToolBatch('want',this.value)">${wantOpts}</select></div>
     </div>
     <div class="tc2-result" id="tool-batch-result"></div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Blind-upgrade the batch and reroll toward your target, capped by the <b>scrap</b> and craftable <b>Reforging Solvents</b> in your tracked inventory (each solvent = 10 seeds + 2 fish oil). Solvents are the real limit, so the laggards (Commons that won't make it) get <b>scrapped for reroll fuel</b> — that's what "leave the Commons" looks like here. Scrap &amp; solvent stock is shared across all tools of a tier.</div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Blind-upgrade the batch and reroll toward your target, capped by the <b>scrap</b> and craftable <b>Reforging Solvents</b> in your tracked inventory (each solvent = 10 seeds + 2 fish oil; shared across all tools of a tier). Each below-target band shows its <b>cost per keeper</b> — the remaining upgrade mats ÷ its chance of reaching the target — and is flagged <span class="tcb-verdict tcb-v-leave" style="font-size:9px">leave</span> when that's worse than starting a fresh tool (e.g. Commons that "won't make it"). The keeper count assumes you upgrade everything; leaving the flagged bands trades a few keepers for saved mats.</div>
   </div>`;
 }
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
