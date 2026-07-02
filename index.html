@@ -3913,7 +3913,7 @@ function renderMap(){
 async function bcInitMap(){
   bcMap = L.map('map-el', {
     crs: bcMapCRS(), preferCanvas:true, attributionControl:false,
-    minZoom:-5, maxZoom:5, zoomSnap:0.1, zoomAnimation:false, boxZoom:false
+    minZoom:-5, maxZoom:5, zoomSnap:0.1, zoomAnimation:true, boxZoom:false
   });
 
   // Base terrain — tiled pyramid (apothem handled entirely by the CRS).
