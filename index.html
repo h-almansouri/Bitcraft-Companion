@@ -510,7 +510,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .bc-tab{flex:1;text-align:center;font-size:12px;padding:5px;border-radius:5px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);cursor:pointer}
 .bc-tab.on{background:rgba(29,158,117,.15);border-color:var(--teal);color:var(--text)}
 .bc-res-list{flex:1;min-height:0;overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
-.bc-li{display:flex;align-items:center;gap:7px;padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px}
+.bc-li{display:flex;align-items:center;gap:7px;padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px;content-visibility:auto;contain-intrinsic-size:auto 29px}
 .bc-li:hover{background:var(--bg3)}
 .bc-li.on{background:rgba(29,158,117,.16)}
 .bc-li-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
@@ -1364,17 +1364,20 @@ function tierInfo(level){
 }
 
 // ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
+const SKILL_ACTIVE_GRACE = 45000;   // keep a skill flagged "active" this long after its last XP gain
 function updateSkillSession(entityId, skills){
   const now = Date.now();
   const s = skillSession[entityId] || (skillSession[entityId] = {});
   skills.forEach(sk => {
     const e = s[sk.skillId];
-    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false}; return; }
+    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0}; return; }
     if (sk.xp > e.curXp){
       // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
       if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
       e.active = true;
-    } else {
+      e.lastGainTs = now;
+    } else if (e.active && (now - e.lastGainTs) > SKILL_ACTIVE_GRACE){
+      // don't flicker off between actions — only clear once the grace window since the last gain elapses
       e.active = false;
     }
     e.curXp = sk.xp; e.curTs = now;
@@ -3886,7 +3889,7 @@ function renderMap(){
           <div class="map-side-sec map-side-grow">
             <div class="map-side-hdr"><i class="ti ti-map-search"></i> Live map</div>
             <select id="bc-region-sel" style="margin-bottom:4px" onchange="bcSetMapRegion(this.value)" title="Limit tracked resources to one region"></select>
-            <input id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcRenderResourceList()">
+            <input id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
             <div style="display:flex;gap:4px;margin-top:4px">
               <select id="bc-res-tier" onchange="bcResTier=this.value;bcRenderResourceList()"></select>
               <select id="bc-res-tag" onchange="bcResTag=this.value;bcRenderResourceList()"></select>
@@ -4338,32 +4341,49 @@ let _bcPointCls = null;
 function bcPointLayerClass(){
   if (_bcPointCls) return _bcPointCls;
   _bcPointCls = L.Layer.extend({
-    initialize(opts){ this._sets = []; this._r = (opts&&opts.radius)||4; },
+    initialize(opts){ this._sets = []; this._r = (opts&&opts.radius)||4; this._proj = new WeakMap(); },
     setDatasets(sets){ this._sets = sets||[]; this._draw(); return this; },
     onAdd(map){ this._map = map; this._c = L.DomUtil.create('canvas'); this._c.style.position='absolute'; map.getPane('overlayPane').appendChild(this._c); map.on('moveend zoomend resize viewreset', this._draw, this); this._draw(); },
     onRemove(map){ L.DomUtil.remove(this._c); map.off('moveend zoomend resize viewreset', this._draw, this); },
+    // Project each point ONCE into a flat [x0,y0,x1,y1,…] Float64Array in layer pixels at zoom 0,
+    // cached by the pts array's identity (rebuilt only when a dataset's points are replaced). The CRS
+    // is linear in zoom (pixel = pixel@0 · 2^zoom), so a redraw is just a per-point scale + offset —
+    // no per-point latLngToContainerPoint. Mirrors bcMapCRS().projection.project: x = lng,
+    // y = -lat / BC_APOTHEM (equivalently map.project([lat,lng], 0); the CRS transform is identity).
+    _project(pts){
+      let a = this._proj.get(pts);
+      if (a && a.length === pts.length * 2) return a;
+      a = new Float64Array(pts.length * 2);
+      for (let i=0, j=0; i<pts.length; i++, j+=2){ const c = pts[i]; a[j] = c[0]; a[j+1] = -c[1] / BC_APOTHEM; }
+      this._proj.set(pts, a);
+      return a;
+    },
     _draw(){
       if (!this._map || !this._c) return;
       const map = this._map, size = map.getSize();
       L.DomUtil.setPosition(this._c, map.containerPointToLayerPoint([0,0]));
       this._c.width = size.x; this._c.height = size.y;
       const ctx = this._c.getContext('2d'); ctx.clearRect(0,0,size.x,size.y);
-      const b = map.getBounds().pad(0.05), S=b.getSouth(), N=b.getNorth(), W=b.getWest(), E=b.getEast();
       const z = map.getZoom();
+      // containerPt = pixel@0 · scale + (panePos − pixelOrigin); cull in pixel space against the canvas.
+      const scale = map.options.crs.scale(z);
+      const origin = map.getPixelOrigin(), pane = map._getMapPanePos();
+      const offX = pane.x - origin.x, offY = pane.y - origin.y;
+      const W = size.x, H = size.y;
       for (const set of this._sets){
         const pts = set.pts; if (!pts || !pts.length) continue;
+        const proj = this._project(pts), n = pts.length;
         // Sample only when zoomed out far on a huge set (perf); when zoomed in, stride=1 so every
-        // node in view is drawn — fixes the "only 1 of many shown" problem. Inline cull (no array).
-        const stride = (z <= -2 && pts.length > 300000) ? Math.ceil(pts.length / 300000) : 1;
-        const r = bcDotRadius(set.count != null ? set.count : pts.length, z);
+        // node in view is drawn — fixes the "only 1 of many shown" problem.
+        const stride = (z <= -2 && n > 300000) ? Math.ceil(n / 300000) : 1;
+        const r = bcDotRadius(set.count != null ? set.count : n, z);
         ctx.fillStyle = set.color || '#5fd0ff';
         ctx.beginPath();
-        for (let i=0; i<pts.length; i+=stride){
-          const c = pts[i], lng = c[0], lat = c[1];
-          if (lat<S || lat>N || lng<W || lng>E) continue; // viewport cull
-          const p = map.latLngToContainerPoint([lat, lng]);
-          ctx.moveTo(p.x + r, p.y);
-          ctx.arc(p.x, p.y, r, 0, 6.283185307); // circles
+        for (let i=0, j=0; i<n; i+=stride, j=i*2){
+          const cx = proj[j] * scale + offX, cy = proj[j+1] * scale + offY;
+          if (cx < -r || cx > W+r || cy < -r || cy > H+r) continue; // viewport cull
+          ctx.moveTo(cx + r, cy);
+          ctx.arc(cx, cy, r, 0, 6.283185307); // circles
         }
         ctx.fill();
         // Thin dark border for visibility — only when dots are big enough (zoomed in / scarce),
@@ -4378,13 +4398,17 @@ function bcPointLayerClass(){
 async function bcLoadIndexes(){
   try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=icons1`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
   try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=icons1`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
+  _bcAllEntries = null; // rebuild the combined list against the freshly loaded indexes
 }
-// One combined list of resources + enemies (each entry knows its kind).
+// One combined list of resources + enemies (each entry knows its kind). Cached — the indexes are
+// static after load, and this used to be rebuilt (with an object-spread per entry) on every keystroke.
+let _bcAllEntries = null;
 function bcAllEntries(){
+  if (_bcAllEntries) return _bcAllEntries;
   const out = [];
   for (const id in bcResourceIndex) out.push({ kind:'resource', id, ...bcResourceIndex[id] });
   for (const id in bcCreatureIndex) out.push({ kind:'enemy',    id, ...bcCreatureIndex[id] });
-  return out;
+  return (_bcAllEntries = out);
 }
 function bcInitResourceFilters(){
   const all = bcAllEntries();
@@ -4409,7 +4433,7 @@ function bcRenderResourceList(){
     const key = bcResKey(v.kind, v.id);
     const trk = bcTrackedRes[key];
     const col = (trk && trk.color) || v.color || (v.kind==='enemy' ? '#e0556e' : '#5fd0ff');
-    return `<div class="bc-li${trk?' on':''}" onclick="bcToggleMapItem('${v.kind}','${v.id}')">
+    return `<div class="bc-li${trk?' on':''}" data-k="${key}" onclick="bcToggleMapItem('${v.kind}','${v.id}')">
       <span class="bc-li-dot" style="background:${col}"></span>
       ${gameIconImg(v.icon,18)}
       <span class="bc-li-nm">${escHtml(v.name||('#'+v.id))}</span>
@@ -4420,12 +4444,37 @@ function bcRenderResourceList(){
   }).join('') : '<div class="bc-li-empty">No matches</div>';
   bcRenderHiddenRow();
 }
+// Debounced full re-render — the search box fires on every keystroke; coalesce so we don't rebuild
+// the whole list per character.
+let _bcResListTimer = null;
+function bcDebRenderResList(){ clearTimeout(_bcResListTimer); _bcResListTimer = setTimeout(bcRenderResourceList, 120); }
+// Surgically sync ONE list row's tracked state + dot color instead of re-rendering the whole list
+// (a full re-render recreates every icon <img>, which flashes/glitches). No-op if the row is filtered out.
+function bcSetResRowState(key){
+  const row = document.querySelector(`#bc-res-list .bc-li[data-k="${key}"]`); if (!row) return;
+  const trk = bcTrackedRes[key];
+  row.classList.toggle('on', !!trk);
+  const dot = row.querySelector('.bc-li-dot');
+  if (dot){
+    const ci = key.indexOf(':'), kind = key.slice(0, ci), id = key.slice(ci+1);
+    const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {};
+    dot.style.background = (trk && trk.color) || meta.color || (kind==='enemy' ? '#e0556e' : '#5fd0ff');
+  }
+}
 
 // ----- Hidden resources/enemies (persists; restorable) -----
 let bcHiddenRes = new Set();
 function bcLoadHidden(){ try { const v = localStorage.getItem('bc_map_hidden_v1'); if (v) bcHiddenRes = new Set(JSON.parse(v)); } catch(e){} }
 function bcSaveHidden(){ safeSetItem('bc_map_hidden_v1', JSON.stringify([...bcHiddenRes])); }
-function bcHideRes(key){ bcHiddenRes.add(key); bcSaveHidden(); if (bcTrackedRes[key]) bcUntrackRes(key); bcRenderResourceList(); bcRenderHiddenPanel(); }
+function bcHideRes(key){
+  bcHiddenRes.add(key); bcSaveHidden();
+  if (bcTrackedRes[key]) bcUntrackRes(key);   // also drops it from the map + tracked list
+  const row = document.querySelector(`#bc-res-list .bc-li[data-k="${key}"]`);
+  if (row) row.remove();                       // surgical removal — no full-list rebuild (avoids the flash)
+  const listEl = document.getElementById('bc-res-list');
+  if (listEl && !listEl.querySelector('.bc-li')) listEl.innerHTML = '<div class="bc-li-empty">No matches</div>';
+  bcRenderHiddenPanel();
+}
 function bcRestoreRes(key){ bcHiddenRes.delete(key); bcSaveHidden(); bcRenderResourceList(); bcRenderHiddenPanel(); }
 function bcRestoreAllHidden(){ bcHiddenRes.clear(); bcSaveHidden(); bcRenderResourceList(); bcRenderHiddenPanel(); }
 function bcHiddenName(key){ const [kind,id] = key.split(':'); const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {}; return (meta.name||key) + (kind==='enemy'?' (enemy)':''); }
@@ -4497,7 +4546,7 @@ async function bcToggleMapItem(kind, id){
   const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {};
   const color = meta.color || bcResColors[bcResColorIdx++ % bcResColors.length];
   bcTrackedRes[key] = { kind, id, name: meta.name || ('#'+id), tier: meta.tier||0, tag: meta.tag||'', color, count:0, pts:[] };
-  bcRenderResourceList(); bcRenderTrackedResList();
+  bcSetResRowState(key); bcRenderTrackedResList();
   const status = document.getElementById('bc-res-status');
   if (status) status.innerHTML = '<i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i> Loading…';
   bcSaveTrackedRes();
@@ -4510,7 +4559,7 @@ async function bcToggleMapItem(kind, id){
 function bcUntrackRes(key){
   delete bcTrackedRes[key];
   bcSaveTrackedRes();
-  bcRedrawTracked(); bcRenderResourceList(); bcRenderTrackedResList(); bcUpdateResStatus();
+  bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList(); bcUpdateResStatus();
   if (!Object.keys(bcTrackedRes).length) bcStopResourcePoll();
 }
 // Live update while dragging in the picker: update the map only — do NOT re-render the tracked
@@ -4525,7 +4574,7 @@ function bcSetResColor(key, color){
   const t = bcTrackedRes[key]; if (!t) return;
   t.color = color;
   bcSaveTrackedRes();
-  bcRedrawTracked(); bcRenderResourceList(); bcRenderTrackedResList();
+  bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList();
 }
 function bcRenderTrackedResList(){
   const el = document.getElementById('bc-tracked-res'); if (!el) return;
