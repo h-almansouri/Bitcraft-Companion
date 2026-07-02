@@ -5498,12 +5498,12 @@ function toolScrapName(t){ return TOOL_ADJ[t-1]+' Tool Scrap'; }
 function toolSolventName(t){ return CONSUMABLE_ADJ[t-1]+' Reforging Solvent'; }
 // Cheapest hex per Tool Scrap at tier t: buy on the market, else craft+salvage a Common tool (yields 1 scrap).
 function toolScrapUnit(t){ const m = toolPrice[toolScrapName(t).toLowerCase()]; const salv = toolCumCost(t); return (m && m>0) ? Math.min(m, salv) : salv; }
-// Reforging Solvent isn't traded — cost it from its recipe: 100 tier-seeds + 20 tier-fish-oil + 75 hex
+// Reforging Solvent isn't traded — cost it from its recipe: 10 tier-seeds + 2 tier-fish-oil + 75 hex
 // (the 75 covers the vendor-bought Reforging Stabilizer). Seeds may be any of three crops — use the cheapest.
 const SEED_CROPS = ['Embergrain','Starbulb','Wispweave'];
 function toolSeedPrice(t){ const adj=CONSUMABLE_ADJ[t-1]; const c=SEED_CROPS.map(k=>toolPrice[(adj+' '+k+' Seeds').toLowerCase()]).filter(v=>v!==undefined && v>0); return c.length?Math.min(...c):0; }
 function toolFishOilPrice(t){ return toolPrice[(CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase()] || 0; }
-function toolSolventCraftCost(t){ return 100*toolSeedPrice(t) + 20*toolFishOilPrice(t) + 75; }
+function toolSolventCraftCost(t){ return 10*toolSeedPrice(t) + 2*toolFishOilPrice(t) + 75; }
 // Cheapest hex per Reforging Solvent at tier t: its craft cost (or a market listing if one somehow exists).
 function toolSolventUnit(t){ const m = toolPrice[toolSolventName(t).toLowerCase()]; const craft = toolSolventCraftCost(t); return (m && m>0) ? Math.min(m, craft) : craft; }
 // True when the solvent estimate is missing its seed/fish-oil inputs (unlisted) → only the 75 hex is counted.
@@ -5620,7 +5620,7 @@ function toolCalcHtml(){
       <div class="tc-field"><label>…tool at tier</label><select id="tc-tier" class="sj-input" onchange="setToolTier(this.value)">${tierOpts}</select></div>
     </div>
     <div class="tc2-result" id="tool-calc-result"></div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Rarity comes only from RNG rolls: every tier-upgrade rolls for free, and a <b>reroll</b> ("Recraft") spends <b>Tool Scrap</b> + a <b>Reforging Solvent</b> for another roll at fixed odds. The planner finds the cheapest mix using live market prices: scrap falls back to craft-and-salvage a Common tool when unlisted, and the untraded Reforging Solvent is costed from its recipe (100 seeds + 20 fish oil + 75 hex). Expected values use the real per-roll odds.</div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Rarity comes only from RNG rolls: every tier-upgrade rolls for free, and a <b>reroll</b> ("Recraft") spends <b>Tool Scrap</b> + a <b>Reforging Solvent</b> for another roll at fixed odds. The planner finds the cheapest mix using live market prices: scrap falls back to craft-and-salvage a Common tool when unlisted, and the untraded Reforging Solvent is costed from its recipe (10 seeds + 2 fish oil + 75 hex). Expected values use the real per-roll odds.</div>
   </div>`;
 }
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
