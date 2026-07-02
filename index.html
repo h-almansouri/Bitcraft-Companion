@@ -5682,19 +5682,33 @@ function keeperProb(R, maxT){
   }
   return Pk;
 }
-// Forward-simulate the batch (fractional/expected counts). At each tier: spend that tier's solvents on
-// rerolls toward the target (nearest-to-target first), funded by inventory scrap first, then by scrapping
-// laggards — but ONLY when a reroll is net-positive for keeper count (a laggard's own keeper-chance is its
-// cost). Then blind-upgrade the survivors. This guarantees keepers ≥ the blind-upgrade baseline.
+// Forward-simulate the batch (fractional/expected counts). At each tier: spend solvents on rerolls toward
+// the target (nearest-target first, net-positive only); then UPGRADE only the bands worth keeping and
+// CULL the "leave" bands (cost-per-keeper worse than a fresh tool, or can't reach the target) — so leave
+// bands are not carried forward. Keeps a band's own keeper-chance (Pk) as the cost of scrapping it.
 function simulateBatch(N, R, maxT, inv){
   let count = { 1: N };
   const Pk = keeperProb(R, maxT);
-  const tiers = [], out = { keepers:0, scrapped:0, rerolls:0, solventUsed:0, solventAvail:0 };
+  const ready = toolPricesReady();
+  const cumMax = toolCumCost(maxT);
+  const freshCPK = (ready && Pk[1] && Pk[1][1] > 0.001) ? cumMax / Pk[1][1] : null;
+  const cpkOf = (t, r) => { const pk = (Pk[t] && Pk[t][r]) || 0; return pk > 0.001 ? (cumMax - toolCumCost(t)) / pk : Infinity; };
+  const shouldLeave = (t, r) => {
+    if (r >= R) return false;                              // already a keeper
+    const pk = (Pk[t] && Pk[t][r]) || 0;
+    if (pk < 0.005) return true;                           // can't realistically reach the target in time
+    return ready && freshCPK != null && cpkOf(t,r) > freshCPK;   // worse cost-per-keeper than a fresh tool
+  };
+  const tiers = [], out = { keepers:0, scrapped:0, rerolls:0, solventUsed:0, solventAvail:0, left:0, matsSaved:0 };
   for (let t=1; t<=maxT; t++){
     const cap = Math.min(t,6);
     let solventLeft = inv.solvent[t] || 0, scrapPool = inv.scrap[t] || 0;
     out.solventAvail += (inv.solvent[t] || 0);
-    const arrival = {}; for (let r=1;r<=cap;r++) if ((count[r]||0) > 0.005) arrival[r] = count[r];
+    // snapshot the arrival distribution + per-band verdict (before this tier's rerolls, for display)
+    const bands = [];
+    for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n < 0.005) continue;
+      bands.push({ r, count:n, keeper: r>=R, leave: shouldLeave(t,r), pk:(Pk[t]&&Pk[t][r])||0, cpk: (r<R && ready) ? cpkOf(t,r) : null });
+    }
     let scrappedHere = 0, rerollsHere = 0, promotedHere = 0, topBand = 0;
     for (let r = Math.min(cap, R) - 1; r >= 1 && solventLeft > 0.001; r--){   // reroll nearest-target band first
       const c = REROLL_SCRAP[r+1] || 0, p = RARITY_UP_CHANCE[r] || 0;
@@ -5722,16 +5736,18 @@ function simulateBatch(N, R, maxT, inv){
       }
     }
     out.scrapped += scrappedHere; out.rerolls += rerollsHere; out.solventUsed += (inv.solvent[t]||0) - solventLeft;
-    tiers.push({ t, arrival, scrapped:scrappedHere, rerolls:rerollsHere, promoted:promotedHere, promotedTo:topBand, solvent:inv.solvent[t]||0 });
-    if (t < maxT){                                    // blind-upgrade survivors to t+1
+    tiers.push({ t, bands, scrapped:scrappedHere, rerolls:rerollsHere, promoted:promotedHere, promotedTo:topBand, solvent:inv.solvent[t]||0 });
+    if (t < maxT){                                    // upgrade the "keep" bands; CULL the "leave" bands
       const next = {};
-      for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n<=0.001) continue; const pr = RARITY_UP_CHANCE[r]||0, up = Math.min(r+1, Math.min(t+1,6)); next[r]=(next[r]||0)+n*(1-pr); next[up]=(next[up]||0)+n*pr; }
+      for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n<=0.001) continue;
+        if (shouldLeave(t, r)){ out.left += n; out.matsSaved += n * (cumMax - toolCumCost(t)); continue; }
+        const pr = RARITY_UP_CHANCE[r]||0, up = Math.min(r+1, Math.min(t+1,6)); next[r]=(next[r]||0)+n*(1-pr); next[up]=(next[up]||0)+n*pr;
+      }
       count = next;
+    } else {                                          // final tier: tally keepers vs. didn't-make-it
+      for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n<=0.001) continue; if (r>=R) out.keepers += n; else out.left += n; }
     }
   }
-  const cap = Math.min(maxT,6);
-  for (let r=R; r<=cap; r++) out.keepers += count[r]||0;
-  out.finalDist = count;
   return { tiers, out };
 }
 function setToolBatch(k, v){ loadToolBatch(); toolBatch[k] = +v; saveToolBatch(); renderToolBatchResult(); }
@@ -5744,29 +5760,19 @@ function renderToolBatchResult(){
   const sim = simulateBatch(count, want, maxTier, inv);
   const fmtN = n => Math.round(n).toString();                              // whole tools/solvents
   const fmtP = n => (n > 0 && n < 0.5) ? '<1' : Math.round(n).toString();  // small "promoted" counts
-  // Cost-per-keeper: finishing a laggard band = (remaining upgrade mats) / (its keeper chance). "Leave" it
-  // when that's worse than a fresh tool (full build ÷ a fresh Common's keeper chance) — i.e. the mats are
-  // better spent elsewhere. Needs live mat prices; without them we can't judge, so default to "keep".
-  const Pk = keeperProb(want, maxTier);
-  const ready = toolPricesReady();
-  const cumMax = toolCumCost(maxTier);
-  const freshCPK = (ready && Pk[1] && Pk[1][1] > 0) ? cumMax / Pk[1][1] : null;
-  const bandRow = (t, r, n) => {
+  // Bands (with verdicts + cost-per-keeper) come from the sim, so the display matches what it culled.
+  const bandRow = (b) => {
     let vcls = 'keeper', vlabel = 'keeper', cpkTxt = '';
-    if (r < want){
-      const pk = (Pk[t] && Pk[t][r]) || 0;
-      if (pk <= 0.001){ vcls = 'leave'; vlabel = 'leave'; cpkTxt = "can't reach in time"; }
-      else {
-        const cpk = (cumMax - toolCumCost(t)) / pk;
-        const leave = ready && freshCPK && cpk > freshCPK;
-        vcls = leave ? 'leave' : 'keep'; vlabel = leave ? 'leave' : 'keep';
-        cpkTxt = ready ? `${fmtCoin(Math.round(cpk))} / keeper · ${Math.round(pk*100)}% make it` : `${Math.round(pk*100)}% make it`;
-      }
+    if (!b.keeper){
+      vcls = b.leave ? 'leave' : 'keep'; vlabel = vcls;
+      cpkTxt = (b.pk < 0.005) ? "can't reach in time"
+             : (b.cpk != null ? `${fmtCoin(Math.round(b.cpk))} / keeper · ${Math.round(b.pk*100)}% make it`
+                              : `${Math.round(b.pk*100)}% make it`);
     }
-    return `<div class="tcb-band"><b class="tcb-cnt">${fmtN(n)}×</b><span class="tcb-rar" style="color:${RARITY_COLORS[r]}">${RARITY_NAMES[r]}</span><span class="tcb-sub">${cpkTxt}</span><span class="tcb-verdict tcb-v-${vcls}">${vlabel}</span></div>`;
+    return `<div class="tcb-band"><b class="tcb-cnt">${fmtN(b.count)}×</b><span class="tcb-rar" style="color:${RARITY_COLORS[b.r]}">${RARITY_NAMES[b.r]}</span><span class="tcb-sub">${cpkTxt}</span><span class="tcb-verdict tcb-v-${vcls}">${vlabel}</span></div>`;
   };
   const tiersHtml = sim.tiers.map(tg => {
-    const bands = Object.keys(tg.arrival).map(Number).filter(r => tg.arrival[r] >= 0.5).sort((a,b)=>a-b).map(r => bandRow(tg.t, r, tg.arrival[r])).join('');
+    const bands = tg.bands.filter(b => b.count >= 0.5).map(bandRow).join('');
     let rec = '';
     if (tg.rerolls >= 0.05){
       rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub"><i class="ti ti-dice" style="color:var(--purple-light)"></i> Scrap <b style="color:var(--amber-light)">${fmtN(tg.scrapped)}</b> laggards → reroll <b style="color:var(--purple-light)">${fmtN(tg.rerolls)}</b> <span style="color:var(--text3)">(${fmtN(tg.solvent)} solvents avail)</span> → ~<b style="color:var(--green-light)">${fmtP(tg.promoted)}</b> promoted up</span></div>`;
@@ -5778,8 +5784,9 @@ function renderToolBatchResult(){
   const o = sim.out;
   el.innerHTML = tiersHtml + `<div class="tcb-summary">
     <span class="tcb-chip">Keepers (≥${RARITY_NAMES[want]} @ T${maxTier}): <b style="color:var(--green-light)">${fmtN(o.keepers)}</b> / ${count}</span>
-    <span class="tcb-chip">Solvents used: <b>${fmtN(o.solventUsed)}</b> / ${fmtN(o.solventAvail)}</span>
-    <span class="tcb-chip">Scrapped for fuel: <b>${fmtN(o.scrapped)}</b> tools</span>
+    ${o.left>=0.5 ? `<span class="tcb-chip">Left / culled: <b>${fmtN(o.left)}</b>${o.matsSaved>0.5?` · saved ~<b>${fmtCoin(Math.round(o.matsSaved))}</b> in mats`:''}</span>` : ''}
+    ${o.solventAvail>=0.5 ? `<span class="tcb-chip">Solvents used: <b>${fmtN(o.solventUsed)}</b> / ${fmtN(o.solventAvail)}</span>` : ''}
+    ${o.scrapped>=0.5 ? `<span class="tcb-chip">Scrapped for fuel: <b>${fmtN(o.scrapped)}</b> tools</span>` : ''}
   </div>`;
 }
 function toolBatchHtml(){
