@@ -5694,6 +5694,7 @@ function simulateBatch(N, R, maxT, inv){
   const freshCPK = (ready && Pk[1] && Pk[1][1] > 0.001) ? cumMax / Pk[1][1] : null;
   const cpkOf = (t, r) => { const pk = (Pk[t] && Pk[t][r]) || 0; return pk > 0.001 ? (cumMax - toolCumCost(t)) / pk : Infinity; };
   const shouldLeave = (t, r) => {
+    if (t <= 1) return false;                              // never cull the fresh starting batch — always climb once
     if (r >= R) return false;                              // already a keeper
     const pk = (Pk[t] && Pk[t][r]) || 0;
     if (pk < 0.005) return true;                           // can't realistically reach the target in time
@@ -5765,7 +5766,7 @@ function renderToolBatchResult(){
     let vcls = 'keeper', vlabel = 'keeper', cpkTxt = '';
     if (!b.keeper){
       vcls = b.leave ? 'leave' : 'keep'; vlabel = vcls;
-      cpkTxt = (b.pk < 0.005) ? "can't reach in time"
+      cpkTxt = (b.leave && b.pk < 0.005) ? "can't reach in time"
              : (b.cpk != null ? `${fmtCoin(Math.round(b.cpk))} / keeper · ${Math.round(b.pk*100)}% make it`
                               : `${Math.round(b.pk*100)}% make it`);
     }
@@ -5782,7 +5783,8 @@ function renderToolBatchResult(){
     return `<div class="tcb-tier"><div class="tcb-tier-hdr"><i class="ti ti-arrow-big-up-lines" style="font-size:13px"></i> Tier ${tg.t}</div>${bands}${rec}</div>`;
   }).join('');
   const o = sim.out;
-  el.innerHTML = tiersHtml + `<div class="tcb-summary">
+  const warn = o.keepers < 0.5 ? `<div class="tc2-bad" style="margin-bottom:.6rem"><i class="ti ti-alert-triangle"></i> ${RARITY_NAMES[want]} by T${maxTier} is barely reachable by blind-upgrading a fresh batch (~0 keepers) — try a higher max tier, a lower target rarity, or feed it more rerolls (scrap + solvents).</div>` : '';
+  el.innerHTML = warn + tiersHtml + `<div class="tcb-summary">
     <span class="tcb-chip">Keepers (≥${RARITY_NAMES[want]} @ T${maxTier}): <b style="color:var(--green-light)">${fmtN(o.keepers)}</b> / ${count}</span>
     ${o.left>=0.5 ? `<span class="tcb-chip">Left / culled: <b>${fmtN(o.left)}</b>${o.matsSaved>0.5?` · saved ~<b>${fmtCoin(Math.round(o.matsSaved))}</b> in mats`:''}</span>` : ''}
     ${o.solventAvail>=0.5 ? `<span class="tcb-chip">Solvents used: <b>${fmtN(o.solventUsed)}</b> / ${fmtN(o.solventAvail)}</span>` : ''}
