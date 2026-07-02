@@ -5938,14 +5938,14 @@ function _note(c, dest, t0, freq, dur, gain, type, freqEnd){
 // Gentle palette: sines/triangles only, normalised to a similar loudness. Each = (ctx, destNode, startTime).
 const ALERT_SOUNDS = {
   soft:    (c,d,t)=>{ _note(c,d,t,660,0.35,0.30,'sine'); },
-  chime:   (c,d,t)=>{ [659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.11,f,0.34,0.26,'sine')); },
-  bell:    (c,d,t)=>{ _note(c,d,t,880,0.9,0.28,'sine'); _note(c,d,t,884,0.9,0.12,'sine'); _note(c,d,t,1320,0.7,0.07,'sine'); },
+  chime:   (c,d,t)=>{ [659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.11,f,0.32,0.19,'sine')); },
+  bell:    (c,d,t)=>{ _note(c,d,t,880,0.9,0.22,'sine'); _note(c,d,t,884,0.9,0.10,'sine'); _note(c,d,t,1320,0.7,0.06,'sine'); },
   marimba: (c,d,t)=>{ _note(c,d,t,523,0.22,0.30,'triangle'); _note(c,d,t+0.12,784,0.30,0.28,'triangle'); },
   ding:    (c,d,t)=>{ _note(c,d,t,880,0.34,0.19,'sine'); },
   blip:    (c,d,t)=>{ _note(c,d,t,880,0.14,0.30,'triangle'); },
   pop:     (c,d,t)=>{ _note(c,d,t,720,0.14,0.30,'sine',380); },
-  arp:     (c,d,t)=>{ [523,659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.07,f,0.20,0.24,'sine')); },
-  drop:    (c,d,t)=>{ [784,587,392].forEach((f,i)=>_note(c,d,t+i*0.09,f,0.24,0.27,'sine')); },
+  arp:     (c,d,t)=>{ [523,659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.07,f,0.18,0.17,'sine')); },
+  drop:    (c,d,t)=>{ [784,587,392].forEach((f,i)=>_note(c,d,t+i*0.10,f,0.20,0.18,'sine')); },
   alarm:   (c,d,t)=>{ for(let i=0;i<3;i++){ _note(c,d,t+i*0.22,784,0.13,0.26,'sine'); _note(c,d,t+i*0.22+0.12,588,0.13,0.26,'sine'); } },
   knock:   (c,d,t)=>{ _note(c,d,t,196,0.16,0.34,'sine'); _note(c,d,t,262,0.12,0.15,'sine'); },
   coin:    (c,d,t)=>{ _note(c,d,t,988,0.10,0.27,'sine'); _note(c,d,t+0.09,1319,0.24,0.27,'sine'); },
@@ -5958,9 +5958,17 @@ function playAlertSound(name, volOverride){
   if (v <= 0) return;
   // Master chain: volume gain → gentle low-pass (tames harshness) → speakers. Volume applied once here.
   const master = c.createGain(); master.gain.value = v;
+  const shaper = c.createWaveShaper(); shaper.curve = _scCurve();  // soft-clip: evens loudness across sounds w/ different note counts
   const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5200; lp.Q.value = 0.5;
-  master.connect(lp); lp.connect(c.destination);
+  master.connect(shaper); shaper.connect(lp); lp.connect(c.destination);
   (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, master, c.currentTime + 0.03);
+}
+let _scCurveCache = null;
+function _scCurve(){
+  if (_scCurveCache) return _scCurveCache;
+  const n = 1024, curve = new Float32Array(n), k = 2.4;
+  for (let i=0;i<n;i++){ const x = (i/(n-1))*2 - 1; curve[i] = Math.tanh(k*x)/Math.tanh(k); }
+  return (_scCurveCache = curve);
 }
 
 // ── Toast ──
@@ -6026,16 +6034,20 @@ async function alertsTick(){
       if (T.craftDone.on){
         const cd = await fetchPlayerCrafts(id);
         const now = Math.floor(Date.now()/1000);
-        const pending = st.craftPending || {};
-        const next = {};
+        const prev = st.craftPending || {};       // key -> completion unix ts (crafts we were watching cook)
+        // Fire for anything we were watching whose completion time has now passed — regardless of
+        // whether it's still listed (it may roll to "processing", disappear, or stay put).
+        let doneCount = 0;
+        if (st.craftInit) for (const k in prev){ if (prev[k] <= now) doneCount++; }
+        if (doneCount) fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`);
+        // Rebuild the watch set from crafts still cooking (completion in the future).
+        const cur = {};
         (cd.passive||[]).forEach(c => {
           const done = passiveCompletionTs(c);
-          if (!done) return;
-          const key = (c.id||c.entityId||c.recipeId||'x') + ':' + done;
-          if (done > now) next[key] = done;               // still cooking → carry forward
-          else if (pending[key]) fireAlert('craftDone', `${playerName(p)} — a passive craft finished`); // was pending, now done
+          if (done && done > now) cur[(c.id||c.entityId||c.recipeId||'x') + ':' + done] = done;
         });
-        st.craftPending = next;
+        st.craftPending = cur;
+        st.craftInit = true;   // after the first poll, future completions fire (no spurious alert on open)
       }
     } catch(e){ /* skip this player this cycle */ }
   }
