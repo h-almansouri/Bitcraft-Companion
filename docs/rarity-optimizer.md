@@ -266,7 +266,19 @@ All in the app's local `craftingData.json` (`{items, recipes}`; items have strin
    "vs. reroll-all-at-T" comparison, in the Tool Crafting tab ("Rarity reroll planner"). Prices scrap
    from the market with a craft-and-salvage-a-Common fallback; solvent priced from market (excluded +
    flagged where unlisted). Target = (rarity, tier).
-3. ⬜ Optimizer B (value-max DP) + advisor badges + cull-tier grid.
+3. ✅ **Optimizer B v1 shipped** — "Batch upgrade advisor" in the Tool Crafting tab. Inputs: tool type,
+   # tools, max tier, rarity wanted. Value-max MDP (Sell / Scrap / Upgrade / Reroll per band) → tier-by-
+   tier walkthrough with counts, per-band verdicts, and total cost / revenue / net.
+   - **Sell value** decreases with tier for a fixed rarity (low-tier high-rarity = most upgrade headroom
+     = worth most), increases with rarity. Live per-rarity listings for the tool where present, else an
+     anchor formula `SELL_BASE[r]·0.7^(t-r)`; grid sanitized monotone (↑rarity, ↓tier).
+   - **Scrap value** = the tool's build cost `cumCost(t)` (recover your crafting investment), not
+     market-scrap × yield — which fixes the "shred your Epics for scrap" failure mode.
+   - **Known caveat:** assumes infinite market depth at the listed price. With lucrative high-rarity
+     values it recommends rerolling the whole batch up and selling (e.g. 100 Pickaxes → net +18.9M),
+     and never "culls" — because climbing is net-profitable. Culling only emerges when climbing isn't
+     worth it (thin market, effort/liquidity limits, or a capped keeper count). A quantity/liquidity cap
+     is the natural next refinement.
 4. ⬜ Fold catalyst/scrap needs into the existing per-tier mats grid + Shopping List.
 
 ### Known v1 approximations (Optimizer A)

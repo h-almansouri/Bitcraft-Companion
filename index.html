@@ -195,6 +195,24 @@ main.planner-mode{max-width:none;padding:1rem}
 .tc2-line{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--text3);border-top:1px solid var(--border)}
 .tc2-line b{color:var(--text);font-weight:700}
 .tc2-bad{font-size:12px;color:var(--amber-light);display:flex;align-items:center;gap:.4rem}
+/* batch upgrade advisor */
+.tcb-controls{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:.7rem;margin-bottom:.9rem}
+@media(max-width:720px){.tcb-controls{grid-template-columns:1fr 1fr}}
+.tcb-tier{margin-bottom:.55rem;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.tcb-tier-hdr{background:var(--bg4);padding:.35rem .6rem;font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.03em;display:flex;align-items:center;gap:.4rem}
+.tcb-band{display:grid;grid-template-columns:auto 1fr auto auto;gap:.5rem;align-items:center;padding:.4rem .6rem;font-size:12px;border-top:1px solid var(--border)}
+.tcb-band:first-child{border-top:none}
+.tcb-cnt{font-variant-numeric:tabular-nums;color:var(--text);font-weight:700;min-width:38px}
+.tcb-rar{font-weight:600}
+.tcb-verdict{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-radius:5px;padding:2px 7px;white-space:nowrap}
+.tcb-v-upgrade{background:rgba(29,158,117,.16);color:var(--teal-light)}
+.tcb-v-reroll{background:rgba(151,109,230,.16);color:var(--purple-light)}
+.tcb-v-scrap{background:rgba(186,117,23,.16);color:var(--amber-light)}
+.tcb-v-sell{background:rgba(80,120,200,.18);color:#a9c2f5}
+.tcb-sub{font-size:10px;color:var(--text3)}
+.tcb-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem}
+.tcb-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .55rem;font-size:11px;color:var(--text2)}
+.tcb-chip b{color:var(--text);font-weight:700}
 /* alerts / notifications */
 .al-wrap{max-width:760px}
 .al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
@@ -5623,6 +5641,191 @@ function toolCalcHtml(){
     <div class="tool-note"><i class="ti ti-info-circle"></i> Rarity comes only from RNG rolls: every tier-upgrade rolls for free, and a <b>reroll</b> ("Recraft") spends <b>Tool Scrap</b> + a <b>Reforging Solvent</b> for another roll at fixed odds. The planner finds the cheapest mix using live market prices: scrap falls back to craft-and-salvage a Common tool when unlisted, and the untraded Reforging Solvent is costed from its recipe (10 seeds + 2 fish oil + 75 hex). Expected values use the real per-roll odds.</div>
   </div>`;
 }
+
+// ── Optimizer B: batch upgrade advisor (value-max) ──  see docs/rarity-optimizer.md §6.
+const TOOL_TYPES = ['Pickaxe','Axe','Saw','Chisel','Hammer','Hoe','Knife','Machete','Quill','Rod','Scissors','Bow'];
+const RARITY_COLORS = ['', '#b8c0cc', '#63c45a', '#4aa3ff', '#b07cc6', '#e0a53f', '#e0556e'];
+// Sell value model: a low-tier HIGH-rarity tool is worth the most (buyer keeps more upgrade headroom),
+// so value DECREASES with tier for a fixed rarity. Anchor = value at each rarity's minimum tier (t=r,
+// 1-indexed), from observed market ranges; SELL_DECAY = value multiplier per +1 tier above that.
+const SELL_BASE  = { 1:500, 2:3000, 3:17500, 4:95000, 5:825000, 6:2500000 };
+const SELL_DECAY = 0.7;
+function toolSellFormula(t, r){ return (SELL_BASE[r]||0) * Math.pow(SELL_DECAY, Math.max(0, t - r)); }
+let toolBatch = null; // { type, count, maxTier, want }
+function loadToolBatch(){ if (toolBatch) return; try { toolBatch = Object.assign({ type:'Pickaxe', count:100, maxTier:6, want:3 }, JSON.parse(localStorage.getItem('bc_tool_batch_v1')||'{}')); } catch(e){ toolBatch = { type:'Pickaxe', count:100, maxTier:6, want:3 }; } }
+function saveToolBatch(){ try { safeSetItem('bc_tool_batch_v1', JSON.stringify(toolBatch)); } catch(e){} }
+function rarityIdx(x){ return RARITY_NAMES.indexOf(rarityName(x)); } // 1..6, 0 if unknown
+
+// Per-(tier,rarity) SELL price for a tool type, min across the (duplicated) market ids.
+let marketRarityIdx = null;   // nameLower -> { rarityIdx -> {ids:Set, itemType} }
+let toolSellPrice = {};       // `${type}|${t}:${r}` -> min sell hex (0 = listed-but-none / undefined = unfetched)
+let toolSellFetching = false;
+async function ensureMarketRarityIdx(){
+  if (marketRarityIdx) return;
+  marketRarityIdx = {};
+  try {
+    const d = await apiFetch('/api/market?hasOrders=true&hasSellOrders=true');
+    const items = (d.data && d.data.items) || d.items || [];
+    for (const it of items){
+      const nm = (it.name||'').toLowerCase(); if (!nm) continue;
+      const ri = rarityIdx(it.rarityStr != null ? it.rarityStr : it.rarity); if (ri < 1) continue;
+      const slot = (marketRarityIdx[nm] = marketRarityIdx[nm] || {});
+      const e = (slot[ri] = slot[ri] || { ids:new Set(), itemType: it.itemType||0 });
+      e.ids.add(it.id);
+    }
+  } catch(e){}
+}
+function toolTypeName(type, t){ if (!craftingData) return null; const it = craftingData.items.find(i => i.tier===t && i.name && i.name.endsWith(' '+type)); return it ? it.name : null; }
+async function fetchToolSellPrices(type, maxT){
+  if (toolSellFetching) return;
+  toolSellFetching = true;
+  try {
+    if (!craftingData){ try { await loadCraftingData(); } catch(e){} }
+    await ensureMarketRarityIdx();
+    for (let t=2; t<=maxT; t++){
+      const nm = toolTypeName(type, t), nml = nm ? nm.toLowerCase() : null;
+      for (let r=1; r<=Math.min(t,6); r++){
+        const key = type+'|'+t+':'+r;
+        if (toolSellPrice[key] !== undefined) continue;
+        const slot = nml && marketRarityIdx[nml] && marketRarityIdx[nml][r];
+        if (!slot){ toolSellPrice[key] = 0; continue; }
+        let best = 0;
+        for (const id of slot.ids){
+          try {
+            const det = await fetchWithCache(slot.itemType===1?'cargo':'item', id, 60000);
+            const sells = (det.sellOrders||[]).map(o=>+(o.price||o.priceThreshold||0)).filter(v=>v>0);
+            if (sells.length){ const m = Math.min(...sells); if (!best || m<best) best = m; }
+          } catch(e){}
+        }
+        toolSellPrice[key] = best;
+      }
+    }
+  } finally { toolSellFetching = false; }
+  if (currentTab === 'tools') renderToolBatchResult();
+}
+// Build the (tier × rarity) sell-value grid for a tool: this tool's live listing where present, else the
+// anchor formula. Then sanitize: value must rise with rarity (per tier) and fall with tier (per rarity).
+function buildSellGrid(type, maxT){
+  const g = Array.from({length:maxT+1}, () => []);
+  for (let t=1; t<=maxT; t++){ const cap = Math.min(t,6);
+    for (let r=1; r<=cap; r++){ const m = toolSellPrice[type+'|'+t+':'+r]; g[t][r] = (m>0) ? m : toolSellFormula(t,r); }
+  }
+  for (let t=1; t<=maxT; t++){ const cap = Math.min(t,6); for (let r=2; r<=cap; r++) if (g[t][r] < g[t][r-1]*1.15) g[t][r] = g[t][r-1]*1.15; }  // ↑ with rarity
+  for (let r=1; r<=6; r++) for (let t=r+1; t<=maxT; t++){ if (g[t][r]!=null && g[t-1][r]!=null && g[t][r] > g[t-1][r]) g[t][r] = g[t-1][r]; }   // ↓ with tier
+  return g;
+}
+// Value-max MDP: each (t,r) picks the best of sell / scrap / upgrade / reroll.
+// Scrap value = the tool's build cost (craft T1→t), i.e. recovering your crafting investment as reroll fuel.
+function solveToolValue(type, maxT){
+  const G = buildSellGrid(type, maxT);
+  const V = Array.from({length:maxT+1}, () => []);
+  const POL = Array.from({length:maxT+1}, () => []);
+  for (let t=maxT; t>=1; t--){
+    const cap = Math.min(t,6);
+    for (let r=cap; r>=1; r--){
+      const sell = G[t][r];
+      const scrap = toolCumCost(t);
+      let best = sell, pol = 'sell';
+      if (scrap > best){ best = scrap; pol = 'scrap'; }
+      const p = RARITY_UP_CHANCE[r] || 0;
+      if (t < maxT){
+        const up = Math.min(r+1, Math.min(t+1,6));
+        const val = -toolMatCost(t+1) + p*V[t+1][up] + (1-p)*V[t+1][r];
+        if (val > best){ best = val; pol = 'upgrade'; }
+      }
+      if (r < cap && p > 0){
+        const val = -toolRerollCost(t, r+1)/p + V[t][r+1];
+        if (val > best){ best = val; pol = 'reroll'; }
+      }
+      V[t][r] = best; POL[t][r] = pol;
+    }
+  }
+  return { V, POL, G, maxT };
+}
+// Walk a batch of N from T1 Common through the optimal policy. Each tier shows the arrival distribution
+// + per-band verdict; a "reroll" band climbs within the tier (reroll-until-success) before upgrading.
+function toolBatchWalk(sol, N, want){
+  const maxT = sol.maxT, G = sol.G, tiers = [], out = { kept:0, sold:0, scrapped:0, scrapUnits:0, rerolls:0, cost:0, revenue:0 };
+  out.cost += N * toolMatCost(1);   // craft the batch at T1
+  let arrival = { 1: N }; // rarity -> count entering the current tier
+  for (let t=1; t<=maxT; t++){
+    const cap = Math.min(t,6), bands = [], next = {};
+    for (let r=1; r<=cap; r++){
+      const n = arrival[r] || 0; if (n < 0.05) continue;
+      bands.push({ r, count:n, pol: sol.POL[t][r] });
+      // resolve fate: follow the reroll chain within this tier, then upgrade or terminate
+      let rr = r;
+      while (sol.POL[t][rr] === 'reroll' && rr < cap){ out.rerolls += n; out.cost += n * toolRerollCost(t, rr+1) / (RARITY_UP_CHANCE[rr]||1); rr++; }
+      const pol = sol.POL[t][rr];
+      if (pol === 'upgrade' && t < maxT){
+        out.cost += n * toolMatCost(t+1);
+        const p = RARITY_UP_CHANCE[rr] || 0, up = Math.min(rr+1, Math.min(t+1,6));
+        next[rr] = (next[rr]||0) + n*(1-p); next[up] = (next[up]||0) + n*p;
+      } else if (pol === 'scrap'){ out.scrapped += n; out.scrapUnits += n*(SALVAGE_YIELD[rr]||0); out.revenue += n * toolCumCost(t); }
+      else { out.revenue += n * (G[t][rr]||0); if (rr >= want) out.kept += n; else out.sold += n; }   // sell
+    }
+    if (bands.length) tiers.push({ t, bands });
+    arrival = next;
+    if (!Object.keys(next).length) break;
+  }
+  out.net = out.revenue - out.cost;
+  return { tiers, out };
+}
+function setToolBatch(k, v){
+  loadToolBatch(); toolBatch[k] = (k==='type') ? v : +v; saveToolBatch();
+  if (k==='type' || k==='maxTier') fetchToolSellPrices(toolBatch.type, toolBatch.maxTier);
+  renderToolBatchResult();
+}
+function renderToolBatchResult(){
+  const el = document.getElementById('tool-batch-result'); if (!el) return;
+  loadToolBatch();
+  if (!toolPricesReady()){ el.innerHTML = '<span class="dot-spin"></span> loading market prices…'; return; }
+  const { type, count, maxTier, want } = toolBatch;
+  let anyUnfetched = false;
+  for (let t=2;t<=maxTier;t++) for (let r=1;r<=Math.min(t,6);r++) if (toolSellPrice[type+'|'+t+':'+r]===undefined) anyUnfetched = true;
+  if (anyUnfetched || toolSellFetching){ if (anyUnfetched && !toolSellFetching) fetchToolSellPrices(type, maxTier); el.innerHTML = '<span class="dot-spin"></span> loading '+escHtml(type)+' sell prices…'; return; }
+  const sol = solveToolValue(type, maxTier);
+  const walk = toolBatchWalk(sol, count, want);
+  const LABEL = { upgrade:'Upgrade', reroll:'Reroll', scrap:'Scrap', sell:'Sell' };
+  const fmtN = n => n>=10 ? Math.round(n).toString() : n.toFixed(1);
+  const tiersHtml = walk.tiers.map(tg => {
+    const rows = tg.bands.map(b => {
+      const hint = b.pol==='upgrade' ? `→ T${tg.t+1}` : (b.pol==='reroll' ? `→ ${RARITY_NAMES[b.r+1]}` : '');
+      return `<div class="tcb-band">
+        <span class="tcb-cnt">${fmtN(b.count)}×</span>
+        <span class="tcb-rar" style="color:${RARITY_COLORS[b.r]}">${RARITY_NAMES[b.r]}</span>
+        <span class="tcb-sub">${hint}</span>
+        <span class="tcb-verdict tcb-v-${b.pol}">${LABEL[b.pol]}</span>
+      </div>`;
+    }).join('');
+    return `<div class="tcb-tier"><div class="tcb-tier-hdr"><i class="ti ti-arrow-big-up-lines" style="font-size:13px"></i> Tier ${tg.t}</div>${rows}</div>`;
+  }).join('');
+  const o = walk.out;
+  const chip = (c, txt) => c>=0.5 ? `<span class="tcb-chip">${txt}</span>` : '';
+  el.innerHTML = tiersHtml + `<div class="tcb-summary">
+    ${chip(o.kept, `Keepers (≥${RARITY_NAMES[want]}): <b>${fmtN(o.kept)}</b>`)}
+    ${chip(o.scrapped, `Scrapped: <b>${fmtN(o.scrapped)}</b> → <b>${fmtN(o.scrapUnits)}</b> scrap`)}
+    ${chip(o.sold, `Sold below target: <b>${fmtN(o.sold)}</b>`)}
+    <span class="tcb-chip">Cost ~<b>${fmtCoin(Math.round(o.cost))}</b> · revenue ~<b>${fmtCoin(Math.round(o.revenue))}</b> · net <b style="color:${o.net>=0?'var(--green-light)':'var(--red-light)'}">${o.net>=0?'+':''}${fmtCoin(Math.round(o.net))}</b></span>
+  </div>`;
+}
+function toolBatchHtml(){
+  loadToolBatch();
+  const typeOpts = TOOL_TYPES.map(t=>`<option value="${t}"${toolBatch.type===t?' selected':''}>${t}</option>`).join('');
+  const tierOpts = [2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolBatch.maxTier===t?' selected':''}>T${t}</option>`).join('');
+  const wantOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolBatch.want===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
+  return `<div class="tool-calc" style="margin-top:1rem">
+    <div class="tool-calc-hdr"><i class="ti ti-stack-2"></i> Batch upgrade advisor</div>
+    <div class="tcb-controls">
+      <div class="tc-field"><label>Tool</label><select class="sj-input" onchange="setToolBatch('type',this.value)">${typeOpts}</select></div>
+      <div class="tc-field"><label># tools</label><input type="number" min="1" max="100000" class="sj-input" value="${toolBatch.count}" onchange="setToolBatch('count',this.value)"></div>
+      <div class="tc-field"><label>Max tier</label><select class="sj-input" onchange="setToolBatch('maxTier',this.value)">${tierOpts}</select></div>
+      <div class="tc-field"><label>Rarity wanted</label><select class="sj-input" onchange="setToolBatch('want',this.value)">${wantOpts}</select></div>
+    </div>
+    <div class="tc2-result" id="tool-batch-result"></div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Blind-upgrade a batch and cull the laggards. Each rarity band picks its best use — <b>Upgrade</b> (gamble a tier), <b>Reroll</b> (spend scrap+solvent), <b>Scrap</b> (salvage into reroll fuel), or <b>Sell</b> (market value) — so "leave the Commons at T2" shows up when scrapping/selling beats upgrading. Sell prices are live per-rarity market listings for the chosen tool (estimated from stat multipliers where unlisted).</div>
+  </div>`;
+}
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(names)); }
 function toggleToolInvLoc(idx){ if (!toolTrackedInvs) toolTrackedInvs = new Set(); if (toolTrackedInvs.has(idx)) toolTrackedInvs.delete(idx); else toolTrackedInvs.add(idx); _saveToolTrackedNames(); renderToolCrafting(); }
@@ -5713,8 +5916,9 @@ async function renderToolCrafting(){
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
     <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats.</div>`
-    + toolCalcHtml();
+    + toolCalcHtml() + toolBatchHtml();
   renderToolCalcResult();
+  renderToolBatchResult();
   updateLiveBtns();
   // Kick off market pricing for any materials not yet priced.
   const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
