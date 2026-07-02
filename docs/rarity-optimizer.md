@@ -266,19 +266,23 @@ All in the app's local `craftingData.json` (`{items, recipes}`; items have strin
    "vs. reroll-all-at-T" comparison, in the Tool Crafting tab ("Rarity reroll planner"). Prices scrap
    from the market with a craft-and-salvage-a-Common fallback; solvent priced from market (excluded +
    flagged where unlisted). Target = (rarity, tier).
-3. ✅ **Optimizer B v1 shipped** — "Batch upgrade advisor" in the Tool Crafting tab. Inputs: tool type,
-   # tools, max tier, rarity wanted. Value-max MDP (Sell / Scrap / Upgrade / Reroll per band) → tier-by-
-   tier walkthrough with counts, per-band verdicts, and total cost / revenue / net.
-   - **Sell value** decreases with tier for a fixed rarity (low-tier high-rarity = most upgrade headroom
-     = worth most), increases with rarity. Live per-rarity listings for the tool where present, else an
-     anchor formula `SELL_BASE[r]·0.7^(t-r)`; grid sanitized monotone (↑rarity, ↓tier).
-   - **Scrap value** = the tool's build cost `cumCost(t)` (recover your crafting investment), not
-     market-scrap × yield — which fixes the "shred your Epics for scrap" failure mode.
-   - **Known caveat:** assumes infinite market depth at the listed price. With lucrative high-rarity
-     values it recommends rerolling the whole batch up and selling (e.g. 100 Pickaxes → net +18.9M),
-     and never "culls" — because climbing is net-profitable. Culling only emerges when climbing isn't
-     worth it (thin market, effort/liquidity limits, or a capped keeper count). A quantity/liquidity cap
-     is the natural next refinement.
+3. ✅ **Optimizer B shipped (resource-constrained, max-keepers).** "Batch upgrade advisor" in the Tool
+   Crafting tab. Inputs: # tools, max tier, rarity wanted. **Objective: maximize tools reaching ≥ the
+   wanted rarity**, capped by the scrap + craftable Reforging Solvents in the tracked inventory.
+   - **Inventory caps** (per tier): scrap on hand; solvents you can field = existing + craftable
+     `min(Σ⌊seeds/10⌋, ⌊fishoil/2⌋)`. Solvents are the hard reroll cap.
+   - **Engine:** forward-simulate the batch (fractional/expected counts). At each tier, spend solvents on
+     rerolls toward the target (nearest-target rarity first), funded by inventory scrap first, then by
+     scrapping laggards — but **only when net-positive for keeper count**, using a keeper-probability DP
+     `Pk(t,r) = P(reach ≥R by maxT via blind upgrades)`. A laggard's own `Pk` is the cost of scrapping
+     it; cannibalize only if the reroll's keeper-gain-per-scrap beats it. Then blind-upgrade survivors.
+   - **Guarantees keepers ≥ the blind-upgrade baseline** (verified). Rerolls mostly pay off from *free
+     inventory scrap*; cannibalizing the batch for fuel is usually net-negative (the Commons you'd shred
+     still have real keeper odds via free upgrade rolls), so it's done sparingly.
+   - Output: tier-by-tier arrival distribution + a "Scrap N → reroll M → ~P promoted" line per tier, and
+     a summary (keepers / solvents used / tools scrapped). No hex/market prices needed — it's all
+     resource units. (Superseded the earlier value-max v1, which assumed infinite market depth and just
+     recommended rerolling everything up to sell.)
 4. ⬜ Fold catalyst/scrap needs into the existing per-tier mats grid + Shopping List.
 
 ### Known v1 approximations (Optimizer A)
