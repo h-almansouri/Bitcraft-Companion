@@ -5941,7 +5941,7 @@ const ALERT_SOUNDS = {
   chime:   (c,d,t)=>{ [659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.11,f,0.34,0.26,'sine')); },
   bell:    (c,d,t)=>{ _note(c,d,t,880,0.9,0.28,'sine'); _note(c,d,t,884,0.9,0.12,'sine'); _note(c,d,t,1320,0.7,0.07,'sine'); },
   marimba: (c,d,t)=>{ _note(c,d,t,523,0.22,0.30,'triangle'); _note(c,d,t+0.12,784,0.30,0.28,'triangle'); },
-  ding:    (c,d,t)=>{ _note(c,d,t,1046,0.5,0.30,'sine'); },
+  ding:    (c,d,t)=>{ _note(c,d,t,880,0.34,0.19,'sine'); },
   blip:    (c,d,t)=>{ _note(c,d,t,880,0.14,0.30,'triangle'); },
   pop:     (c,d,t)=>{ _note(c,d,t,720,0.14,0.30,'sine',380); },
   arp:     (c,d,t)=>{ [523,659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.07,f,0.20,0.24,'sine')); },
