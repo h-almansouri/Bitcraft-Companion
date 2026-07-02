@@ -1363,25 +1363,35 @@ function tierInfo(level){
   return {t, c:TIER_COLORS[idx].c, bg:TIER_COLORS[idx].bg};
 }
 
+// The "N / M XP  ·  #rank" line. Shared so the full render and the live per-tick update produce
+// identical markup (the live path used to overwrite this with textContent, dropping the rank).
+function skillXpRowHtml(sk, rank){
+  return `${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP` + (rank ? ` &nbsp;·&nbsp; <span style="color:var(--text3)">#${rank.rank}</span>` : '');
+}
 // ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
 const SKILL_ACTIVE_GRACE = 45000;   // keep a skill flagged "active" this long after its last XP gain
+let _skillGainSeq = 0;              // monotonic counter — orders gains even within the same millisecond
 function updateSkillSession(entityId, skills){
   const now = Date.now();
   const s = skillSession[entityId] || (skillSession[entityId] = {});
   skills.forEach(sk => {
     const e = s[sk.skillId];
-    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0}; return; }
+    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0, gainSeq:0}; return; }
     if (sk.xp > e.curXp){
       // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
       if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
-      e.active = true;
       e.lastGainTs = now;
-    } else if (e.active && (now - e.lastGainTs) > SKILL_ACTIVE_GRACE){
-      // don't flicker off between actions — only clear once the grace window since the last gain elapses
-      e.active = false;
+      e.gainSeq = ++_skillGainSeq;
     }
     e.curXp = sk.xp; e.curTs = now;
   });
+  // Exactly one skill is "active": the most-recently-gained one (highest gainSeq — unique, so no ties),
+  // and only within the grace window since its last gain. Switching skills flips the highlight the
+  // instant the new skill gains XP, while gaps between actions in the same skill don't flicker it off.
+  let best = null;
+  for (const id in s){ const e = s[id]; if (e.gainSeq && (!best || e.gainSeq > best.gainSeq)) best = e; }
+  const live = best && (now - best.lastGainTs) <= SKILL_ACTIVE_GRACE;
+  for (const id in s){ s[id].active = live && s[id] === best; }
 }
 function sessionRate(entityId, skillId){
   const e = skillSession[entityId] && skillSession[entityId][skillId];
@@ -1561,7 +1571,11 @@ function skillsSectionHtml(pData, rankData, entityId) {
     entityId = String(entityId != null ? entityId : (player.entityId || ''));
     const skillMap = player.skillMap || {};
     const experience = player.experience || [];
-    const rankings = (rankData && rankData.rankings) || {};
+    // Keep the last-known ranks if a refresh's rankings fetch fails/returns empty (network blip / rate
+    // limit), so the rank numbers don't blank out and flicker back on the next successful poll.
+    const prevRankings = (skillsByPlayer[entityId] && skillsByPlayer[entityId].rankings) || {};
+    const freshRankings = (rankData && rankData.rankings) || {};
+    const rankings = Object.keys(freshRankings).length ? freshRankings : prevRankings;
 
     const skills = experience
       .filter(e => e.skill_id !== 1 && e.skill_id !== 22)
@@ -1608,7 +1622,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
             <span>Progress</span><span>${sk.pct}%</span>
           </div>
           <div class="skill-bar-wrap"><div class="skill-bar" style="width:${sk.pct}%"></div></div>
-          <div class="skill-xp-row">${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP${rank?' &nbsp;·&nbsp; <span style="color:var(--text3)">#'+rank.rank+'</span>':''}</div>
+          <div class="skill-xp-row">${skillXpRowHtml(sk, rank)}</div>
         </div>`;
       }).join('');
     }
@@ -6204,23 +6218,35 @@ function onLiveExperience(id, data){
   });
   if (!changed.length) return;
   updateSkillSession(id, store.skills);
-  if (currentTab === 'skills') changed.forEach(sk => updateSkillCardLive(id, sk));
+  if (currentTab === 'skills'){
+    changed.forEach(sk => updateSkillCardLive(id, sk));
+    syncSkillActiveStates(id); // one active skill may have handed off to another — update ALL cards, not just the ones that gained
+  }
 }
 function updateSkillCardLive(id, sk){
   const body = document.getElementById('psec-skills-' + id); if (!body) return;
   const card = body.querySelector(`.skill-card[data-skill="${sk.skillId}"]`); if (!card) return;
   const ti = tierInfo(sk.level);
-  const active = !!(skillSession[id] && skillSession[id][sk.skillId] && skillSession[id][sk.skillId].active);
+  const rank = ((skillsByPlayer[id] && skillsByPlayer[id].rankings) || {})[sk.skillId];
   card.style.setProperty('--tc', ti.c); card.style.setProperty('--tcbg', ti.bg);
-  card.classList.toggle('skill-active', active);
   const lv = card.querySelector('.skill-card-level'); if (lv) lv.textContent = sk.level;
   const tb = card.querySelector('.skill-tier-badge'); if (tb) tb.textContent = 'T' + ti.t;
   const bar = card.querySelector('.skill-bar'); if (bar) bar.style.width = sk.pct + '%';
   const pctEls = card.querySelectorAll('.skill-card-row span'); if (pctEls[1]) pctEls[1].textContent = sk.pct + '%';
-  const xpRow = card.querySelector('.skill-xp-row'); if (xpRow) xpRow.textContent = `${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP`;
-  let badge = card.querySelector('.skill-active-badge');
-  if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
-  else if (!active && badge){ badge.remove(); }
+  const xpRow = card.querySelector('.skill-xp-row'); if (xpRow) xpRow.innerHTML = skillXpRowHtml(sk, rank); // keep the #rank suffix
+}
+// Sync every skill card's "active" highlight + badge to skillSession (only one skill is active at a
+// time; handoff on skill-swap must clear the previous card, which may not be in this tick's changes).
+function syncSkillActiveStates(id){
+  const body = document.getElementById('psec-skills-' + id); if (!body) return;
+  const sess = skillSession[id] || {};
+  body.querySelectorAll('.skill-card[data-skill]').forEach(card => {
+    const active = !!(sess[card.dataset.skill] && sess[card.dataset.skill].active);
+    card.classList.toggle('skill-active', active);
+    let badge = card.querySelector('.skill-active-badge');
+    if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
+    else if (!active && badge){ badge.remove(); }
+  });
 }
 
 (async () => {
