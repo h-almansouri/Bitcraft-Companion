@@ -5922,29 +5922,45 @@ function saveAlerts(){ try { safeSetItem('bc_alerts', JSON.stringify(alertSettin
 // ── Sound engine (WebAudio; no audio files needed) ──
 let _actx = null;
 function actx(){ try { _actx = _actx || new (window.AudioContext||window.webkitAudioContext)(); if (_actx.state === 'suspended') _actx.resume(); } catch(e){} return _actx; }
-function _blip(c, t0, freq, dur, gain, type){
+// One soft note. Exponential attack/decay (no hard edges = no click) into a shared destination node,
+// so the volume + low-pass live on the master and every sound is scaled/softened uniformly.
+function _note(c, dest, t0, freq, dur, gain, type, freqEnd){
   const o = c.createOscillator(), g = c.createGain();
-  o.type = type || 'sine'; o.frequency.value = freq;
-  g.gain.setValueAtTime(0, t0);
-  g.gain.linearRampToValueAtTime(gain, t0 + 0.012);
-  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-  o.connect(g); g.connect(c.destination);
-  o.start(t0); o.stop(t0 + dur + 0.03);
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t0);
+  if (freqEnd) o.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.02);   // ~20ms soft attack
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);  // smooth decay
+  o.connect(g); g.connect(dest);
+  o.start(t0); o.stop(t0 + dur + 0.05);
 }
+// Gentle palette: sines/triangles only, normalised to a similar loudness. Each = (ctx, destNode, startTime).
 const ALERT_SOUNDS = {
-  chime: (c,t,v)=>{ [660,880,1320].forEach((f,i)=>_blip(c,t+i*0.12,f,0.30,0.25*v,'sine')); },
-  ding:  (c,t,v)=>{ _blip(c,t,1050,0.5,0.32*v,'sine'); _blip(c,t,1575,0.5,0.11*v,'sine'); },
-  alarm: (c,t,v)=>{ for(let i=0;i<3;i++){ _blip(c,t+i*0.20,880,0.10,0.3*v,'square'); _blip(c,t+i*0.20+0.10,660,0.10,0.3*v,'square'); } },
-  beep:  (c,t,v)=>{ _blip(c,t,760,0.15,0.3*v,'triangle'); },
-  coin:  (c,t,v)=>{ _blip(c,t,988,0.08,0.28*v,'square'); _blip(c,t+0.08,1319,0.24,0.28*v,'square'); },
-  pluck: (c,t,v)=>{ _blip(c,t,523,0.16,0.3*v,'triangle'); _blip(c,t+0.14,784,0.32,0.28*v,'triangle'); },
+  soft:    (c,d,t)=>{ _note(c,d,t,660,0.35,0.30,'sine'); },
+  chime:   (c,d,t)=>{ [659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.11,f,0.34,0.26,'sine')); },
+  bell:    (c,d,t)=>{ _note(c,d,t,880,0.9,0.28,'sine'); _note(c,d,t,884,0.9,0.12,'sine'); _note(c,d,t,1320,0.7,0.07,'sine'); },
+  marimba: (c,d,t)=>{ _note(c,d,t,523,0.22,0.30,'triangle'); _note(c,d,t+0.12,784,0.30,0.28,'triangle'); },
+  ding:    (c,d,t)=>{ _note(c,d,t,1046,0.5,0.30,'sine'); },
+  blip:    (c,d,t)=>{ _note(c,d,t,880,0.14,0.30,'triangle'); },
+  pop:     (c,d,t)=>{ _note(c,d,t,720,0.14,0.30,'sine',380); },
+  arp:     (c,d,t)=>{ [523,659,784,1047].forEach((f,i)=>_note(c,d,t+i*0.07,f,0.20,0.24,'sine')); },
+  drop:    (c,d,t)=>{ [784,587,392].forEach((f,i)=>_note(c,d,t+i*0.09,f,0.24,0.27,'sine')); },
+  alarm:   (c,d,t)=>{ for(let i=0;i<3;i++){ _note(c,d,t+i*0.22,784,0.13,0.26,'sine'); _note(c,d,t+i*0.22+0.12,588,0.13,0.26,'sine'); } },
+  knock:   (c,d,t)=>{ _note(c,d,t,196,0.16,0.34,'sine'); _note(c,d,t,262,0.12,0.15,'sine'); },
+  coin:    (c,d,t)=>{ _note(c,d,t,988,0.10,0.27,'sine'); _note(c,d,t+0.09,1319,0.24,0.27,'sine'); },
 };
 const ALERT_SOUND_NAMES = Object.keys(ALERT_SOUNDS);
 function playAlertSound(name, volOverride){
   loadAlerts();
   const c = actx(); if (!c) return;
   const v = Math.max(0, Math.min(1, volOverride != null ? volOverride : alertSettings.volume));
-  (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, c.currentTime + 0.03, v);
+  if (v <= 0) return;
+  // Master chain: volume gain → gentle low-pass (tames harshness) → speakers. Volume applied once here.
+  const master = c.createGain(); master.gain.value = v;
+  const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5200; lp.Q.value = 0.5;
+  master.connect(lp); lp.connect(c.destination);
+  (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, master, c.currentTime + 0.03);
 }
 
 // ── Toast ──
