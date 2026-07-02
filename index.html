@@ -162,7 +162,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
 /* tool crafting grid */
 .tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
-.tool-grid-row{display:grid;grid-template-columns:56px repeat(7,1fr);gap:6px;align-items:stretch}
+.tool-grid-row{display:grid;grid-template-columns:56px repeat(6,1fr);gap:6px;align-items:stretch}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
 .tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
@@ -176,7 +176,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
 .tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
-@media(max-width:720px){.tool-grid-row{grid-template-columns:32px repeat(7,1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
+@media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(6,1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
 /* reroll / upgrade calculator */
 .tool-calc{margin-top:1.5rem;border:1px solid var(--border2);border-radius:10px;background:var(--bg2);padding:1rem}
 .tool-calc-hdr{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem}
@@ -5583,9 +5583,7 @@ async function renderToolCrafting(){
     ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
     <div class="tool-hcell">Tools</div>
     <div class="tool-hcell">Cost / tool</div>
-    <div class="tool-hcell">Reroll</div>
   </div>`;
-  const pricesReady = toolPricesReady();
   const rows = [];
   for (let t=1; t<=10; t++){
     const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
@@ -5601,26 +5599,17 @@ async function renderToolCrafting(){
     const cost = loading ? null : parts.reduce((a,b)=>a+b,0);
     const costInner = loading ? '<span class="dot-spin"></span>'
       : (cost>0 ? `<span class="tool-have">${fmtCoin(Math.round(cost))}</span>` : '<span class="tool-have" style="color:var(--text3)">—</span>');
-    // reroll cost for one attempt toward this tier's max rarity (incl. scrap)
-    const capR = Math.min(t, 6);
-    let rerollInner;
-    if (t < 2) rerollInner = '<span class="tool-have" style="color:var(--text3)">—</span>';
-    else if (!pricesReady) rerollInner = '<span class="dot-spin"></span>';
-    else rerollInner = `<span class="tool-have">${fmtCoin(Math.round(toolRerollCost(t, capR)))}</span>`;
     rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
       <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
       <div class="tool-cell tool-cost" title="Cheapest market price of 4 ingots + 2 planks + 2 leather + 2 rope">${costInner}</div>
-      <div class="tool-cell tool-reroll" title="One reroll toward ${RARITY_NAMES[capR]} at T${t}: 100 seed + 20 fish oil + 75 + ${SCRAP_TO_REACH[capR]||0} scrap (built-up tools)">${rerollInner}</div>
     </div>`);
   }
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats. <b>Reroll</b> = one reroll attempt toward that tier's max rarity, scrap included.</div>
-    ${toolCalcHtml()}`;
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats.</div>`;
   updateLiveBtns();
-  renderToolCalcResult();
   // Kick off market pricing for any materials not yet priced.
   const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
   if (anyUnpriced && !toolPricingActive) fetchToolPrices();
