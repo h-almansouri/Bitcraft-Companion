@@ -42,15 +42,16 @@ function fetchJson(name) {
   const passiveRecipeIds = recipes.filter(r => r.is_passive).map(r => r.id);
   console.log(`Passive recipes: ${passiveRecipeIds.length}`);
 
-  // ── tool power ──  item_id -> {power, type}
+  // ── tool power ──  item_id -> {power, type, tier}   (tier gates which resources it can harvest)
+  const itemTier = new Map(cd.items.map(i => [i.id, i.tier || 0]));
   const toolMap = {}, toolTypeMinPower = {};
   for (const t of tools) {
     if (t.item_id == null || t.power == null) continue;
-    toolMap[t.item_id] = { power: t.power, type: t.tool_type };
+    toolMap[t.item_id] = { power: t.power, type: t.tool_type, tier: itemTier.get(t.item_id) || 0 };
     if (t.power > 0) toolTypeMinPower[t.tool_type] = Math.min(toolTypeMinPower[t.tool_type] ?? Infinity, t.power);
   }
 
-  // ── gather sources ──  item_id -> [ {hp, perAction, onDestroy, toolType, toolTier} ]
+  // ── gather sources ──  item_id -> [ {hp, perAction, onDestroy, toolType, toolTier, skillId, skillLevel} ]
   const resById = new Map(res.map(r => [r.id, r]));
   const gather = {};
   const addSource = (itemId, src) => { (gather[itemId] = gather[itemId] || []).push(src); };
@@ -61,6 +62,8 @@ function fetchJson(name) {
     if (hp <= 0) continue;
     const req = (e.tool_requirements && e.tool_requirements[0]) || null;   // [toolType, tier, qty]
     const toolType = req ? req[0] : 0, toolTier = req ? req[1] : 0;
+    const lreq = (e.level_requirements && e.level_requirements[0]) || null; // [skillId, level]
+    const skillId = lreq ? lreq[0] : 0, skillLevel = lreq ? lreq[1] : 0;
     // expected per-action yield of each item (weight * qty), and on-destroy yield of each item (qty * chance)
     const perAction = {}, onDestroy = {};
     for (const s of (e.extracted_item_stacks || [])) {
@@ -73,7 +76,7 @@ function fetchJson(name) {
     const itemIds = new Set([...Object.keys(perAction), ...Object.keys(onDestroy)].map(Number));
     for (const id of itemIds) {
       addSource(id, {
-        hp, toolType, toolTier,
+        hp, toolType, toolTier, skillId, skillLevel,
         perAction: +(perAction[id] || 0).toFixed(5),
         onDestroy: +(onDestroy[id] || 0).toFixed(5),
       });

@@ -239,6 +239,14 @@ main.planner-mode{max-width:none;padding:1rem}
 .eff-player-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.25rem .7rem;font-size:12px;cursor:pointer;transition:all .12s}
 .eff-player-btn:hover{border-color:var(--border2);color:var(--text)}
 .eff-player-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
+.eff-controls{display:flex;flex-wrap:wrap;align-items:center;gap:.6rem;margin-bottom:.8rem}
+.eff-search{flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .7rem;font-size:13px}
+.eff-search:focus{outline:none;border-color:var(--teal)}
+.eff-sorts{display:flex;align-items:center;gap:.3rem}
+.eff-sort-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.25rem .7rem;font-size:12px;cursor:pointer;transition:all .12s}
+.eff-sort-btn:hover{border-color:var(--border2);color:var(--text)}
+.eff-sort-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
+.eff-meta{font-size:11px;color:var(--text3);margin-left:auto}
 .eff-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:.55rem;overflow:hidden}
 .eff-hdr{display:flex;align-items:center;gap:.85rem;padding:.7rem .9rem;cursor:pointer}
 .eff-hdr:hover{background:var(--bg3)}
@@ -6618,15 +6626,39 @@ function syncSkillActiveStates(id){
 let effortData = null;
 let effortPriceCache = {};   // craftId -> avg7d hex (null = no data)
 let effortPlayer = null;     // entityId whose toolbelt is assumed for gather effort (persisted)
-const EFFORT_STARTER = ['Rough Wood Log','Rough Plank','Ferralith Ingot','Refined Ferralith Ingot','Rough Rope','Rough Cloth'];
 const EFFORT_SKIP = /^(package |unpack |recraft |reforge |scrap )/i;
+const EFFORT_DISPLAY_CAP = 500;    // rows rendered at once; the rest are reachable via search
+const EFFORT_EAGER = 150;          // rows priced immediately on load (so the leaderboard forms without scrolling)
+// ── live render state for the ranked, price-streaming list ──
+let effortAll = [];          // every reachable+sellable row for the current player (for search)
+let effortView = [];         // rows currently rendered
+let effortById = {};         // id -> row
+let effortMemo = null;       // effort walk memo for the current render (breakdown trees read it)
+let effortSeq = 0;           // bumped each render to cancel stale pricing/observers
+let effortSort = 'hpe';      // 'hpe' | 'effort' | 'tier'
+let effortSearchStr = '';
+let effortObserver = null;
+let effortQueue = [], effortActive = 0, effortDone = 0, effortTotal = 0;
+const EFFORT_CONC = 6;
 async function loadEffortData(){
   if (effortData) return;
-  const d = await apiFetch('/effort-data?v=1');
+  const d = await apiFetch('/effort-data?v=2');
   d._passive = new Set(d.passiveRecipeIds || []);
   effortData = d;
+  loadEffortPriceCache();
 }
-// Best tool power the tracked player(s) have per tool type (from their inventory); else the game's weakest.
+// Persist avg7d prices so re-opening the tab is instant (6h TTL — prices drift slowly).
+const EFFORT_PRICE_TTL = 6 * 3600 * 1000;
+function loadEffortPriceCache(){
+  try { const v = JSON.parse(localStorage.getItem('bc_effort_prices') || 'null'); if (v && v.ts && (Date.now() - v.ts) < EFFORT_PRICE_TTL && v.map) effortPriceCache = v.map; } catch(e){}
+}
+let _effPriceSaveT = null;
+function saveEffortPriceCache(){
+  if (_effPriceSaveT) return;
+  _effPriceSaveT = setTimeout(() => { _effPriceSaveT = null; try { localStorage.setItem('bc_effort_prices', JSON.stringify({ ts: Date.now(), map: effortPriceCache })); } catch(e){} }, 1500);
+}
+// Per tool type, the best power AND best tier the tracked player has (from their inventory/toolbelt).
+// Power drives gather effort (hits to fell a node); tier gates which resources they can harvest at all.
 function effortToolMap(playerId){
   const map = {};
   if (invData && effortData){
@@ -6635,42 +6667,79 @@ function effortToolMap(playerId){
       (inv.pockets||[]).forEach(pk => {
         const s = slotContents(pk); if (!s) return;
         const t = effortData.tools[s.itemId];
-        if (t && t.power != null) map[t.type] = Math.max(map[t.type]||0, t.power);
+        if (t && t.power != null){
+          const cur = map[t.type] || { power:0, tier:0 };
+          map[t.type] = { power: Math.max(cur.power, t.power), tier: Math.max(cur.tier, t.tier||0) };
+        }
       });
     });
   }
   return map;
 }
 function setEffortPlayer(id){ effortPlayer = String(id); try { safeSetItem('bc_effort_player', effortPlayer); } catch(e){} renderEffort(); }
-function effortPowerFor(type, toolMap){ return toolMap[type] || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
+function effortPowerFor(type, toolMap){ const t = toolMap[type]; return (t && t.power) || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
+function effortToolTier(type, toolMap){ const t = toolMap[type]; return (t && t.tier) || 0; }
+// Skill levels for a player (skillId -> level). Reuses the Experience tab's data if loaded, else fetches.
+let effortSkillCache = {};
+async function effortSkillLevels(playerId){
+  if (!playerId) return null;                                   // no player selected -> no skill filtering
+  if (effortSkillCache[playerId]) return effortSkillCache[playerId];
+  try { await ensureThresholds(); } catch(e){}          // xpToLevel needs the XP threshold table
+  const levels = {};
+  const cached = skillsByPlayer[playerId];
+  if (cached && cached.skills && cached.skills.length){ cached.skills.forEach(s => levels[s.skillId] = s.level); }
+  else {
+    try { const pd = await apiFetch(`/api/players/${playerId}`); ((pd.player && pd.player.experience) || []).forEach(e => levels[e.skill_id] = xpToLevel(e.quantity)); }
+    catch(e){ return null; }
+  }
+  effortSkillCache[playerId] = levels;
+  return levels;
+}
 // Cheapest gather effort (actions) for 1 unit of an item, given the tool map. null if not gatherable.
 // Yield is per DAMAGE dealt (perAction = drop chance per HP), so yield/node = perAction*hp + onDestroy and
 // effort/unit = hits-to-fell (hp/power) ÷ yield/node.  (hp largely cancels → ≈ 1/(power*perAction).)
-function effortGatherOf(id, toolMap){
+// Cheapest gather effort for 1 unit, given tool map + (optional) player skills. Only sources the player
+// can actually harvest count: skillLevels==null means no filtering (show the game's baseline).
+function effortGatherOf(id, toolMap, skillLevels){
   const srcs = effortData.gather[id]; if (!srcs || !srcs.length) return null;
   let best = Infinity;
-  for (const s of srcs){ const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const yield_ = s.perAction*s.hp + s.onDestroy; if (yield_ > 0) best = Math.min(best, (s.hp/P) / yield_); }
+  for (const s of srcs){
+    if (skillLevels){
+      if (s.skillId && s.skillId !== 1 && (skillLevels[s.skillId]||0) < (s.skillLevel||0)) continue;   // skill gate
+      if (s.toolType && s.toolTier && effortToolTier(s.toolType, toolMap) < s.toolTier) continue;        // tool-tier gate
+    }
+    const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const yield_ = s.perAction*s.hp + s.onDestroy;
+    if (yield_ > 0) best = Math.min(best, (s.hp/P) / yield_);
+  }
   return isFinite(best) ? best : null;
 }
-// Recursive min-effort walk. Returns {effort, how, recipe, actions, kids:[{id,qty}]}.
-function computeEffort(id, toolMap, memo, stack){
+// Recursive min-effort walk. Returns {effort, how, recipe, actions, kids:[{id,qty}]}, or null if the item
+// is UNREACHABLE for the player (every recipe/gather path is blocked by a skill/tool gate).
+function computeEffort(id, toolMap, memo, stack, skillLevels){
   if (memo.has(id)) return memo.get(id);
   stack = stack || new Set();
   const opts = [];
-  const g = effortGatherOf(id, toolMap);
-  if (g != null) opts.push({ effort:g, how:'gather' });
+  let hadCandidate = false, cycleSkipped = false;
+  const srcs = effortData.gather[id];
+  if (srcs && srcs.length){ hadCandidate = true; const g = effortGatherOf(id, toolMap, skillLevels); if (g != null) opts.push({ effort:g, how:'gather' }); }
   for (const r of (craftingData.recipesByOutput[id] || [])){
     if (EFFORT_SKIP.test(r.name)) continue;
-    if ((r.inputs||[]).some(i => stack.has(i.itemId))) continue;   // avoid cycles
+    hadCandidate = true;
+    if (skillLevels && r.skillId && r.skillId !== 1 && (skillLevels[r.skillId]||0) < (r.skillLevel||0)) continue;   // skill gate
+    if ((r.inputs||[]).some(i => stack.has(i.itemId))) { cycleSkipped = true; continue; }                            // avoid cycles
     const ns = new Set(stack); ns.add(id);
     let ok = true, inEff = 0; const kids = [];
-    for (const inp of (r.inputs||[])){ const e = computeEffort(inp.itemId, toolMap, memo, ns); if (e == null){ ok = false; break; } inEff += e.effort * inp.quantity; kids.push({ id:inp.itemId, qty:inp.quantity }); }
+    for (const inp of (r.inputs||[])){ const e = computeEffort(inp.itemId, toolMap, memo, ns, skillLevels); if (e == null){ ok = false; break; } inEff += e.effort * inp.quantity; kids.push({ id:inp.itemId, qty:inp.quantity }); }
     if (!ok) continue;
     const outQty = (r.outputs.find(o=>o.itemId===id)||{}).quantity || 1;
     const passive = effortData._passive.has(r.id);
     opts.push({ effort:((passive?0:(r.actionsRequired||0)) + inEff)/outQty, how:passive?'passive':'craft', recipe:r.name, actions:passive?0:(r.actionsRequired||0), outQty, kids });
   }
-  const res = opts.length ? opts.sort((a,b)=>a.effort-b.effort)[0] : { effort:0, how:'raw' };
+  let res;
+  if (opts.length) res = opts.sort((a,b)=>a.effort-b.effort)[0];
+  else if (hadCandidate && cycleSkipped) return null;   // context-dependent (cycle) -> don't memoize
+  else if (hadCandidate) res = null;                    // genuinely blocked by skill/tool gates
+  else res = { effort:0, how:'raw' };                   // base material with no recipe/gather -> free
   memo.set(id, res);
   return res;
 }
@@ -6678,10 +6747,10 @@ function computeEffort(id, toolMap, memo, stack){
 async function effortPrice(id){
   if (effortPriceCache[id] !== undefined) return effortPriceCache[id];
   const isCargo = id >= 4000000000, marketId = isCargo ? id - 4000000000 : id, type = isCargo ? 'cargo' : 'items';
-  try { const d = await apiFetch(`/api/market/${type}/${marketId}/price-history?limit=1`); const v = d.priceStats ? (d.priceStats.avg7d != null ? d.priceStats.avg7d : d.priceStats.avg24h) : null; effortPriceCache[id] = v; return v; }
+  try { const d = await apiFetch(`/api/market/${type}/${marketId}/price-history?limit=1`); const v = d.priceStats ? (d.priceStats.avg7d != null ? d.priceStats.avg7d : d.priceStats.avg24h) : null; effortPriceCache[id] = v; saveEffortPriceCache(); return v; }
   catch(e){ effortPriceCache[id] = null; return null; }
 }
-function fmtEffort(n){ return n>=100 ? Math.round(n).toString() : (Math.round(n*10)/10).toString(); }
+function fmtEffort(n){ if (n>=100) return Math.round(n).toString(); if (n>=1) return (Math.round(n*10)/10).toString(); return (Math.round(n*100)/100).toString(); }
 function effortTreeHtml(id, memo, depth){
   const e = memo.get(id); if (!e) return '';
   const it = (craftingData.itemsById[id]) || { name:'#'+id };
@@ -6691,50 +6760,143 @@ function effortTreeHtml(id, memo, depth){
   if (e.kids && depth < 6) for (const k of e.kids) html += `<div class="eff-node" style="padding-left:${(depth+1)*18}px;color:var(--text3);font-size:11px">${k.qty}×</div>` + effortTreeHtml(k.id, memo, depth+1);
   return html;
 }
-function toggleEffCard(i){ const b = document.getElementById('eff-bd-'+i); if (b) b.style.display = b.style.display==='none' ? '' : 'none'; }
+function toggleEffCard(id){
+  const b = document.getElementById('eff-bd-'+id); if (!b) return;
+  if (b.style.display === 'none'){ if (!b.dataset.filled){ b.innerHTML = effortTreeHtml(+id, effortMemo, 0); b.dataset.filled = '1'; } b.style.display = ''; }
+  else b.style.display = 'none';
+}
+function effortCardHtml(r){
+  const hpe = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : (r.price===undefined ? '·' : '—');
+  const priceLine = r.price===undefined ? '<span style="color:var(--text3)">pricing…</span>'
+    : (r.price!=null ? fmtCoin(Math.round(r.price))+' avg7d' : '<span style="color:var(--amber-light)">no market data</span>');
+  return `<div class="eff-card" id="eff-row-${r.id}" data-eid="${r.id}">
+    <div class="eff-hdr" onclick="toggleEffCard('${r.id}')">
+      ${gameIconImg(r.it.iconAssetName, 26)}
+      <div class="eff-name">${escHtml(r.it.name)}${r.it.tier>0?`<span class="eff-badge eff-b-raw">T${r.it.tier}</span>`:''}</div>
+      <div style="text-align:right"><div class="eff-hpe" id="eff-hpe-${r.id}">${hpe}</div><div class="eff-hpe-lbl">hex / effort</div></div>
+      <div class="eff-sub" id="eff-sub-${r.id}">${fmtEffort(r.e.effort)} effort<br>${priceLine}</div>
+      <i class="ti ti-chevron-down" style="color:var(--text3);font-size:14px"></i>
+    </div>
+    <div class="eff-breakdown" id="eff-bd-${r.id}" style="display:none"></div>
+  </div>`;
+}
+function effortApplyPrice(r){
+  const h = document.getElementById('eff-hpe-'+r.id); if (h) h.textContent = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : '—';
+  const s = document.getElementById('eff-sub-'+r.id); if (s) s.innerHTML = `${fmtEffort(r.e.effort)} effort<br>${r.price!=null?fmtCoin(Math.round(r.price))+' avg7d':'<span style="color:var(--amber-light)">no market data</span>'}`;
+}
+function effortCmp(){
+  if (effortSort === 'effort') return (a,b) => a.e.effort - b.e.effort;
+  if (effortSort === 'tier')   return (a,b) => (b.it.tier - a.it.tier) || (a.e.effort - b.e.effort);
+  return (a,b) => { const av = a.hpe==null?-Infinity:a.hpe, bv = b.hpe==null?-Infinity:b.hpe; return av!==bv ? bv-av : a.e.effort-b.e.effort; };   // hpe desc, unpriced last
+}
+function effortResortDom(seq){
+  if (seq !== effortSeq) return;
+  const list = document.getElementById('eff-list'); if (!list) return;
+  effortView.sort(effortCmp());
+  const frag = document.createDocumentFragment();
+  for (const r of effortView){ const c = document.getElementById('eff-row-'+r.id); if (c) frag.appendChild(c); }
+  list.appendChild(frag);
+}
+function effortProg(){ const p = document.getElementById('eff-prog'); if (p) p.textContent = effortDone < effortTotal ? `pricing ${effortDone}/${effortTotal}` : `priced ${effortDone}`; }
+function effortEnqueue(r){ if (r.price !== undefined || r._q) return; r._q = true; effortTotal++; effortQueue.push(r); effortProg(); effortPump(); }
+function effortPump(){ while (effortActive < EFFORT_CONC && effortQueue.length){ effortActive++; effortPriceOne(effortQueue.shift()); } }
+async function effortPriceOne(r){
+  const seq = effortSeq;
+  const pr = await effortPrice(r.id);
+  if (seq !== effortSeq){ effortActive--; return; }
+  r.price = pr; r.hpe = (pr!=null && r.e.effort>0) ? pr/r.e.effort : null;
+  effortApplyPrice(r);
+  effortActive--; effortDone++; effortProg();
+  if (effortQueue.length === 0 && effortActive === 0 && effortSort === 'hpe') effortResortDom(seq);   // final tidy
+  effortPump();
+}
+function effortSetSort(s){
+  effortSort = s;
+  document.querySelectorAll('.eff-sort-btn').forEach(b => b.classList.toggle('active', b.dataset.sort === s));
+  effortResortDom(effortSeq);
+}
+function effortDoSearch(q){
+  effortSearchStr = (q||'').trim().toLowerCase();
+  const list = document.getElementById('eff-list'); if (!list) return;
+  effortView = !effortSearchStr ? effortAll.slice(0, EFFORT_DISPLAY_CAP)
+    : effortAll.filter(r => r.it.name.toLowerCase().includes(effortSearchStr)).slice(0, 150);
+  effortView.sort(effortCmp());
+  list.innerHTML = effortView.map(effortCardHtml).join('') || '<div class="empty" style="grid-column:1/-1"><span>No matching items you can make</span></div>';
+  const cnt = document.getElementById('eff-count'); if (cnt) cnt.textContent = effortSearchStr ? `${effortView.length} match${effortView.length===1?'':'es'}` : `${effortAll.length} items you can make${effortAll.length>EFFORT_DISPLAY_CAP?` · showing ${EFFORT_DISPLAY_CAP}`:''}`;
+  // observe + eagerly price what's on screen
+  if (effortObserver){ effortView.forEach(r => { const c = document.getElementById('eff-row-'+r.id); if (c) effortObserver.observe(c); }); }
+  effortView.slice(0, EFFORT_EAGER).forEach(effortEnqueue);
+}
 async function renderEffort(){
   const el = document.getElementById('effort-content'); if (!el) return;
+  const seq = ++effortSeq;                                // cancel any in-flight pricing from a prior render
+  if (effortObserver){ effortObserver.disconnect(); effortObserver = null; }
+  effortQueue = []; effortActive = 0; effortDone = 0; effortTotal = 0;
   el.innerHTML = loading();
   try { await loadCraftingData(); await loadEffortData(); } catch(e){ el.innerHTML = errBox(e); return; }
   if (trackedPlayers.length && !invData){ try { await loadPlannerInventory(); } catch(e){} }
-  // which player's toolbelt to assume (default: first tracked; persisted)
+  if (seq !== effortSeq) return;
+  // which player's toolbelt + skills to assume (default: first tracked; persisted)
   if (effortPlayer == null){ try { effortPlayer = localStorage.getItem('bc_effort_player'); } catch(e){} }
   let selId = effortPlayer;
   if (!trackedPlayers.some(p => String(p.entityId) === String(selId))) selId = trackedPlayers[0] ? String(trackedPlayers[0].entityId) : null;
   effortPlayer = selId;
   const toolMap = effortToolMap(selId);
-  const memo = new Map();
-  const items = EFFORT_STARTER.map(nm => craftingData.items.find(i => (i.name||'').toLowerCase()===nm.toLowerCase())).filter(Boolean);
-  const rows = await Promise.all(items.map(async it => {
-    const e = computeEffort(it.id, toolMap, memo);
-    const price = await effortPrice(it.id);
-    return { it, e, price, hpe: (price!=null && e.effort>0) ? price/e.effort : null };
-  }));
-  rows.sort((a,b) => (b.hpe==null?-1:b.hpe) - (a.hpe==null?-1:a.hpe));
+  const skills = await effortSkillLevels(selId);          // null -> no skill filtering (show everything)
+  if (seq !== effortSeq) return;
+  // which items have a live sell listing (so avg7d exists and hex/effort is meaningful)
+  let sellable = null;
+  try { const market = await fetchMarketList(); sellable = new Set(); market.forEach(m => { if (m.hasSellOrders) sellable.add(+(m.id||m.itemId)); }); } catch(e){}
+  if (seq !== effortSeq) return;
+  // universe = every non-skip recipe output + every gatherable item
+  const universe = new Set();
+  for (const r of craftingData.recipes){ if (EFFORT_SKIP.test(r.name)) continue; (r.outputs||[]).forEach(o => universe.add(o.itemId)); }
+  Object.keys(effortData.gather).forEach(id => universe.add(+id));
+  const memo = new Map(); effortMemo = memo;
+  const rows = [];
+  for (const id of universe){
+    const it = craftingData.itemsById[id]; if (!it) continue;
+    if (it.tag && /DEVELOPER/i.test(it.tag)) continue;
+    const isCargo = id >= 4000000000, mid = isCargo ? id - 4000000000 : id;
+    if (sellable && !sellable.has(mid)) continue;         // only tradeable items (skip if market fetch failed)
+    const e = computeEffort(id, toolMap, memo, undefined, skills);
+    if (e == null || !(e.effort > 0)) continue;           // unreachable for this player, or a free raw
+    const price = effortPriceCache[id];                   // may already be cached from a prior load
+    rows.push({ id, it, e, price, hpe: (price!=null && e.effort>0) ? price/e.effort : (price===null ? null : undefined) });
+  }
+  rows.sort((a,b) => a.e.effort - b.e.effort);            // stable base order; hpe sort applied after pricing
+  effortAll = rows; effortById = {}; rows.forEach(r => effortById[r.id] = r);
+  effortSort = 'hpe'; effortSearchStr = '';
+
   const selP = trackedPlayers.find(p => String(p.entityId) === String(selId));
   const nTypes = Object.keys(toolMap).length;
   const toolNote = !selId
-    ? 'No player tracked — using a basic tool baseline for gather effort. Track a player to use their real toolbelt.'
-    : (nTypes ? `Using <b>${escHtml(playerName(selP))}</b>'s toolbelt (${nTypes} tool type${nTypes>1?'s':''} found). Better/higher-rarity tools lower gather effort.`
-              : `<b>${escHtml(playerName(selP))}</b> has no tools found — using a basic tool baseline for gather effort.`);
-  const picker = trackedPlayers.length ? `<div class="eff-players"><span>Toolbelt:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
-  const cards = rows.map((r, i) => {
-    const hpe = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : '—';
-    return `<div class="eff-card">
-      <div class="eff-hdr" onclick="toggleEffCard(${i})">
-        ${gameIconImg(r.it.iconAssetName, 26)}
-        <div class="eff-name">${escHtml(r.it.name)}${r.it.tier>0?`<span class="eff-badge eff-b-raw">T${r.it.tier}</span>`:''}</div>
-        <div style="text-align:right"><div class="eff-hpe">${hpe}</div><div class="eff-hpe-lbl">hex / effort</div></div>
-        <div class="eff-sub">${fmtEffort(r.e.effort)} effort<br>${r.price!=null?fmtCoin(Math.round(r.price))+' avg7d':'<span style="color:var(--amber-light)">no market data</span>'}</div>
-        <i class="ti ti-chevron-down" style="color:var(--text3);font-size:14px"></i>
-      </div>
-      <div class="eff-breakdown" id="eff-bd-${i}" style="display:none">${effortTreeHtml(r.it.id, memo, 0)}</div>
-    </div>`;
-  }).join('');
-  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Click a row for the effort breakdown.</div>
+    ? 'No player selected — showing every item at the game\'s baseline tools. Track a player to filter to what they can actually make.'
+    : (nTypes ? `Filtered to what <b>${escHtml(playerName(selP))}</b> can gather &amp; craft (skill levels + tool tiers). Their toolbelt (${nTypes} tool type${nTypes>1?'s':''}) sets gather effort.`
+              : `<b>${escHtml(playerName(selP))}</b> has no toolbelt tools found — using a basic tool baseline.`);
+  const picker = trackedPlayers.length ? `<div class="eff-players"><span>Player:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
+  const sortBtn = (s,l) => `<button class="eff-sort-btn${effortSort===s?' active':''}" data-sort="${s}" onclick="effortSetSort('${s}')">${l}</button>`;
+  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price; prices stream in as you browse. Click a row for the effort breakdown.</div>
     ${picker}
     <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
-    ${cards || '<div class="empty"><span>No data</span></div>'}`;
+    <div class="eff-controls">
+      <input id="eff-search" class="eff-search" type="text" placeholder="Search items you can make…" oninput="effortDoSearch(this.value)">
+      <span class="eff-sorts"><span style="color:var(--text3);font-size:11px;margin-right:.2rem">Sort:</span>${sortBtn('hpe','hex/effort')}${sortBtn('effort','effort')}${sortBtn('tier','tier')}</span>
+      <span class="eff-meta"><span id="eff-count"></span> · <span id="eff-prog"></span></span>
+    </div>
+    <div id="eff-list" class="eff-list"></div>`;
+  // set up lazy pricing: price a row when it scrolls near the viewport
+  effortObserver = new IntersectionObserver((entries) => {
+    for (const en of entries){ if (en.isIntersecting){ const r = effortById[en.target.getAttribute('data-eid')]; if (r) effortEnqueue(r); effortObserver.unobserve(en.target); } }
+  }, { rootMargin: '300px' });
+  effortDoSearch('');                                     // render the initial (unfiltered) view + start eager pricing
+  // while the eager batch streams in, keep the leaderboard re-sorting so the best rise to the top
+  let ticks = 0;
+  const timer = setInterval(() => {
+    if (seq !== effortSeq){ clearInterval(timer); return; }
+    if (effortSort === 'hpe' && !effortSearchStr) effortResortDom(seq);
+    if (++ticks > 10 || (effortDone >= EFFORT_EAGER && effortQueue.length === 0)){ clearInterval(timer); if (effortSort === 'hpe' && !effortSearchStr) effortResortDom(seq); }
+  }, 2000);
 }
 
 (async () => {
