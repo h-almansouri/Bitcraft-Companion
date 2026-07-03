@@ -247,6 +247,18 @@ main.planner-mode{max-width:none;padding:1rem}
 .eff-sort-btn:hover{border-color:var(--border2);color:var(--text)}
 .eff-sort-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
 .eff-meta{font-size:11px;color:var(--text3);margin-left:auto}
+.eff-mx-meta{font-size:11px;color:var(--text3);margin-bottom:.6rem}
+.eff-mx-blocked-k{color:var(--amber-light)}
+.eff-mx-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px}
+table.eff-mx{border-collapse:collapse;width:100%;font-size:12px;min-width:640px}
+table.eff-mx th,table.eff-mx td{padding:.45rem .3rem;text-align:center;border-bottom:1px solid var(--border);border-right:1px solid var(--border)}
+table.eff-mx tr:last-child td,table.eff-mx tr:last-child th{border-bottom:none}
+table.eff-mx td:last-child,table.eff-mx th:last-child{border-right:none}
+table.eff-mx thead th,table.eff-mx tr:first-child th{color:var(--text3);font-weight:600;font-size:11px}
+table.eff-mx th.eff-mx-fam{text-align:left;color:var(--text2);font-weight:600;white-space:nowrap;padding-left:.7rem;position:sticky;left:0;background:var(--bg2);z-index:1}
+table.eff-mx td{color:var(--text);font-variant-numeric:tabular-nums}
+table.eff-mx td.eff-mx-empty{color:var(--border2)}
+table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .eff-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:.55rem;overflow:hidden}
 .eff-hdr{display:flex;align-items:center;gap:.85rem;padding:.7rem .9rem;cursor:pointer}
 .eff-hdr:hover{background:var(--bg3)}
@@ -6640,6 +6652,27 @@ let effortSearchStr = '';
 let effortObserver = null;
 let effortQueue = [], effortActive = 0, effortDone = 0, effortTotal = 0;
 const EFFORT_CONC = 6;
+let effortMode = 'list';          // 'list' | 'matrix'
+let effortToolMapCur = {}, effortSkillsCur = null;   // stashed for the matrix view
+// Matrix view: material family (row) × tier 1-10 (column). Each regex isolates the PLAIN material at a
+// tier (one word before the core noun), skipping Refined/High Quality/Package/Output/Recipe/etc. variants.
+// `re` matches the tradeable item (its market price). Some raws are gathered in the data as a generic
+// "T<n> X Output" item (which carries the effort) distinct from the tradeable item — `effortRe` bridges
+// the two: effort comes from the Output item, price from the tradeable one.
+const EFFORT_MATRIX_FAMS = [
+  { label:'Ingot',       re:/^\S+ Ingot$/ },
+  { label:'Plank',       re:/^\S+ Plank$/ },
+  { label:'Rope',        re:/^\S+ Rope$/ },
+  { label:'Leather',     re:/^\S+ Leather$/ },
+  { label:'Animal Hair', re:/^\S+ Animal Hair$/ },
+  { label:'Wood Log',    re:/^\S+ Wood Log$/ },
+  { label:'Berry',       re:/^\S+ Berry$/,     effortRe:/^T\d+ Berry Output$/ },
+  { label:'Mushroom',    re:/^\S+ Mushroom$/ },
+  { label:'Flower',      re:/^\S+ Flower$/ },
+  { label:'Fish Oil',    re:/^\S+ Fish Oil$/ },
+  { label:'Sand',        re:/^\S+ Sand$/,      effortRe:/^T\d+ Sand Output$/ },
+  { label:'Clay',        re:/^\S+ Clay Lump$/, effortRe:/^T\d+ Clay Output$/ },
+];
 async function loadEffortData(){
   if (effortData) return;
   const d = await apiFetch('/effort-data?v=2');
@@ -6843,6 +6876,7 @@ async function renderEffort(){
   effortPlayer = selId;
   const toolMap = effortToolMap(selId);
   const skills = await effortSkillLevels(selId);          // null -> no skill filtering (show everything)
+  effortToolMapCur = toolMap; effortSkillsCur = skills;   // the matrix view reuses these
   if (seq !== effortSeq) return;
   // which items have a live sell listing (so avg7d exists and hex/effort is meaningful)
   let sellable = null;
@@ -6876,10 +6910,15 @@ async function renderEffort(){
               : `<b>${escHtml(playerName(selP))}</b> has no toolbelt tools found — using a basic tool baseline.`);
   const picker = trackedPlayers.length ? `<div class="eff-players"><span>Player:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
   const sortBtn = (s,l) => `<button class="eff-sort-btn${effortSort===s?' active':''}" data-sort="${s}" onclick="effortSetSort('${s}')">${l}</button>`;
-  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price; prices stream in as you browse. Click a row for the effort breakdown.</div>
+  const modeBtn = (m,l) => `<button class="eff-sort-btn${effortMode===m?' active':''}" onclick="effortSetMode('${m}')">${l}</button>`;
+  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price; prices stream in as you browse.</div>
     ${picker}
     <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
-    <div class="eff-controls">
+    <div class="eff-controls"><span class="eff-sorts"><span style="color:var(--text3);font-size:11px;margin-right:.2rem">View:</span>${modeBtn('list','List')}${modeBtn('matrix','Matrix')}</span></div>
+    <div id="eff-body"></div>`;
+  if (effortMode === 'matrix'){ renderEffortMatrix(seq); return; }
+  const body = document.getElementById('eff-body');
+  body.innerHTML = `<div class="eff-controls">
       <input id="eff-search" class="eff-search" type="text" placeholder="Search items you can make…" oninput="effortDoSearch(this.value)">
       <span class="eff-sorts"><span style="color:var(--text3);font-size:11px;margin-right:.2rem">Sort:</span>${sortBtn('hpe','hex/effort')}${sortBtn('effort','effort')}${sortBtn('tier','tier')}</span>
       <span class="eff-meta"><span id="eff-count"></span> · <span id="eff-prog"></span></span>
@@ -6897,6 +6936,79 @@ async function renderEffort(){
     if (effortSort === 'hpe' && !effortSearchStr) effortResortDom(seq);
     if (++ticks > 10 || (effortDone >= EFFORT_EAGER && effortQueue.length === 0)){ clearInterval(timer); if (effortSort === 'hpe' && !effortSearchStr) effortResortDom(seq); }
   }, 2000);
+}
+function effortSetMode(m){ if (effortMode === m) return; effortMode = m; renderEffort(); }
+// ── Matrix view: material family × tier, cells = hex/effort ──
+function fmtHpe(v){ if (v==null) return '—'; if (v>=1000) return (v/1000).toFixed(1)+'k'; if (v>=100) return Math.round(v).toString(); if (v>=10) return v.toFixed(1); return v.toFixed(2); }
+async function renderEffortMatrix(seq){
+  const body = document.getElementById('eff-body'); if (!body) return;
+  const toolMap = effortToolMapCur, skills = effortSkillsCur, memo = effortMemo || new Map();
+  effortMemo = memo;
+  const pickPlain = (re, t) => { const c = craftingData.items.filter(i => i.tier===t && re.test(i.name||'') && !(i.tag && /DEVELOPER/i.test(i.tag))); c.sort((a,b) => a.name.length - b.name.length); return c[0] || null; };
+  const cells = [];                                       // priceable cells to fill in
+  const grid = EFFORT_MATRIX_FAMS.map(f => {
+    const row = { label:f.label, tiers:{} };
+    for (let t=1; t<=10; t++){
+      const priceItem = pickPlain(f.re, t);
+      if (!priceItem) continue;                           // no such tier -> blank cell
+      // bridge effort from the gatherable "T<n> X Output" variant. Its item.tier is unreliable, so read
+      // the tier from the name ("T<n>") rather than the tier field.
+      const effItem = f.effortRe ? craftingData.items.find(i => f.effortRe.test(i.name||'') && parseInt((String(i.name).match(/^T(\d+)/)||[])[1], 10) === t) : priceItem;
+      const e = effItem ? computeEffort(effItem.id, toolMap, memo, undefined, skills) : null;
+      if (e == null){ row.tiers[t] = { item:priceItem, blocked:true }; continue; }      // has a path but skill/tool gated
+      if (!(e.effort > 0)){ row.tiers[t] = { item:priceItem, nodata:true }; continue; } // no gather/recipe effort data
+      const c = { item:priceItem, effItem, tier:t, e, price: effortPriceCache[priceItem.id], hpe:null };
+      if (c.price != null) c.hpe = c.price / e.effort;
+      row.tiers[t] = c; if (c.price === undefined) cells.push(c);
+    }
+    return row;
+  });
+  const head = `<tr><th class="eff-mx-fam"></th>${Array.from({length:10},(_,i)=>`<th>T${i+1}</th>`).join('')}</tr>`;
+  const bodyRows = grid.map(row => {
+    const tds = Array.from({length:10}, (_, i) => {
+      const c = row.tiers[i+1];
+      if (!c) return '<td class="eff-mx-empty">·</td>';
+      if (c.blocked) return `<td class="eff-mx-blocked" title="${escHtml(c.item.name)} — your skills/tools can't make this yet">✕</td>`;
+      if (c.nodata) return `<td class="eff-mx-empty" title="${escHtml(c.item.name)} — no gather/recipe effort data">—</td>`;
+      const disp = c.hpe!=null ? fmtHpe(c.hpe) : (c.price===undefined ? '·' : '—');
+      return `<td id="eff-mx-${c.item.id}" title="${escHtml(c.item.name)} · ${fmtEffort(c.e.effort)} effort">${disp}</td>`;
+    }).join('');
+    return `<tr><th class="eff-mx-fam">${escHtml(row.label)}</th>${tds}</tr>`;
+  }).join('');
+  body.innerHTML = `<div class="eff-mx-meta">Cells = hex / effort for the base material at each tier, greener = better. <span class="eff-mx-blocked-k">✕</span> = your skills/tools can't make it yet · <b>—</b> = no market/effort data · <span style="color:var(--text3)">blank = no such tier</span>. <span id="eff-mx-prog" style="margin-left:.4rem"></span></div>
+    <div class="eff-mx-wrap"><table class="eff-mx">${head}${bodyRows}</table></div>`;
+  // price the cells, then colour the whole grid as a heatmap
+  let done = 0; const total = cells.length; let idx = 0;
+  const prog = () => { const p = document.getElementById('eff-mx-prog'); if (p) p.textContent = done<total ? `pricing ${done}/${total}…` : ''; };
+  async function worker(){
+    while (idx < cells.length){
+      if (seq !== effortSeq) return;
+      const c = cells[idx++];
+      const pr = await effortPrice(c.item.id);
+      if (seq !== effortSeq) return;
+      c.price = pr; c.hpe = (pr!=null && c.e.effort>0) ? pr/c.e.effort : null;
+      const td = document.getElementById('eff-mx-'+c.item.id);
+      if (td){ td.textContent = c.hpe!=null ? fmtHpe(c.hpe) : '—'; td.title = `${c.item.name} · ${fmtEffort(c.e.effort)} effort · ${pr!=null?fmtCoin(Math.round(pr))+' avg7d':'no market data'}`; }
+      done++; prog();
+    }
+  }
+  prog();
+  await Promise.all(Array.from({length:EFFORT_CONC}, () => worker()));
+  if (seq !== effortSeq) return;
+  effortMatrixHeatmap(grid);
+}
+function effortMatrixHeatmap(grid){
+  const vals = [];
+  grid.forEach(r => Object.values(r.tiers).forEach(c => { if (c && c.hpe!=null) vals.push(c.hpe); }));
+  if (!vals.length) return;
+  const max = Math.max(...vals);
+  grid.forEach(r => Object.values(r.tiers).forEach(c => {
+    if (!c || c.hpe==null) return;
+    const td = document.getElementById('eff-mx-'+c.item.id); if (!td) return;
+    const a = Math.min(0.85, Math.sqrt(c.hpe / max) * 0.85);   // sqrt so mid values still read
+    td.style.background = `rgba(29,158,117,${a.toFixed(3)})`;
+    if (a > 0.5) td.style.color = '#fff';
+  }));
 }
 
 (async () => {
