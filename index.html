@@ -6713,11 +6713,10 @@ async function effortSkillLevels(playerId){
   effortSkillCache[playerId] = levels;
   return levels;
 }
-// Cheapest gather effort (actions) for 1 unit of an item, given the tool map. null if not gatherable.
-// Yield is per DAMAGE dealt (perAction = drop chance per HP), so yield/node = perAction*hp + onDestroy and
-// effort/unit = hits-to-fell (hp/power) ÷ yield/node.  (hp largely cancels → ≈ 1/(power*perAction).)
-// Cheapest gather effort for 1 unit, given tool map + (optional) player skills. Only sources the player
-// can actually harvest count: skillLevels==null means no filtering (show the game's baseline).
+// Cheapest gather effort for 1 unit of an item = the DAMAGE you must deal to a node to yield one unit,
+// on average (independent of tool power / how fast you swing — that's speed, not effort). Yield is per
+// damage dealt, so yield/node = dropRate*hp + onDestroy and effort/unit = hp ÷ yield/node. With no
+// on-death bonus the hp cancels → effort = 1/dropRate. skillLevels==null means no player filtering.
 function effortGatherOf(id, toolMap, skillLevels){
   const srcs = effortData.gather[id]; if (!srcs || !srcs.length) return null;
   let best = Infinity;
@@ -6726,8 +6725,8 @@ function effortGatherOf(id, toolMap, skillLevels){
       if (s.skillId && s.skillId !== 1 && (skillLevels[s.skillId]||0) < (s.skillLevel||0)) continue;   // skill gate
       if (s.toolType && s.toolTier && effortToolTier(s.toolType, toolMap) < s.toolTier) continue;        // tool-tier gate
     }
-    const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const yield_ = s.perAction*s.hp + s.onDestroy;
-    if (yield_ > 0) best = Math.min(best, (s.hp/P) / yield_);
+    const yield_ = s.perAction*s.hp + s.onDestroy;                    // units yielded over one node
+    if (yield_ > 0) best = Math.min(best, s.hp / yield_);             // = damage dealt per unit (tool-independent)
   }
   return isFinite(best) ? best : null;
 }
@@ -6843,12 +6842,12 @@ async function renderEffort(){
   const nTypes = Object.keys(toolMap).length;
   const toolNote = !selId
     ? 'No player selected — showing every item at the game\'s baseline tools. Track a player to filter to what they can actually make.'
-    : (nTypes ? `Filtered to what <b>${escHtml(playerName(selP))}</b> can gather &amp; craft (skill levels + tool tiers). Their toolbelt (${nTypes} tool type${nTypes>1?'s':''}) sets gather effort.`
-              : `<b>${escHtml(playerName(selP))}</b> has no toolbelt tools found — using a basic tool baseline.`);
+    : (nTypes ? `Filtered to what <b>${escHtml(playerName(selP))}</b> can gather &amp; craft — their skill levels and tool tiers (${nTypes} tool type${nTypes>1?'s':''}) gate what's reachable. Effort itself is tool-independent.`
+              : `<b>${escHtml(playerName(selP))}</b> has no toolbelt tools found — showing everything at the baseline.`);
   const picker = trackedPlayers.length ? `<div class="eff-players"><span>Player:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
   const shown = new Set(effortMatrixRows);
   const options = effortCatalog.filter(f => !shown.has(f.key)).map(f => `<option value="${escHtml(f.label)}">`).join('');
-  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b>; <b>passive crafts cost 0</b>. Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Build your own comparison — add or remove material rows.</div>
+  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it. <b>Gathering effort</b> = the damage you must deal to a node per unit yielded (= 1 ÷ drop-rate; independent of tool speed). <b>Crafting</b> adds its active action count; <b>passive crafts cost 0</b>. Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Build your own comparison — add or remove material rows.</div>
     ${picker}
     <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
     <div class="eff-controls">
