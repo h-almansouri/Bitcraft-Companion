@@ -66,6 +66,19 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 1.5rem;height:48px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
 .topbar-title{font-size:15px;font-weight:500;color:var(--text)}
 .topbar-right{display:flex;align-items:center;gap:.5rem;font-size:12px;color:var(--text2)}
+.notif-bell{position:relative;background:var(--bg3);border:1px solid var(--border);color:var(--text2);width:32px;height:32px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:all .12s}
+.notif-bell:hover{border-color:var(--border2);color:var(--text)}
+.notif-badge{position:absolute;top:-5px;right:-5px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1}
+.notif-panel{position:absolute;top:40px;right:0;width:320px;max-height:60vh;overflow-y:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.45);z-index:1000}
+.notif-hdr{display:flex;align-items:center;justify-content:space-between;padding:.6rem .8rem;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);position:sticky;top:0;background:var(--bg2);z-index:1}
+.notif-clear{background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:0}
+.notif-clear:hover{color:var(--red)}
+.notif-row{display:flex;align-items:center;gap:.6rem;padding:.5rem .8rem;border-bottom:1px solid var(--border);font-size:12px}
+.notif-row:last-child{border-bottom:none}
+.notif-row>i{color:var(--teal-light);font-size:15px;flex-shrink:0}
+.notif-row-msg{flex:1;color:var(--text);line-height:1.35}
+.notif-row-ts{color:var(--text3);font-size:11px;white-space:nowrap;flex-shrink:0}
+.notif-empty{padding:1.4rem;text-align:center;color:var(--text3);font-size:12px}
 main{flex:1;padding:1.5rem;max-width:1200px;width:100%}
 main.planner-mode{max-width:none;padding:1rem}
 
@@ -630,7 +643,13 @@ main.planner-mode{max-width:none;padding:1rem}
 <div class="main-wrap">
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Experience</div>
-    <div class="topbar-right" id="topbar-right"></div>
+    <div style="display:flex;align-items:center;gap:.75rem">
+      <div class="topbar-right" id="topbar-right"></div>
+      <div style="position:relative">
+        <button id="notif-bell-btn" class="notif-bell" onclick="toggleNotifPanel(event)" title="Notification history"><i class="ti ti-bell"></i><span id="notif-badge" class="notif-badge" style="display:none">0</span></button>
+        <div id="notif-panel" class="notif-panel" style="display:none"></div>
+      </div>
+    </div>
   </div>
   <main>
     <div id="tab-skills"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
@@ -5315,9 +5334,14 @@ function computePlannerInvMap() {
       const meta = isCargo ? cargos[s.itemId] : items[s.itemId];
       // Cross-reference to crafting data by name; fall back to raw ID
       const itemName = meta?.name || meta?.itemName || '';
-      const craftId = itemName ? nameToId[itemName.toLowerCase()] : undefined;
+      const nmLower = itemName.toLowerCase();
+      const craftId = itemName ? nameToId[nmLower] : undefined;
       const key = craftId !== undefined ? craftId : s.itemId;
       map[key] = (map[key] || 0) + s.quantity;
+      if (isCargo){                                        // a package cargo → also credit its unpacked contents
+        const pkg = packageMap()[nmLower];
+        if (pkg){ const baseId = nameToId[pkg.base]; if (baseId !== undefined) map[baseId] = (map[baseId] || 0) + s.quantity * pkg.per; }
+      }
     });
   });
   plannerInvMap = map;
@@ -6292,7 +6316,58 @@ function fireAlert(typeKey, msg){
   const t = alertSettings.types[typeKey]; if (!t) return;
   playAlertSound(t.sound);
   alertToast(msg, (ALERT_META[typeKey]||{}).icon);
+  recordNotif(typeKey, msg);
 }
+
+// ── Notification history (bell in the topbar) ──
+let notifHistory = [];        // [{type, msg, ts}] newest-first
+let notifUnread = 0;
+let notifPanelOpen = false;
+const NOTIF_HISTORY_MAX = 60, NOTIF_HISTORY_LS = 'bc_notif_history_v1';
+function loadNotifHistory(){ try { const v = localStorage.getItem(NOTIF_HISTORY_LS); if (v) notifHistory = JSON.parse(v) || []; } catch(e){ notifHistory = []; } }
+function saveNotifHistory(){ safeSetItem(NOTIF_HISTORY_LS, JSON.stringify(notifHistory.slice(0, NOTIF_HISTORY_MAX))); }
+function recordNotif(type, msg){
+  notifHistory.unshift({ type, msg, ts: Date.now() });
+  if (notifHistory.length > NOTIF_HISTORY_MAX) notifHistory.length = NOTIF_HISTORY_MAX;
+  saveNotifHistory();
+  if (!notifPanelOpen) notifUnread++;
+  renderNotifBell();
+  if (notifPanelOpen){ const p = document.getElementById('notif-panel'); if (p) p.innerHTML = notifPanelHtml(); }
+}
+// 12-hour clock with AM/PM in the user's local timezone (falls back to Pacific if unavailable); date shown only when not today.
+function fmtNotifTime(ts){
+  const d = new Date(ts), opts = { hour:'numeric', minute:'2-digit', hour12:true };
+  if (d.toDateString() !== new Date().toDateString()){ opts.month = 'short'; opts.day = 'numeric'; }
+  try { return d.toLocaleString([], opts); }
+  catch(e){ try { return d.toLocaleString('en-US', Object.assign({ timeZone:'America/Los_Angeles' }, opts)); } catch(_){ return ''; } }
+}
+function renderNotifBell(){
+  const badge = document.getElementById('notif-badge'); if (!badge) return;
+  if (notifUnread > 0){ badge.textContent = notifUnread > 9 ? '9+' : String(notifUnread); badge.style.display = ''; }
+  else badge.style.display = 'none';
+}
+function notifPanelHtml(){
+  if (!notifHistory.length) return '<div class="notif-empty">No notifications yet</div>';
+  const rows = notifHistory.map(n => {
+    const icon = (ALERT_META[n.type]||{}).icon || 'ti-bell';
+    return `<div class="notif-row"><i class="ti ${icon}"></i><div class="notif-row-msg">${escHtml(n.msg)}</div><div class="notif-row-ts">${escHtml(fmtNotifTime(n.ts))}</div></div>`;
+  }).join('');
+  return `<div class="notif-hdr"><span>Notifications</span><button class="notif-clear" onclick="clearNotifHistory()">Clear</button></div>${rows}`;
+}
+function toggleNotifPanel(ev){
+  if (ev) ev.stopPropagation();
+  const panel = document.getElementById('notif-panel'); if (!panel) return;
+  notifPanelOpen = !notifPanelOpen;
+  if (notifPanelOpen){ notifUnread = 0; renderNotifBell(); panel.innerHTML = notifPanelHtml(); panel.style.display = ''; }
+  else panel.style.display = 'none';
+}
+function clearNotifHistory(){ notifHistory = []; saveNotifHistory(); const p = document.getElementById('notif-panel'); if (p) p.innerHTML = notifPanelHtml(); }
+// Close the panel when clicking outside it
+document.addEventListener('click', (e) => {
+  if (!notifPanelOpen) return;
+  if (e.target.closest && (e.target.closest('#notif-panel') || e.target.closest('#notif-bell-btn'))) return;
+  notifPanelOpen = false; const p = document.getElementById('notif-panel'); if (p) p.style.display = 'none';
+});
 
 // ── Poller ──
 let alertTimer = null;
@@ -6534,6 +6609,7 @@ function syncSkillActiveStates(id){
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
+  loadNotifHistory(); renderNotifBell();   // restore the notification-history bell
   startLive();                  // realtime feed for instant stamina / XP
 })();
 </script>
