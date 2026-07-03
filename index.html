@@ -6654,7 +6654,7 @@ const EFFORT_CAT_BLOCK = /\b(output|package|deed|blueprint|experiment|products)\
 // Some raws are gathered in the data as a generic "T<n> X Output" item, distinct from the tradeable item.
 // Bridge effort from the Output item (keyed by family core), price from the tradeable item.
 const EFFORT_BRIDGES = { 'Berry':/^T\d+ Berry Output$/, 'Sand':/^T\d+ Sand Output$/, 'Clay Lump':/^T\d+ Clay Output$/ };
-const EFFORT_MATRIX_DEFAULT = ['Ingot','Plank','Rope','Leather','Animal Hair','Wood Log','Berry','Mushroom','Flower','Fish Oil','Sand','Clay Lump'];
+const EFFORT_MATRIX_DEFAULT = ['Ingot','Plank','Rope','Leather','Raw Pelt','Wood Log','Berry','Mushroom','Flower','Fish Oil','Sand','Clay Lump'];
 let effortMatrixRows = null;                 // ordered catalog keys shown as rows (persisted)
 let effortCatalog = null, effortCatalogByKey = {};   // discovered families: key -> { key, label, tiers:{t:item} }
 let effortMatrixGrid = [];                   // last-built grid (for the heatmap)
@@ -6801,6 +6801,13 @@ function loadEffortMatrixRows(){
   if (!effortMatrixRows){
     try { const v = JSON.parse(localStorage.getItem('bc_effort_matrix_rows') || 'null'); if (Array.isArray(v)) effortMatrixRows = v; } catch(e){}
     if (!effortMatrixRows) effortMatrixRows = EFFORT_MATRIX_DEFAULT.slice();
+    // one-time: 'Animal Hair' has prices but no effort chain (always blank), so retire it for 'Raw Pelt'
+    try {
+      if (!localStorage.getItem('bc_effort_mx_migrated')){
+        effortMatrixRows = effortMatrixRows.map(k => k === 'Animal Hair' ? 'Raw Pelt' : k).filter((k,i,a) => a.indexOf(k) === i);
+        localStorage.setItem('bc_effort_mx_migrated', '1'); saveEffortMatrixRows();
+      }
+    } catch(e){}
   }
   effortMatrixRows = effortMatrixRows.filter(k => effortCatalogByKey[k]);   // drop keys not in the catalog
   return effortMatrixRows;
