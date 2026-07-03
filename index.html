@@ -6644,10 +6644,12 @@ function effortToolMap(playerId){
 function setEffortPlayer(id){ effortPlayer = String(id); try { safeSetItem('bc_effort_player', effortPlayer); } catch(e){} renderEffort(); }
 function effortPowerFor(type, toolMap){ return toolMap[type] || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
 // Cheapest gather effort (actions) for 1 unit of an item, given the tool map. null if not gatherable.
+// Yield is per DAMAGE dealt (perAction = drop chance per HP), so yield/node = perAction*hp + onDestroy and
+// effort/unit = hits-to-fell (hp/power) ÷ yield/node.  (hp largely cancels → ≈ 1/(power*perAction).)
 function effortGatherOf(id, toolMap){
   const srcs = effortData.gather[id]; if (!srcs || !srcs.length) return null;
   let best = Infinity;
-  for (const s of srcs){ const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const A = s.hp / P; const d = s.onDestroy + s.perAction*A; if (d > 0) best = Math.min(best, A / d); }
+  for (const s of srcs){ const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const yield_ = s.perAction*s.hp + s.onDestroy; if (yield_ > 0) best = Math.min(best, (s.hp/P) / yield_); }
   return isFinite(best) ? best : null;
 }
 // Recursive min-effort walk. Returns {effort, how, recipe, actions, kids:[{id,qty}]}.
