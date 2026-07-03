@@ -5348,18 +5348,40 @@ function renderTrackedInvChips(trackedSet, toggleFn) {
   }).join('');
   return out || '<div style="font-size:12px;color:var(--text3)">No inventory locations found</div>';
 }
-// Pool item counts (by lowercase name) across the selected merged inventories.
+// Package cargo → its unpacked contents (e.g. 1 Rough Rope Package = 100 Rough Rope), built from the
+// "Package X into Y" crafting recipes so the counts are exact (they vary: 100 / 200 / 500 / 1000 / 10000).
+let _bcPackageMap = null;
+function packageMap(){
+  if (_bcPackageMap) return _bcPackageMap;
+  if (!craftingData || !craftingData.recipes || !craftingData.itemsById) return {}; // not loaded yet — don't cache empty
+  const m = {};
+  for (const r of craftingData.recipes){
+    if (!/^package /i.test(r.name)) continue;
+    const out = (r.outputs||[])[0], inp = (r.inputs||[])[0];
+    if (!out || !inp) continue;
+    const outIt = craftingData.itemsById[out.itemId], inIt = craftingData.itemsById[inp.itemId];
+    if (!outIt || !inIt || !outIt.name || !inIt.name) continue;
+    m[outIt.name.toLowerCase()] = { base: inIt.name.toLowerCase(), per: (inp.quantity||1) / (out.quantity||1) };
+  }
+  return (_bcPackageMap = m);
+}
+// Pool item counts (by lowercase name) across the selected merged inventories. Packaged cargo is also
+// credited as its contents, so e.g. a Rough Rope Package counts toward the "Rough Rope" a recipe needs.
 function poolInvByIndices(trackedSet) {
   const byName = {};
   if (!invData) return byName;
   const { inventories = [], items = {}, cargos = {} } = invData;
+  const pkgs = packageMap();
   inventories.forEach((inv, idx) => {
     if (!trackedSet.has(idx)) return;
     (inv.pockets || []).forEach(pk => {
       const s = slotContents(pk); if (!s) return;
       const meta = s.itemType === 1 ? cargos[s.itemId] : items[s.itemId];
       const nm = (meta?.name || meta?.itemName || '').toLowerCase();
-      if (nm) byName[nm] = (byName[nm] || 0) + s.quantity;
+      if (!nm) return;
+      byName[nm] = (byName[nm] || 0) + s.quantity;
+      const pkg = s.itemType === 1 ? pkgs[nm] : null;    // a package cargo → also credit its unpacked contents
+      if (pkg) byName[pkg.base] = (byName[pkg.base] || 0) + s.quantity * pkg.per;
     });
   });
   return byName;
