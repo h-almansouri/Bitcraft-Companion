@@ -1801,9 +1801,13 @@ function inventoryContentHtml(data, q, pfx) {
   if (!allSlots.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
   const filtered = q ? allSlots.filter(s => (s.meta?.name||'').toLowerCase().includes(q) || (s.meta?.tag||'').toLowerCase().includes(q)) : allSlots;
   if (!filtered.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
-  const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
+  // Sort by tier (untiered sinks to the bottom), then name; accent each card with its tier colour.
+  const invTierKey = m => (m && m.tier > 0) ? m.tier : 99;
+  const invTierCol = m => (m && m.tier > 0) ? TIER_COLORS[Math.min(m.tier, TIER_COLORS.length-1)].c : 'var(--border)';
+  const invSort = (a,b) => (invTierKey(a.meta) - invTierKey(b.meta)) || (a.meta?.name||'').localeCompare(b.meta?.name||'') || (b.quantity - a.quantity);
+  const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
   if (invViewMode === 'flat') {
-    return `<div class="inv-items-grid">${filtered.sort((a,b)=>b.quantity-a.quantity).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
+    return `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
   }
   const byLocation = {};
   filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, slots:[]}; byLocation[key].slots.push(s); });
@@ -1811,14 +1815,15 @@ function inventoryContentHtml(data, q, pfx) {
   const banks    = Object.values(byLocation).filter(l => l.locationType==='bank');
   const housing  = Object.values(byLocation).filter(l => l.locationType==='housing');
   const storage  = Object.values(byLocation).filter(l => l.claimName && l.locationType==='storage');
-  const renderItemGrid = slots => `<div class="inv-items-grid">${slots.map(itemCard).join('')}</div>`;
+  const renderItemGrid = slots => `<div class="inv-items-grid">${slots.slice().sort(invSort).map(itemCard).join('')}</div>`;
   function renderSection(title, icon, locs, base) {
     if (!locs.length) return '';
     const secKey = pfx + '|' + base;
     const collapsed = !!invSectionCollapsed[secKey];
     const selIdx = invSelectedChip[secKey] ?? -1;
-    const chips = locs.map((loc, i) => { const isBank = (loc.locationType==='bank'||loc.locationType==='storage'); const sub = isBank ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
-    const expandedLocs = q ? locs : (selIdx>=0 ? [locs[selIdx]] : []);
+    const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
+    const chips = sorted.map((loc, i) => { const isBank = (loc.locationType==='bank'||loc.locationType==='storage'); const sub = isBank ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const expandedLocs = q ? sorted : (selIdx>=0 ? [sorted[selIdx]] : []);
     const content = expandedLocs.length ? `<div class="inv-chip-content">${expandedLocs.map(l=>renderItemGrid(l.slots)).join('')}</div>` : '';
     return `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${secKey}')"><span class="inv-group-name"><i class="ti ${icon}"></i>${title}</span><span class="inv-group-meta"></span><i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i></div><div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="inv-chips-row">${chips.join('')}</div>${content}</div></div>`;
   }
@@ -5328,11 +5333,11 @@ function renderTrackedInvChips(trackedSet, toggleFn) {
     if (!groups[oid]) groups[oid] = { personal: [], house: [], bank: [] };
     const c = inv._isHousing ? 'house' : (inv.claimName ? 'bank' : 'personal');
     const on = trackedSet.has(idx);
-    const label = escHtml(inv.inventoryName || inv.buildingName || 'Unknown');
+    const rawName = inv.inventoryName || inv.buildingName || 'Unknown';
     const claim = (!inv._isHousing && inv.claimName) ? `<span class="inv-loc-claim">${escHtml(inv.claimName)}</span>` : '';
-    groups[oid][c].push(`<span class="planner-inv-loc${on ? ' active' : ''}" onclick="${toggleFn}(${idx})"><i class="ti ti-${on ? 'checkbox' : 'square'}" style="font-size:13px"></i> ${label}${claim}</span>`);
+    groups[oid][c].push({ name: rawName.toLowerCase(), html: `<span class="planner-inv-loc${on ? ' active' : ''}" onclick="${toggleFn}(${idx})"><i class="ti ti-${on ? 'checkbox' : 'square'}" style="font-size:13px"></i> ${escHtml(rawName)}${claim}</span>` });
   });
-  const cat = (title, icon, arr) => !arr.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${arr.join('')}</div></div>`;
+  const cat = (title, icon, arr) => !arr.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${arr.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(x=>x.html).join('')}</div></div>`;
   const out = trackedPlayers.map(p => {
     const g = groups[String(p.entityId)];
     if (!g) return '';
