@@ -234,6 +234,11 @@ main.planner-mode{max-width:none;padding:1rem}
 .eff-intro b{color:var(--text2)}
 .eff-tools{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}
 .eff-tool-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .6rem;font-size:11px;color:var(--text3);display:flex;align-items:center;gap:.4rem}
+.eff-tool-chip b{color:var(--text2)}
+.eff-players{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-bottom:.7rem;font-size:12px;color:var(--text3)}
+.eff-player-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.25rem .7rem;font-size:12px;cursor:pointer;transition:all .12s}
+.eff-player-btn:hover{border-color:var(--border2);color:var(--text)}
+.eff-player-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
 .eff-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:.55rem;overflow:hidden}
 .eff-hdr{display:flex;align-items:center;gap:.85rem;padding:.7rem .9rem;cursor:pointer}
 .eff-hdr:hover{background:var(--bg3)}
@@ -6612,6 +6617,7 @@ function syncSkillActiveStates(id){
 // Effort = gather actions (nodeHP / your tool power ÷ yield) + active craft actions; passive crafts = 0.
 let effortData = null;
 let effortPriceCache = {};   // craftId -> avg7d hex (null = no data)
+let effortPlayer = null;     // entityId whose toolbelt is assumed for gather effort (persisted)
 const EFFORT_STARTER = ['Rough Wood Log','Rough Plank','Ferralith Ingot','Refined Ferralith Ingot','Rough Rope','Rough Cloth'];
 const EFFORT_SKIP = /^(package |unpack |recraft |reforge |scrap )/i;
 async function loadEffortData(){
@@ -6621,17 +6627,21 @@ async function loadEffortData(){
   effortData = d;
 }
 // Best tool power the tracked player(s) have per tool type (from their inventory); else the game's weakest.
-function effortToolMap(){
+function effortToolMap(playerId){
   const map = {};
   if (invData && effortData){
-    (invData.inventories||[]).forEach(inv => (inv.pockets||[]).forEach(pk => {
-      const s = slotContents(pk); if (!s) return;
-      const t = effortData.tools[s.itemId];
-      if (t && t.power != null) map[t.type] = Math.max(map[t.type]||0, t.power);
-    }));
+    (invData.inventories||[]).forEach(inv => {
+      if (playerId && String(inv._ownerId) !== String(playerId)) return;   // only the chosen player's toolbelt
+      (inv.pockets||[]).forEach(pk => {
+        const s = slotContents(pk); if (!s) return;
+        const t = effortData.tools[s.itemId];
+        if (t && t.power != null) map[t.type] = Math.max(map[t.type]||0, t.power);
+      });
+    });
   }
   return map;
 }
+function setEffortPlayer(id){ effortPlayer = String(id); try { safeSetItem('bc_effort_player', effortPlayer); } catch(e){} renderEffort(); }
 function effortPowerFor(type, toolMap){ return toolMap[type] || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
 // Cheapest gather effort (actions) for 1 unit of an item, given the tool map. null if not gatherable.
 function effortGatherOf(id, toolMap){
@@ -6685,7 +6695,12 @@ async function renderEffort(){
   el.innerHTML = loading();
   try { await loadCraftingData(); await loadEffortData(); } catch(e){ el.innerHTML = errBox(e); return; }
   if (trackedPlayers.length && !invData){ try { await loadPlannerInventory(); } catch(e){} }
-  const toolMap = effortToolMap();
+  // which player's toolbelt to assume (default: first tracked; persisted)
+  if (effortPlayer == null){ try { effortPlayer = localStorage.getItem('bc_effort_player'); } catch(e){} }
+  let selId = effortPlayer;
+  if (!trackedPlayers.some(p => String(p.entityId) === String(selId))) selId = trackedPlayers[0] ? String(trackedPlayers[0].entityId) : null;
+  effortPlayer = selId;
+  const toolMap = effortToolMap(selId);
   const memo = new Map();
   const items = EFFORT_STARTER.map(nm => craftingData.items.find(i => (i.name||'').toLowerCase()===nm.toLowerCase())).filter(Boolean);
   const rows = await Promise.all(items.map(async it => {
@@ -6694,9 +6709,13 @@ async function renderEffort(){
     return { it, e, price, hpe: (price!=null && e.effort>0) ? price/e.effort : null };
   }));
   rows.sort((a,b) => (b.hpe==null?-1:b.hpe) - (a.hpe==null?-1:a.hpe));
-  const toolNote = Object.keys(toolMap).length
-    ? `Using your tracked toolbelt for gather effort (${Object.keys(toolMap).length} tool type${Object.keys(toolMap).length>1?'s':''} found). Better/higher-rarity tools lower gather effort.`
-    : `No tracked tools found — using a basic tool baseline for gather effort. Track a player to use their real toolbelt.`;
+  const selP = trackedPlayers.find(p => String(p.entityId) === String(selId));
+  const nTypes = Object.keys(toolMap).length;
+  const toolNote = !selId
+    ? 'No player tracked — using a basic tool baseline for gather effort. Track a player to use their real toolbelt.'
+    : (nTypes ? `Using <b>${escHtml(playerName(selP))}</b>'s toolbelt (${nTypes} tool type${nTypes>1?'s':''} found). Better/higher-rarity tools lower gather effort.`
+              : `<b>${escHtml(playerName(selP))}</b> has no tools found — using a basic tool baseline for gather effort.`);
+  const picker = trackedPlayers.length ? `<div class="eff-players"><span>Toolbelt:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
   const cards = rows.map((r, i) => {
     const hpe = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : '—';
     return `<div class="eff-card">
@@ -6711,6 +6730,7 @@ async function renderEffort(){
     </div>`;
   }).join('');
   el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Click a row for the effort breakdown.</div>
+    ${picker}
     <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
     ${cards || '<div class="empty"><span>No data</span></div>'}`;
 }
