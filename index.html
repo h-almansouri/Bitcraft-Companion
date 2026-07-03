@@ -2509,10 +2509,12 @@ function renderTasksUI() {
     const partial = !met && have > 0;
     const statusColor = met ? 'var(--green-light)' : partial ? 'var(--amber-light)' : 'var(--text3)';
     const statusIcon  = met ? 'ti-circle-check'    : partial ? 'ti-circle-half-2'   : 'ti-circle';
-    return `<div style="display:flex;align-items:center;gap:.4rem;padding:.28rem 0;border-bottom:1px solid var(--border)">
+    // Accent each row with its tier colour (the name already carries the "T# - " prefix via itemLabel).
+    const tco = (meta && meta.tier > 0) ? TIER_COLORS[Math.min(meta.tier, TIER_COLORS.length-1)] : null;
+    return `<div style="display:flex;align-items:center;gap:.4rem;padding:.28rem 0 .28rem .45rem;border-bottom:1px solid var(--border);border-left:3px solid ${tco?tco.c:'var(--border)'}">
       <i class="ti ${statusIcon}" style="color:${statusColor};font-size:13px;flex-shrink:0"></i>
       ${gameIconImg(meta?.iconAssetName, 18)}
-      <span style="font-size:12px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(name)}">${escHtml(name)}</span>
+      <span style="font-size:12px;color:${tco?tco.c:'var(--text)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(name)}">${escHtml(name)}</span>
       <span style="font-size:12px;font-weight:600;color:${statusColor};flex-shrink:0;white-space:nowrap;background:rgba(0,0,0,.22);padding:1px 6px;border-radius:4px">${fmtNum(have)}/${fmtNum(needed)}</span>
     </div>`;
   }
