@@ -5573,8 +5573,9 @@ const TOOL_COLS = [
   { label:'Leather', per:2, name:t=>`${TOOL_ADJ[t-1]} Leather` },
   { label:'Rope',    per:2, name:t=>`${TOOL_ADJ[t-1]} Rope` },
 ];
-// Market pricing for tool materials (cheapest sell = what it costs to buy). Cached in memory (5-min TTL).
-let toolPrice = {};        // lowercase item name -> cheapest sell price (0 = no orders, undefined = unfetched)
+// Market pricing for tool materials: 7-day average traded price (a truer going rate than the single
+// lowest sell order). Cached in memory. 0 = no market data, undefined = unfetched.
+let toolPrice = {};        // lowercase item name -> avg7d hex (0 = no data, undefined = unfetched)
 let toolMarketIdx = null;  // lowercase name -> { id, itemType, hasSell }
 let toolPricingActive = false;
 async function ensureToolMarketIdx(){
@@ -5603,11 +5604,12 @@ async function fetchToolPrices(){
     while (queue.length){
       const nm = queue.shift();
       const idx = toolMarketIdx[nm];
-      if (!idx || !idx.hasSell){ toolPrice[nm] = 0; continue; }
+      if (!idx){ toolPrice[nm] = 0; continue; }
       try {
-        const d = await fetchWithCache(idx.itemType===1?'cargo':'item', idx.id, 12000);
-        const sells = (d.sellOrders||[]).map(o=>+(o.price||o.priceThreshold||0)).filter(v=>v>0);
-        toolPrice[nm] = sells.length ? Math.min(...sells) : 0;
+        const d = await apiFetch(`/api/market/${idx.itemType===1?'cargo':'items'}/${idx.id}/price-history?limit=1`);
+        const ps = d && d.priceStats;
+        const v = ps ? (ps.avg7d != null ? ps.avg7d : (ps.avg30d != null ? ps.avg30d : ps.avg24h)) : null;
+        toolPrice[nm] = (v != null && v > 0) ? v : 0;
       } catch(e){ toolPrice[nm] = 0; }
     }
   };
@@ -5996,8 +5998,8 @@ async function renderToolCrafting(){
       return `<div class="tool-cell ${cls}" title="${escHtml(nm)} — need ${c.per} per tool">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
-    // market cost to upgrade one tier = sum of each material's cheapest sell price × qty needed.
-    // A material with no sell orders reads as 0, so flag the total as a partial underestimate.
+    // market cost to upgrade one tier = sum of each material's 7-day avg price × qty needed.
+    // A material with no market data reads as 0, so flag the total as a partial underestimate.
     const parts = TOOL_COLS.map(c => { const p = toolPrice[c.name(t).toLowerCase()]; return p===undefined ? undefined : p*c.per; });
     const loading = parts.some(x => x===undefined);
     const cost = loading ? null : parts.reduce((a,b)=>a+b,0);
@@ -6009,12 +6011,12 @@ async function renderToolCrafting(){
       <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
-      <div class="tool-cell tool-cost" title="Cheapest market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
+      <div class="tool-cell tool-cost" title="7-day average market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
     </div>`);
   }
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = cheapest market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate.</div>`
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate.</div>`
     + toolCalcHtml() + toolBatchHtml();
   renderToolCalcResult();
   renderToolBatchResult();
