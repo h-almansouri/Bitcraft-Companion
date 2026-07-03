@@ -6717,6 +6717,7 @@ async function renderEffort(){
     ? 'No player tracked — using a basic tool baseline for gather effort. Track a player to use their real toolbelt.'
     : (nTypes ? `Using <b>${escHtml(playerName(selP))}</b>'s toolbelt (${nTypes} tool type${nTypes>1?'s':''} found). Better/higher-rarity tools lower gather effort.`
               : `<b>${escHtml(playerName(selP))}</b> has no tools found — using a basic tool baseline for gather effort.`);
+  const powerNote = 'Uses each tool\'s <b>base power</b> only — your in-game damage is higher once skill &amp; gear bonuses apply, so gather effort here reads a bit high.';
   const picker = trackedPlayers.length ? `<div class="eff-players"><span>Toolbelt:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
   const cards = rows.map((r, i) => {
     const hpe = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : '—';
@@ -6733,7 +6734,7 @@ async function renderEffort(){
   }).join('');
   el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Click a row for the effort breakdown.</div>
     ${picker}
-    <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
+    <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span><span class="eff-tool-chip"><i class="ti ti-info-circle"></i> ${powerNote}</span></div>
     ${cards || '<div class="empty"><span>No data</span></div>'}`;
 }
 
