@@ -5970,7 +5970,7 @@ async function renderToolCrafting(){
     <div class="tool-hcell">Tier</div>
     ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
     <div class="tool-hcell">Tools</div>
-    <div class="tool-hcell">Cost / tool</div>
+    <div class="tool-hcell">Upgrade cost</div>
   </div>`;
   const rows = [];
   for (let t=1; t<=10; t++){
@@ -5981,22 +5981,25 @@ async function renderToolCrafting(){
       return `<div class="tool-cell ${cls}" title="${escHtml(nm)} — need ${c.per} per tool">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
-    // market cost to craft one tool = sum of each material's cheapest sell price × qty needed
+    // market cost to upgrade one tier = sum of each material's cheapest sell price × qty needed.
+    // A material with no sell orders reads as 0, so flag the total as a partial underestimate.
     const parts = TOOL_COLS.map(c => { const p = toolPrice[c.name(t).toLowerCase()]; return p===undefined ? undefined : p*c.per; });
     const loading = parts.some(x => x===undefined);
     const cost = loading ? null : parts.reduce((a,b)=>a+b,0);
+    const partial = !loading && TOOL_COLS.some(c => toolPrice[c.name(t).toLowerCase()] === 0);   // a mat isn't listed
     const costInner = loading ? '<span class="dot-spin"></span>'
-      : (cost>0 ? `<span class="tool-have">${fmtCoin(Math.round(cost))}</span>` : '<span class="tool-have" style="color:var(--text3)">—</span>');
+      : (cost>0 ? `<span class="tool-have">${fmtCoin(Math.round(cost))}${partial?'<span style="color:var(--amber-light)" title="Some mats have no sell orders — underestimate">+</span>':''}</span>`
+                : '<span class="tool-have" style="color:var(--text3)">—</span>');
     rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
       <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
-      <div class="tool-cell tool-cost" title="Cheapest market price of 4 ingots + 2 planks + 2 leather + 2 rope">${costInner}</div>
+      <div class="tool-cell tool-cost" title="Cheapest market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
     </div>`);
   }
   el.innerHTML = toolInvSelectorHtml() + `
     <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Cost / tool</b> = cheapest market price of those mats.</div>`
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = cheapest market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate.</div>`
     + toolCalcHtml() + toolBatchHtml();
   renderToolCalcResult();
   renderToolBatchResult();
