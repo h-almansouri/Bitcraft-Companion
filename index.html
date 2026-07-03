@@ -6271,6 +6271,7 @@ function fireAlert(typeKey, msg){
 let alertTimer = null;
 let alertState = {}; // entityId -> tracking between polls (baselines)
 const ALERT_POLL_MS = 15000;
+const CRAFT_DONE_MUTE_MS = 30000;  // after a "passive craft done" ping, stay quiet this long so a wave of stations finishing seconds apart pings once, not ten times
 function alertsEnabled(){ loadAlerts(); return alertSettings.master && trackedPlayers.length && Object.values(alertSettings.types).some(t=>t.on); }
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
@@ -6318,7 +6319,13 @@ async function alertsTick(){
         // whether it's still listed (it may roll to "processing", disappear, or stay put).
         let doneCount = 0;
         if (st.craftInit) for (const k in prev){ if (prev[k] <= now) doneCount++; }
-        if (doneCount) fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`);
+        if (doneCount){
+          const nowMs = Date.now();
+          if (!(st.craftDoneMuteUntil > nowMs)){   // fire once, then mute so a wave of stations finishing seconds apart doesn't spam
+            fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`);
+            st.craftDoneMuteUntil = nowMs + CRAFT_DONE_MUTE_MS;
+          }
+        }
         // Rebuild the watch set from crafts still cooking (completion in the future).
         const cur = {};
         (cd.passive||[]).forEach(c => {
