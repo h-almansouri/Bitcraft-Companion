@@ -3392,6 +3392,8 @@ async function loadItemMarket(id, type, name, prefetched) {
       <div class="stat-row">
         <div class="stat"><div class="stat-label">Lowest sell</div><div class="stat-val price-sell">${fmtCoin(stats.lowestSell||stats.lowestSellPrice)}</div></div>
         <div class="stat"><div class="stat-label">Highest buy</div><div class="stat-val price-buy">${fmtCoin(stats.highestBuy||stats.highestBuyPrice)}</div></div>
+        <div class="stat" title="Average traded price over the last 7 days (bitjita)"><div class="stat-label">7d avg</div><div class="stat-val" id="mkt-avg7d"><span class="dot-spin"></span></div></div>
+        <div class="stat" title="Average traded price over the last 30 days (bitjita)"><div class="stat-label">30d avg</div><div class="stat-val" id="mkt-avg30d"><span class="dot-spin"></span></div></div>
         <div class="stat"><div class="stat-label">24h volume</div><div class="stat-val">${fmtNum(stats.volume24h||0)}</div></div>
         <div class="stat"><div class="stat-label">Sell orders</div><div class="stat-val">${sells.length}</div></div>
       </div>
@@ -3413,12 +3415,25 @@ async function loadItemMarket(id, type, name, prefetched) {
         </div>
       </div>`;
     renderPriceHistory(type, id); // Tier 2: fill the sparkline from the backend (no-op if unavailable)
+    renderMarketAvg(type, id);    // fill the 7d / 30d avg from bitjita's price-history
   } catch(e) {
     el.innerHTML = `<div style="margin-bottom:.75rem"><button class="btn" onclick="backToMarketResults()"><i class="ti ti-arrow-left"></i> Back</button></div>` + errBox(e);
   }
 }
 
 // ── Price history sparkline (Tier 2 backend) ──
+// Fill the 7d / 30d average-price stats from bitjita's price-history endpoint (avg of actual trades, a
+// truer "going rate" than the single lowest sell order). Cargo ids resolve via the item/cargo fallback.
+async function renderMarketAvg(type, id){
+  const set = (elId, v) => { const e = document.getElementById(elId); if (e) e.innerHTML = (v!=null && v>0) ? fmtCoin(Math.round(v)) : '<span style="color:var(--text3)">—</span>'; };
+  const t1 = type === 'cargo' ? 'cargo' : 'items', t2 = t1 === 'items' ? 'cargo' : 'items';
+  let ps = null;
+  for (const t of [t1, t2]){
+    try { const d = await apiFetch(`/api/market/${t}/${id}/price-history?limit=1`); if (d && d.priceStats){ ps = d.priceStats; break; } } catch(e){}
+  }
+  set('mkt-avg7d',  ps ? (ps.avg7d != null ? ps.avg7d : ps.avg24h) : null);
+  set('mkt-avg30d', ps ? ps.avg30d : null);
+}
 async function renderPriceHistory(type, id){
   const host = document.getElementById('mkt-history'); if (!host) return;
   let pts = [];
