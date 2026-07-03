@@ -229,6 +229,26 @@ main.planner-mode{max-width:none;padding:1rem}
 .tcb-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem}
 .tcb-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .55rem;font-size:11px;color:var(--text2)}
 .tcb-chip b{color:var(--text);font-weight:700}
+/* effort profit */
+.eff-intro{font-size:12px;color:var(--text3);margin-bottom:1rem;line-height:1.55;max-width:760px}
+.eff-intro b{color:var(--text2)}
+.eff-tools{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}
+.eff-tool-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .6rem;font-size:11px;color:var(--text3);display:flex;align-items:center;gap:.4rem}
+.eff-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:.55rem;overflow:hidden}
+.eff-hdr{display:flex;align-items:center;gap:.85rem;padding:.7rem .9rem;cursor:pointer}
+.eff-hdr:hover{background:var(--bg3)}
+.eff-name{flex:1;font-weight:600;color:var(--text);display:flex;align-items:center;gap:.5rem;min-width:0}
+.eff-hpe{font-size:20px;font-weight:800;color:var(--green-light);font-variant-numeric:tabular-nums;line-height:1}
+.eff-hpe-lbl{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;text-align:right;margin-top:2px}
+.eff-sub{font-size:11px;color:var(--text3);text-align:right;white-space:nowrap;line-height:1.5}
+.eff-breakdown{border-top:1px solid var(--border);padding:.5rem .9rem;background:var(--bg)}
+.eff-node{display:flex;align-items:center;gap:.5rem;padding:2px 0;font-size:12px;color:var(--text2)}
+.eff-node .eff-eff{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums;min-width:46px}
+.eff-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;border-radius:4px;padding:1px 5px;white-space:nowrap}
+.eff-b-gather{background:rgba(108,200,74,.15);color:var(--green-light)}
+.eff-b-craft{background:rgba(29,158,117,.16);color:var(--teal-light)}
+.eff-b-passive{background:rgba(111,92,240,.17);color:#b0a4f0}
+.eff-b-raw{background:var(--bg4);color:var(--text3)}
 /* alerts / notifications */
 .al-wrap{max-width:760px}
 .al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
@@ -635,6 +655,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div class="nav-item" data-tab="map" onclick="switchTab('map')"><i class="ti ti-map-2"></i> Map</div>
     <div class="nav-item" data-tab="planner" onclick="switchTab('planner')"><i class="ti ti-tool"></i> Planner</div>
     <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting</div>
+    <div class="nav-item" data-tab="effort" onclick="switchTab('effort')"><i class="ti ti-coins"></i> Effort Profit</div>
     <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><i class="ti ti-bell"></i> Alerts</div>
   </div>
 </aside>
@@ -662,6 +683,7 @@ main.planner-mode{max-width:none;padding:1rem}
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
     <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
+    <div id="tab-effort" style="display:none"><div id="effort-content"></div></div>
     <div id="tab-alerts" style="display:none"><div id="alerts-content"></div></div>
   </main>
 </div>
@@ -1121,7 +1143,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -1156,6 +1178,7 @@ function switchTab(tab) {
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
   else if (tab === 'tools') renderToolCrafting();
+  else if (tab === 'effort') renderEffort();
   else if (tab === 'alerts') renderAlerts();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
@@ -6583,6 +6606,113 @@ function syncSkillActiveStates(id){
     if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
     else if (!active && badge){ badge.remove(); }
   });
+}
+
+// ── EFFORT PROFIT ──  hex earned per unit of effort (actions) to produce & sell an item.
+// Effort = gather actions (nodeHP / your tool power ÷ yield) + active craft actions; passive crafts = 0.
+let effortData = null;
+let effortPriceCache = {};   // craftId -> avg7d hex (null = no data)
+const EFFORT_STARTER = ['Rough Wood Log','Rough Plank','Ferralith Ingot','Refined Ferralith Ingot','Rough Rope','Rough Cloth'];
+const EFFORT_SKIP = /^(package |unpack |recraft |reforge |scrap )/i;
+async function loadEffortData(){
+  if (effortData) return;
+  const d = await apiFetch('/effort-data?v=1');
+  d._passive = new Set(d.passiveRecipeIds || []);
+  effortData = d;
+}
+// Best tool power the tracked player(s) have per tool type (from their inventory); else the game's weakest.
+function effortToolMap(){
+  const map = {};
+  if (invData && effortData){
+    (invData.inventories||[]).forEach(inv => (inv.pockets||[]).forEach(pk => {
+      const s = slotContents(pk); if (!s) return;
+      const t = effortData.tools[s.itemId];
+      if (t && t.power != null) map[t.type] = Math.max(map[t.type]||0, t.power);
+    }));
+  }
+  return map;
+}
+function effortPowerFor(type, toolMap){ return toolMap[type] || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
+// Cheapest gather effort (actions) for 1 unit of an item, given the tool map. null if not gatherable.
+function effortGatherOf(id, toolMap){
+  const srcs = effortData.gather[id]; if (!srcs || !srcs.length) return null;
+  let best = Infinity;
+  for (const s of srcs){ const P = s.toolType ? effortPowerFor(s.toolType, toolMap) : 10; const A = s.hp / P; const d = s.onDestroy + s.perAction*A; if (d > 0) best = Math.min(best, A / d); }
+  return isFinite(best) ? best : null;
+}
+// Recursive min-effort walk. Returns {effort, how, recipe, actions, kids:[{id,qty}]}.
+function computeEffort(id, toolMap, memo, stack){
+  if (memo.has(id)) return memo.get(id);
+  stack = stack || new Set();
+  const opts = [];
+  const g = effortGatherOf(id, toolMap);
+  if (g != null) opts.push({ effort:g, how:'gather' });
+  for (const r of (craftingData.recipesByOutput[id] || [])){
+    if (EFFORT_SKIP.test(r.name)) continue;
+    if ((r.inputs||[]).some(i => stack.has(i.itemId))) continue;   // avoid cycles
+    const ns = new Set(stack); ns.add(id);
+    let ok = true, inEff = 0; const kids = [];
+    for (const inp of (r.inputs||[])){ const e = computeEffort(inp.itemId, toolMap, memo, ns); if (e == null){ ok = false; break; } inEff += e.effort * inp.quantity; kids.push({ id:inp.itemId, qty:inp.quantity }); }
+    if (!ok) continue;
+    const outQty = (r.outputs.find(o=>o.itemId===id)||{}).quantity || 1;
+    const passive = effortData._passive.has(r.id);
+    opts.push({ effort:((passive?0:(r.actionsRequired||0)) + inEff)/outQty, how:passive?'passive':'craft', recipe:r.name, actions:passive?0:(r.actionsRequired||0), outQty, kids });
+  }
+  const res = opts.length ? opts.sort((a,b)=>a.effort-b.effort)[0] : { effort:0, how:'raw' };
+  memo.set(id, res);
+  return res;
+}
+// avg7d market price via bitjita's price-history (cargo ids are stored at craftId+4e9).
+async function effortPrice(id){
+  if (effortPriceCache[id] !== undefined) return effortPriceCache[id];
+  const isCargo = id >= 4000000000, marketId = isCargo ? id - 4000000000 : id, type = isCargo ? 'cargo' : 'items';
+  try { const d = await apiFetch(`/api/market/${type}/${marketId}/price-history?limit=1`); const v = d.priceStats ? (d.priceStats.avg7d != null ? d.priceStats.avg7d : d.priceStats.avg24h) : null; effortPriceCache[id] = v; return v; }
+  catch(e){ effortPriceCache[id] = null; return null; }
+}
+function fmtEffort(n){ return n>=100 ? Math.round(n).toString() : (Math.round(n*10)/10).toString(); }
+function effortTreeHtml(id, memo, depth){
+  const e = memo.get(id); if (!e) return '';
+  const it = (craftingData.itemsById[id]) || { name:'#'+id };
+  const B = { gather:'eff-b-gather', craft:'eff-b-craft', passive:'eff-b-passive', raw:'eff-b-raw' }[e.how] || 'eff-b-raw';
+  const tag = e.how==='craft' ? `craft · ${e.actions} act` : (e.how==='passive' ? 'passive · 0' : (e.how==='gather' ? 'gather' : 'raw'));
+  let html = `<div class="eff-node" style="padding-left:${depth*18}px"><span class="eff-eff">${fmtEffort(e.effort)}</span><span style="flex:1">${escHtml(it.name)}</span><span class="eff-badge ${B}">${tag}</span></div>`;
+  if (e.kids && depth < 6) for (const k of e.kids) html += `<div class="eff-node" style="padding-left:${(depth+1)*18}px;color:var(--text3);font-size:11px">${k.qty}×</div>` + effortTreeHtml(k.id, memo, depth+1);
+  return html;
+}
+function toggleEffCard(i){ const b = document.getElementById('eff-bd-'+i); if (b) b.style.display = b.style.display==='none' ? '' : 'none'; }
+async function renderEffort(){
+  const el = document.getElementById('effort-content'); if (!el) return;
+  el.innerHTML = loading();
+  try { await loadCraftingData(); await loadEffortData(); } catch(e){ el.innerHTML = errBox(e); return; }
+  if (trackedPlayers.length && !invData){ try { await loadPlannerInventory(); } catch(e){} }
+  const toolMap = effortToolMap();
+  const memo = new Map();
+  const items = EFFORT_STARTER.map(nm => craftingData.items.find(i => (i.name||'').toLowerCase()===nm.toLowerCase())).filter(Boolean);
+  const rows = await Promise.all(items.map(async it => {
+    const e = computeEffort(it.id, toolMap, memo);
+    const price = await effortPrice(it.id);
+    return { it, e, price, hpe: (price!=null && e.effort>0) ? price/e.effort : null };
+  }));
+  rows.sort((a,b) => (b.hpe==null?-1:b.hpe) - (a.hpe==null?-1:a.hpe));
+  const toolNote = Object.keys(toolMap).length
+    ? `Using your tracked toolbelt for gather effort (${Object.keys(toolMap).length} tool type${Object.keys(toolMap).length>1?'s':''} found). Better/higher-rarity tools lower gather effort.`
+    : `No tracked tools found — using a basic tool baseline for gather effort. Track a player to use their real toolbelt.`;
+  const cards = rows.map((r, i) => {
+    const hpe = r.hpe!=null ? r.hpe.toFixed(r.hpe<1?3:2) : '—';
+    return `<div class="eff-card">
+      <div class="eff-hdr" onclick="toggleEffCard(${i})">
+        ${gameIconImg(r.it.iconAssetName, 26)}
+        <div class="eff-name">${escHtml(r.it.name)}${r.it.tier>0?`<span class="eff-badge eff-b-raw">T${r.it.tier}</span>`:''}</div>
+        <div style="text-align:right"><div class="eff-hpe">${hpe}</div><div class="eff-hpe-lbl">hex / effort</div></div>
+        <div class="eff-sub">${fmtEffort(r.e.effort)} effort<br>${r.price!=null?fmtCoin(Math.round(r.price))+' avg7d':'<span style="color:var(--amber-light)">no market data</span>'}</div>
+        <i class="ti ti-chevron-down" style="color:var(--text3);font-size:14px"></i>
+      </div>
+      <div class="eff-breakdown" id="eff-bd-${i}" style="display:none">${effortTreeHtml(r.it.id, memo, 0)}</div>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it, where <b>effort = actions</b> (gathering hits + active craft actions). Gathering effort scales with your <b>tool power</b> (node HP ÷ tool damage ÷ yield); <b>passive crafts cost 0</b> (only their inputs count). Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Click a row for the effort breakdown.</div>
+    <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
+    ${cards || '<div class="empty"><span>No data</span></div>'}`;
 }
 
 (async () => {

@@ -281,6 +281,18 @@ http.createServer((req, res) => {
     return;
   }
 
+  // Serve local effort data (for the Effort Profit tab)
+  if (req.url.split('?')[0] === '/effort-data') {
+    const filePath = path.join(__dirname, 'effortData.json');
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'effortData.json not found. Run: node extract-effort-data.js' }));
+      return;
+    }
+    serveFileCached(req, res, filePath, 'application/json');
+    return;
+  }
+
   // Serve local map assets (base image + GeoJSON datasets for the Map tab)
   if (req.url.startsWith('/mapassets/')) {
     const name = path.basename(req.url.split('?')[0]); // basename strips any path-traversal
