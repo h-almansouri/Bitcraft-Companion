@@ -1459,7 +1459,7 @@ function skillXpRowHtml(sk, rank){
   return `${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP` + (rank ? ` &nbsp;·&nbsp; <span style="color:var(--text3)">#${rank.rank}</span>` : '');
 }
 // ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
-const SKILL_ACTIVE_GRACE = 3000;    // clear the "active" tag ~3s after the last XP gain (paired with the 3s skills refresh below; bump up if it blinks off between slow actions)
+const SKILL_ACTIVE_GRACE = 3000;    // clear the "active" tag ~3s after the last XP gain. Appearance is driven by the live experience_state stream (instant); disappearance by startSkillActiveTick. Bump up if it blinks off between slow actions.
 let _skillGainSeq = 0;              // monotonic counter — orders gains even within the same millisecond
 function updateSkillSession(entityId, skills){
   const now = Date.now();
@@ -1475,14 +1475,33 @@ function updateSkillSession(entityId, skills){
     }
     e.curXp = sk.xp; e.curTs = now;
   });
-  // Exactly one skill is "active": the most-recently-gained one (highest gainSeq — unique, so no ties),
-  // and only within the grace window since its last gain. Switching skills flips the highlight the
-  // instant the new skill gains XP, while gaps between actions in the same skill don't flicker it off.
+  recomputeSkillActive(entityId);
+}
+// Recompute which single skill is "active": the most-recently-gained one (highest gainSeq — unique, so no
+// ties), and only within the grace window since its last gain. Returns true if any flag changed. Split out
+// so a light local tick can expire the tag between XP events (the live feed drives appearance; this drives
+// disappearance — no REST poll needed).
+function recomputeSkillActive(entityId){
+  const s = skillSession[entityId]; if (!s) return false;
+  const now = Date.now();
   let best = null;
   for (const id in s){ const e = s[id]; if (e.gainSeq && (!best || e.gainSeq > best.gainSeq)) best = e; }
   const live = best && (now - best.lastGainTs) <= SKILL_ACTIVE_GRACE;
-  for (const id in s){ s[id].active = live && s[id] === best; }
+  let changed = false;
+  for (const id in s){ const a = live && s[id] === best; if (s[id].active !== a){ s[id].active = a; changed = true; } }
+  return changed;
 }
+// Poll locally (cheap, no network) so the active tag clears ~grace after the last streamed XP gain, instead
+// of waiting on the REST refresh. Only touches the DOM when a flag actually flips and the Experience tab is open.
+let skillActiveTick = null;
+function startSkillActiveTick(){
+  stopSkillActiveTick();
+  skillActiveTick = setInterval(() => {
+    if (document.hidden) return;
+    trackedPlayers.forEach(p => { const id = String(p.entityId); if (recomputeSkillActive(id) && currentTab === 'skills') syncSkillActiveStates(id); });
+  }, 1000);
+}
+function stopSkillActiveTick(){ if (skillActiveTick){ clearInterval(skillActiveTick); skillActiveTick = null; } }
 function sessionRate(entityId, skillId){
   const e = skillSession[entityId] && skillSession[entityId][skillId];
   if (!e) return {xpHr:0, gained:0};
@@ -1732,7 +1751,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
 // ── LIVE REFRESH ──
 let liveRefreshId = null;
 const tabLiveIds = {};   // user-controlled per-tab live refresh
-const REFRESH_MS = {skills:3000, inventory:30000, crafting:10000, tasks:10000};
+const REFRESH_MS = {skills:10000, inventory:30000, crafting:10000, tasks:10000};
 function startLiveRefresh(tab) {
   stopLiveRefresh();
   const ms = REFRESH_MS[tab];
@@ -6979,6 +6998,7 @@ function effortMatrixHeatmap(grid){
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
   loadNotifHistory(); renderNotifBell();   // restore the notification-history bell
   startLive();                  // realtime feed for instant stamina / XP
+  startSkillActiveTick();        // expire the "active" skill tag between XP events (no REST poll needed)
 })();
 </script>
 </body>
