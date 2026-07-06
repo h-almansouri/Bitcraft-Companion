@@ -4058,6 +4058,7 @@ function renderMap(){
           <div class="map-side-sec map-side-grow">
             <div class="map-side-hdr"><i class="ti ti-map-search"></i> Live map</div>
             <select id="bc-region-sel" style="margin-bottom:4px" onchange="bcSetMapRegion(this.value)" title="Limit tracked resources to one region"></select>
+            <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin-bottom:5px;cursor:pointer" title="Show depleted resource nodes and their live respawn countdown (live via prism-relay)"><input type="checkbox" id="bc-growth-toggle" style="width:auto" onchange="bcGrowthToggle(this.checked)"><i class="ti ti-hourglass-low" style="color:var(--teal-light)"></i> Respawn timers</label>
             <input id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
             <div style="display:flex;gap:4px;margin-top:4px">
               <select id="bc-res-tier" onchange="bcResTier=this.value;bcRenderResourceList()"></select>
@@ -4250,7 +4251,10 @@ async function bcInitMap(){
   // Restore tracked resources/enemies (refetch their points)
   const savedRes = bcLoadTrackedRes();
   savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, count:0, pts:[] }; });
-  if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); bcRelaySync(); bcRefreshAllTracked(); bcScheduleResourcePoll(); }
+  if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); bcRefreshAllTracked(); bcScheduleResourcePoll(); }
+  // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
+  const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
+  bcGrowthApply(); bcRelaySync();
 
   // Restore tracked players (refetch positions + resubscribe)
   bcLoadTrackedPlayers().forEach(p => bcTrackPlayer(p.id, p.name, p.color, p.follow));
@@ -4822,8 +4826,8 @@ function bcRelaySync(){
   // Only stream while the Map tab is open and showing enemies — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
-  const shouldStream = currentTab === 'map' && bcRelayEnemyTypes().length > 0;
-  if (!shouldStream){ bcRelayDisconnect(); return; }
+  const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcGrowthOn);
+  if (!shouldStream){ bcRelayDisconnect(); bcGrowthApply(); return; }   // also hides the overlay layer + stops its tick
   if (!bcRelayConn){ bcRelayConnect(); return; }               // onConnect re-invokes bcRelaySync
   if (!bcRelayReady) return;
   const { tables } = bcRelayLib;
@@ -4842,6 +4846,18 @@ function bcRelaySync(){
       : [ tables.enemy_location.where(r => r.enemyType.eq(id)) ];   // all regions (heavier)
     bcRelaySubs[typeId] = bcRelayConn.subscriptionBuilder().onApplied(() => bcRelayScheduleRedraw()).onError(() => {}).subscribe(q);
   }
+  // growth_timers respawn overlay (region-scoped; only ~tens of rows)
+  if (bcGrowthOn){
+    if (bcGrowthSub && bcGrowthSubRegion !== regionKey){ try { bcGrowthSub.unsubscribe(); } catch(e){} bcGrowthSub = null; }
+    if (!bcGrowthSub){
+      bcGrowthSubRegion = regionKey;
+      const gq = bcMapRegion
+        ? [ tables.growth_timers.where(r => r.regionId.eq(Number(bcMapRegion))) ]
+        : [ tables.growth_timers.where(r => r.regionId.gte(0)) ];   // all regions (still sparse)
+      bcGrowthSub = bcRelayConn.subscriptionBuilder().onApplied(() => bcGrowthScheduleRebuild()).onError(() => {}).subscribe(gq);
+    }
+  } else if (bcGrowthSub){ try { bcGrowthSub.unsubscribe(); } catch(e){} bcGrowthSub = null; bcGrowthSubRegion = null; bcGrowthClear(); }
+  bcGrowthApply();
   bcRelayScheduleRedraw();   // paint whatever is already cached
 }
 async function bcRelayConnect(){
@@ -4857,6 +4873,9 @@ async function bcRelayConnect(){
         conn.db.enemy_location.onInsert(() => bcRelayScheduleRedraw());
         conn.db.enemy_location.onUpdate(() => bcRelayScheduleRedraw());
         conn.db.enemy_location.onDelete(() => bcRelayScheduleRedraw());
+        conn.db.growth_timers.onInsert(() => bcGrowthScheduleRebuild());
+        conn.db.growth_timers.onUpdate(() => bcGrowthScheduleRebuild());
+        conn.db.growth_timers.onDelete(() => bcGrowthScheduleRebuild());
         bcRelaySync();
       })
       .onConnectError(() => { bcRelayConn = null; bcRelayReady = false; bcRelayFallback(); })
@@ -4867,10 +4886,66 @@ async function bcRelayConnect(){
 function bcRelayDisconnect(){
   Object.values(bcRelaySubs).forEach(s => { try { s.unsubscribe(); } catch(e){} });
   bcRelaySubs = {}; bcRelaySubRegion = null; bcRelayReady = false;
+  if (bcGrowthSub){ try { bcGrowthSub.unsubscribe(); } catch(e){} bcGrowthSub = null; bcGrowthSubRegion = null; }
+  bcGrowthClear();
   if (bcRelayConn){ try { bcRelayConn.disconnect(); } catch(e){} bcRelayConn = null; }
 }
 // Relay unavailable → turn it off and let the REST poll cover enemies too.
 function bcRelayFallback(){ bcUseRelay = false; bcRefreshAllTracked().catch(()=>{}); bcScheduleResourcePoll(); }
+
+// ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
+// growth_timers is sparse (~tens/region), so these are real Leaflet markers (not canvas dots) with a
+// live countdown tooltip. Streamed from the same relay connection; toggled from the Live-map panel.
+let bcGrowthOn = (() => { try { return localStorage.getItem('bc_growth_on') === '1'; } catch(e){ return false; } })();
+let bcGrowthLayer = null, bcGrowthSub = null, bcGrowthSubRegion = null;
+let bcGrowthMarkers = {};          // entityId -> { marker, endMs, name }
+let bcGrowthTick = null, bcGrowthRebuildT = null;
+function bcGrowthEndMs(ts){ try { if (!ts) return 0; if (typeof ts.toMillis === 'function') return Number(ts.toMillis()); if (typeof ts.toDate === 'function') return ts.toDate().getTime(); if (typeof ts === 'number') return ts; } catch(e){} return 0; }
+function bcGrowthName(rid){ const m = bcResourceIndex[rid] || bcResourceIndex[String(rid)] || {}; return m.name || ('Resource #' + rid); }
+function bcGrowthScheduleRebuild(){ if (bcGrowthRebuildT) return; bcGrowthRebuildT = setTimeout(() => { bcGrowthRebuildT = null; bcGrowthRebuild(); }, 300); }
+function bcGrowthRebuild(){
+  if (!bcGrowthLayer || !bcRelayConn || !bcGrowthOn) return;
+  const seen = {};
+  try {
+    for (const r of bcRelayConn.db.growth_timers.iter()){
+      const key = String(r.entityId); seen[key] = true;
+      const endMs = bcGrowthEndMs(r.endTimestamp);
+      let m = bcGrowthMarkers[key];
+      if (!m){
+        const marker = L.circleMarker(L.latLng(r.z, r.x), { radius:5, color:'#5eead4', weight:1.5, fillColor:'#0d9488', fillOpacity:.45 });
+        marker.bindTooltip('', { direction:'top', offset:[0,-4], className:'bc-player-tip' });
+        marker.addTo(bcGrowthLayer);
+        m = bcGrowthMarkers[key] = { marker, endMs, name: bcGrowthName(r.resourceId) };
+      } else { m.endMs = endMs; }
+    }
+  } catch(e){ return; }
+  for (const key in bcGrowthMarkers){ if (!seen[key]){ try { bcGrowthLayer.removeLayer(bcGrowthMarkers[key].marker); } catch(e){} delete bcGrowthMarkers[key]; } }
+  bcGrowthUpdateTooltips();
+}
+function bcGrowthUpdateTooltips(){
+  const now = Date.now();
+  for (const key in bcGrowthMarkers){
+    const m = bcGrowthMarkers[key]; const ms = m.endMs - now;
+    m.marker.setTooltipContent(ms > 0
+      ? `<b>${escHtml(m.name)}</b><br><span style="color:var(--teal-light)">respawns in ${bcFmtDur(ms)}</span>`
+      : `<b>${escHtml(m.name)}</b><br><span style="color:var(--amber-light)">ready</span>`);
+  }
+}
+function bcGrowthClear(){ if (bcGrowthLayer) bcGrowthLayer.clearLayers(); bcGrowthMarkers = {}; }
+// Layer visibility + countdown ticker follow (overlay on × Map tab).
+function bcGrowthApply(){
+  if (!bcMap) return;
+  if (!bcGrowthLayer) bcGrowthLayer = L.layerGroup();
+  const show = bcGrowthOn && currentTab === 'map';
+  if (show){ if (!bcMap.hasLayer(bcGrowthLayer)) bcGrowthLayer.addTo(bcMap); if (!bcGrowthTick) bcGrowthTick = setInterval(() => { if (currentTab === 'map' && !document.hidden) bcGrowthUpdateTooltips(); }, 1000); }
+  else { if (bcMap.hasLayer(bcGrowthLayer)) bcMap.removeLayer(bcGrowthLayer); if (bcGrowthTick){ clearInterval(bcGrowthTick); bcGrowthTick = null; } }
+}
+function bcGrowthToggle(on){
+  bcGrowthOn = !!on;
+  try { localStorage.setItem('bc_growth_on', bcGrowthOn ? '1' : '0'); } catch(e){}
+  bcGrowthApply();
+  bcRelaySync();   // (un)subscribe growth_timers; connects/disconnects the relay as needed
+}
 
 // ── CRAFTING PLANNER ──
 async function renderPlanner() {

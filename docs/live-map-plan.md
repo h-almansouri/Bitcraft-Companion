@@ -146,11 +146,12 @@ an instant fallback if the relay is down).
    flips to the REST poll. Verified live: 1,397 Sagi Birds, movement streaming, clean untrack/retrack.
 4. ~~**Polish:** unsubscribe when leaving the Map tab~~ ✅ done — relay is gated on the Map tab
    (`bcRelaySync` from `switchTab` + `visibilitychange`); redraw skipped while `document.hidden`. Verified.
-5. **Respawn overlay (next, de-risked):** `growth_timers` is tiny — **~21 rows region-wide** (single digits
-   per resource type), coords plain Small-Hex (÷1), `endTimestamp` is a SpacetimeDB Timestamp. So it can be
-   a proper marker layer (not canvas dots) with live respawn countdowns. Needs: a `growth_timers` region
-   subscription, a Leaflet marker layer, a 1 s countdown ticker, and a small lifecycle tweak (keep the
-   relay up on the Map tab for the region overlay, independent of tracked enemies). Its own focused pass.
+5. ~~**Respawn overlay**~~ ✅ done — "Respawn timers" toggle in the Live-map panel (persisted). Subscribes
+   `growth_timers` for the selected region on the shared relay connection and draws each depleted node as a
+   Leaflet marker with a live respawn countdown (`endTimestamp.toMillis()`, coords ÷1, names from
+   `bcResourceIndex`). 1 s tick updates tooltips; keeps the relay up on the Map tab even with no tracked
+   enemies. Verified: ~20 markers in region 19 ("Depleted Hexite Deposit — respawns in 68h"), clean
+   teardown on toggle-off / leave-map.
 6. **Optional:** per-animal icons / a brief fade on kill.
 
 ### Rebuilding the vendored bundle
