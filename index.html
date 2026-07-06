@@ -4538,7 +4538,9 @@ function bcPointLayerClass(){
     },
     onRemove(){ L.DomUtil.remove(this._c); },
     getEvents(){
-      const ev = { viewreset:this._reset, zoom:this._onZoom, moveend:this._onMoveEnd, zoomend:this._redraw };
+      // no `zoomend` handler: every zoom ends with a `moveend` (Map._moveEnd), so a zoomend redraw
+      // would just draw the whole point set twice per zoom step.
+      const ev = { viewreset:this._reset, zoom:this._onZoom, moveend:this._onMoveEnd };
       if (this._zoomAnimated) ev.zoomanim = this._onAnimZoom;
       return ev;
     },
@@ -4575,28 +4577,60 @@ function bcPointLayerClass(){
       this._proj.set(pts, a);
       return a;
     },
+    // Pre-rendered dot (fill + stroke baked in) per (color, radius) — stamping a sprite with drawImage is
+    // an order of magnitude faster than accumulating tens of thousands of arc() segments into one path.
+    _spriteFor(color, r){
+      if (!this._sprites) this._sprites = new Map();
+      const key = color + '|' + r;
+      let s = this._sprites.get(key);
+      if (s) return s;
+      const d = Math.ceil(r * 2 + 4);           // +4: room for the stroke + AA
+      const cv = document.createElement('canvas'); cv.width = cv.height = d;
+      const c = cv.getContext('2d');
+      c.fillStyle = color;
+      c.beginPath(); c.arc(d/2, d/2, r, 0, 6.283185307); c.fill();
+      if (r >= 3.5){ c.lineWidth = Math.min(1.4, r * 0.22); c.strokeStyle = 'rgba(8,10,14,0.85)'; c.stroke(); }
+      s = { cv, off: d/2 };
+      this._sprites.set(key, s);
+      return s;
+    },
     _redraw(){
       if (!this._map || !this._c || !this._bounds) return;
       const map = this._map, b = this._bounds, s = b.getSize(), ctx = this._ctx;
       ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,s.x,s.y);
-      ctx.translate(-b.min.x, -b.min.y);            // draw in layer-pixel coordinates
       const z = this._zoom, scale = map.options.crs.scale(z), origin = map.getPixelOrigin();
       const minX=b.min.x, maxX=b.max.x, minY=b.min.y, maxY=b.max.y;
       for (const set of this._sets){
         const pts = set.pts; if (!pts || !pts.length) continue;
         const proj = this._project(pts), n = pts.length;
-        const stride = (z <= -2 && n > 300000) ? Math.ceil(n / 300000) : 1;
-        const r = bcDotRadius(set.count != null ? set.count : n, z);
-        ctx.fillStyle = set.color || '#5fd0ff';
-        ctx.beginPath();
-        for (let i=0, j=0; i<n; i+=stride, j=i*2){
+        const r = Math.round(bcDotRadius(set.count != null ? set.count : n, z) * 4) / 4;
+        // Occupancy grid (cell ≈ dot size): skip points landing on an already-painted cell, so the number
+        // of draw calls is bounded by SCREEN AREA, not node count — dense sets (Sticks is >1M world-wide)
+        // overdraw the same pixels thousands of times otherwise. Small sets (animals) stay exact.
+        let grid = null, gw = 0, cell = 1;
+        if (n > 4000){
+          cell = Math.max(1, Math.round(r));
+          gw = ((s.x / cell) | 0) + 3;
+          const need = gw * (((s.y / cell) | 0) + 3);
+          if (!this._grid || this._grid.length < need) this._grid = new Uint8Array(need);
+          grid = this._grid; grid.fill(0, 0, need);
+        }
+        const sq = r < 2.25;                     // tiny dots: squares are indistinguishable and cheaper
+        const sp = sq ? null : this._spriteFor(set.color || '#5fd0ff', r);
+        if (sq) ctx.fillStyle = set.color || '#5fd0ff';
+        const d = r * 2;
+        for (let i=0, j=0; i<n; i++, j+=2){
           const cx = proj[j] * scale - origin.x, cy = proj[j+1] * scale - origin.y;   // layer pixel
           if (cx < minX-r || cx > maxX+r || cy < minY-r || cy > maxY+r) continue;      // cull to padded bounds
-          ctx.moveTo(cx + r, cy);
-          ctx.arc(cx, cy, r, 0, 6.283185307);
+          const px = cx - minX, py = cy - minY;                                        // canvas pixel
+          if (grid){
+            const gi = ((py / cell) | 0) * gw + ((px / cell) | 0);
+            if (grid[gi]) continue;
+            grid[gi] = 1;
+          }
+          if (sq) ctx.fillRect(px - r, py - r, d, d);
+          else ctx.drawImage(sp.cv, px - sp.off, py - sp.off);
         }
-        ctx.fill();
-        if (r >= 3.5){ ctx.lineWidth = Math.min(1.4, r * 0.22); ctx.strokeStyle = 'rgba(8,10,14,0.85)'; ctx.stroke(); }
       }
     }
   });
