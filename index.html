@@ -163,7 +163,9 @@ main.planner-mode{max-width:none;padding:1rem}
 .sj-target{display:flex;align-items:center;gap:.5rem}
 .sj-step{width:26px;height:26px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);color:var(--text);font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .sj-step:hover{border-color:var(--tc,var(--teal))}
-.sj-target-val{min-width:46px;text-align:center;font-weight:700;color:var(--text);background:var(--bg4);border-radius:6px;padding:3px 0}
+.sj-target-val{width:52px;text-align:center;font-weight:700;font-size:12px;font-family:inherit;color:var(--text);background:var(--bg4);border:1px solid transparent;border-radius:6px;padding:3px 0;box-sizing:border-box}
+.sj-target-val:focus{outline:none;border-color:var(--teal)}
+.sj-target-val::-webkit-outer-spin-button,.sj-target-val::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .sj-input{width:100%;background:var(--bg4);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;box-sizing:border-box}
 .sj-input:focus{border-color:var(--tc,var(--teal))}
 .sj-mode{display:flex;gap:.35rem;margin-bottom:.6rem}
@@ -1565,7 +1567,7 @@ function journeyHtml(entityId, sk, rank){
           <label>Target level</label>
           <div class="sj-target">
             <button class="sj-step" onclick="adjustTarget('${entityId}',-1)">&minus;</button>
-            <span class="sj-target-val" id="sj-target-${entityId}">${target}</span>
+            <input class="sj-target-val" id="sj-target-${entityId}" type="text" inputmode="numeric" value="${target}" oninput="onTargetInput('${entityId}')" onchange="clampTarget('${entityId}')" onfocus="this.select()">
             <button class="sj-step" onclick="adjustTarget('${entityId}',1)">+</button>
             <span class="k" style="margin-left:auto">XP needed</span>
             <span class="v" id="sj-need-${entityId}">—</span>
@@ -1603,8 +1605,29 @@ function adjustTarget(entityId, d){
   const data = skillsByPlayer[entityId]; const sk = data && data.skills.find(x => x.skillId === skillId); if (!sk) return;
   const maxLevel = xpThresholds.length || 100;
   const el = document.getElementById('sj-target-' + entityId); if (!el) return;
-  let t = Math.max(sk.level+1, Math.min(maxLevel, (parseInt(el.textContent,10)||sk.level+1) + d));
-  el.textContent = t;
+  let t = Math.max(sk.level+1, Math.min(maxLevel, (parseInt(el.value,10)||sk.level+1) + d));
+  el.value = t;
+  const p = skillCalcPrefs[skillId] || (skillCalcPrefs[skillId] = {}); p.target = t; saveSkillCalcPrefs();
+  recalcJourney(entityId);
+}
+// Live-recalc while typing a target level (don't clamp mid-type so the field stays usable).
+function onTargetInput(entityId){
+  entityId = String(entityId);
+  const skillId = openJourney[entityId]; if (!skillId) return;
+  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  const v = parseInt(el.value, 10);
+  if (!isNaN(v)){ const p = skillCalcPrefs[skillId] || (skillCalcPrefs[skillId] = {}); p.target = v; saveSkillCalcPrefs(); }
+  recalcJourney(entityId);
+}
+// On blur/enter, clamp to [level+1, max] and write the corrected value back.
+function clampTarget(entityId){
+  entityId = String(entityId);
+  const skillId = openJourney[entityId]; if (!skillId) return;
+  const data = skillsByPlayer[entityId]; const sk = data && data.skills.find(x => x.skillId === skillId); if (!sk) return;
+  const maxLevel = xpThresholds.length || 100;
+  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  let t = Math.max(sk.level+1, Math.min(maxLevel, parseInt(el.value,10) || (sk.level+1)));
+  el.value = t;
   const p = skillCalcPrefs[skillId] || (skillCalcPrefs[skillId] = {}); p.target = t; saveSkillCalcPrefs();
   recalcJourney(entityId);
 }
@@ -1624,7 +1647,7 @@ function recalcJourney(entityId){
   const data = skillsByPlayer[entityId]; if (!data) return;
   const sk = data.skills.find(x => x.skillId === skillId); if (!sk) return;
   const tEl = document.getElementById('sj-target-' + entityId); if (!tEl) return;
-  const target = parseInt(tEl.textContent,10) || (sk.level+1);
+  const target = parseInt(tEl.value,10) || (sk.level+1);
   const etalvl = document.getElementById('sj-etalvl-' + entityId); if (etalvl) etalvl.textContent = target;
   const targetFloor = xpThresholds[target-1] || 0;
   const need = Math.max(0, targetFloor - sk.xp);
