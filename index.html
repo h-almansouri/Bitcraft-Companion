@@ -6924,6 +6924,10 @@ function onLiveExperience(id, data){
   if (currentTab === 'skills'){
     changed.forEach(sk => updateSkillCardLive(id, sk));
     syncSkillActiveStates(id); // one active skill may have handed off to another — update ALL cards, not just the ones that gained
+    // Keep the expanded calculator panel in sync on the SAME tick as the small card — it used to refresh
+    // only on the slower REST poll, so its XP (into-level, session XP, XP/hr, ETA) lagged behind the card.
+    const openSkill = openJourney[id];
+    if (openSkill && changed.some(sk => sk.skillId === openSkill)) updateSkillJourneyLive(id);
   }
 }
 function updateSkillCardLive(id, sk){
@@ -6937,6 +6941,16 @@ function updateSkillCardLive(id, sk){
   const bar = card.querySelector('.skill-bar'); if (bar) bar.style.width = sk.pct + '%';
   const pctEls = card.querySelectorAll('.skill-card-row span'); if (pctEls[1]) pctEls[1].textContent = sk.pct + '%';
   const xpRow = card.querySelector('.skill-xp-row'); if (xpRow) xpRow.innerHTML = skillXpRowHtml(sk, rank); // keep the #rank suffix
+}
+// Live-refresh the open calculator panel (level, into-level, measured XP/hr, session XP, XP needed, ETA).
+// Skip if the user is editing an input in it, so a live tick can't wipe a half-typed target / manual rate —
+// same guard loadSkillsInto uses for the background REST refresh.
+function updateSkillJourneyLive(entityId){
+  entityId = String(entityId);
+  if (!openJourney[entityId] || !document.getElementById('sj-' + entityId)) return;
+  const ae = document.activeElement;
+  if (ae && ae.closest && ae.closest('#sj-' + entityId)) return;
+  renderJourney(entityId);
 }
 // Sync every skill card's "active" highlight + badge to skillSession (only one skill is active at a
 // time; handoff on skill-swap must clear the previous card, which may not be in this tick's changes).
