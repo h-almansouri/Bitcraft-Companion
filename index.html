@@ -1211,6 +1211,7 @@ function switchTab(tab) {
   else if (tab === 'alerts') renderAlerts();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
+  bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
 }
 function loadTab(tab, silent=false) {
   if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
@@ -4374,6 +4375,7 @@ function bcForceReconnect(){
 // (sometimes half-open, with no close event). Heal everything immediately instead of waiting out the
 // poll intervals. Registered once at load.
 document.addEventListener('visibilitychange', () => {
+  bcRelaySync();   // hidden -> drop the enemy relay; visible on the map -> reconnect
   if (document.hidden || currentTab !== 'map') return;
   if (Object.keys(bcTracked).length){
     const stale = !bcPlayerSocket || bcPlayerSocket.readyState !== 1 || (bcLastWsMsg && Date.now() - bcLastWsMsg > 90000);
@@ -4811,13 +4813,17 @@ function bcRelayRebuild(){
   try { for (const r of bcRelayConn.db.enemy_location.iter()){ const t = byType[r.enemyType]; if (t) t.pts.push([r.x/1000, r.z/1000]); } }  // milli-hex -> map space
   catch(e){ return; }
   bcRelayEnemyTypes().forEach(t => t.count = t.pts.length);
-  if (currentTab === 'map'){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
+  if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
 function bcRelaySync(){
   if (!bcUseRelay) return;
-  if (!bcRelayEnemyTypes().length){ bcRelayDisconnect(); return; }
+  // Only stream while the Map tab is open and showing enemies — drop the connection otherwise (polite,
+  // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
+  // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
+  const shouldStream = currentTab === 'map' && bcRelayEnemyTypes().length > 0;
+  if (!shouldStream){ bcRelayDisconnect(); return; }
   if (!bcRelayConn){ bcRelayConnect(); return; }               // onConnect re-invokes bcRelaySync
   if (!bcRelayReady) return;
   const { tables } = bcRelayLib;
