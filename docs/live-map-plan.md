@@ -152,7 +152,34 @@ an instant fallback if the relay is down).
    `bcResourceIndex`). 1 s tick updates tooltips; keeps the relay up on the Map tab even with no tracked
    enemies. Verified: ~20 markers in region 19 ("Depleted Hexite Deposit — respawns in 68h"), clean
    teardown on toggle-off / leave-map.
-6. **Optional:** per-animal icons / a brief fade on kill.
+6. ~~**Trim the trackable list**~~ ✅ done — the Map "track" list was cluttered with ~un-trackable entries
+   (doors, boulders, planted saplings, dungeon-interior props, ultra-rare drop-only ores like Auric/Argent
+   Ore, taming drops like Owl Feathers). Fix: `mapassets/untrackable.json` lists type ids to hide;
+   `bcLoadIndexes` loads it into `bcUntrackable` and `bcAllEntries` skips them. Cut the list 586 → 246
+   (resources 544 → 208, creatures 42 → 38).
+7. **Optional:** per-animal icons / a brief fade on kill.
+
+### Regenerating `untrackable.json`
+
+The authoritative "is this worth tracking?" signal is **how many nodes/spawns actually exist world-wide**
+in `bcmap-api` (the source the app fetches for both resources and enemies) — *not* tier or tag (Auric Ore
+is tier −1 / tag "Ore Vein" exactly like legit veins). Probe every `resourceIndex`/`creatureIndex` id across
+all 13 regions and sum `features[].geometry` points:
+
+```
+for id in index:  total = Σ over region∈[3,7,8,9,11,12,13,14,15,17,18,19,23]
+                            of points in GET bcmap-api.bitjita.com/region{r}/{resource|enemy}/{id}
+```
+
+Thresholds (picked from a real gap in the data — resources jump 14 → 24, and only Practice-Dummy-type
+creatures hit 0): **hide resources with < 15 nodes, creatures with 0 spawns.** That drops the named junk
+(Owl Feathers=4, Auric=5, Argent=12, fish schools, quest POIs, dens) while keeping every legit special
+(Hexite Deposit=27, Sparkstone=44, Beehive=191, mature trees). Output shape:
+
+```json
+{ "_meta": { "source": "...", "resourceThreshold": 15, "enemyThreshold": 1, ... },
+  "resources": ["<id>", ...], "enemies": ["<id>", ...] }
+```
 
 ### Rebuilding the vendored bundle
 

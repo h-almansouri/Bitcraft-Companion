@@ -4483,6 +4483,11 @@ function bcTrackFromSearch(i){
 
 // ===== Phase 3: live resources / enemies (bcmap-api by region) =====
 let bcResourceIndex = {}, bcCreatureIndex = {};
+// Resource/creature type ids that have too few nodes/spawns world-wide to be worth tracking (built offline
+// by counting bcmap-api points across all regions — see docs/live-map-plan.md). Resources under ~15 nodes
+// and creatures with 0 spawns are hidden so the list isn't cluttered with un-trackable entries (Depleted/
+// Spawner/Den/interior props, doors, planted saplings, ultra-rare drop-only ores like Auric/Argent, …).
+let bcUntrackable = { resources: new Set(), enemies: new Set() };
 let bcResourceLayer = null, bcResourcePollTimer = null;
 let bcMapRegion = '';                  // '' = all regions; else a regionId (limits resource fetching)
 function bcLoadMapRegion(){ try { const v = localStorage.getItem('bc_map_region'); if (v != null) bcMapRegion = v; } catch(e){} }
@@ -4601,6 +4606,7 @@ function bcPointLayerClass(){
 async function bcLoadIndexes(){
   try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=icons1`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
   try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=icons1`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/untrackable.json?v=1`); if (r.ok){ const u = await r.json(); bcUntrackable = { resources:new Set((u.resources||[]).map(String)), enemies:new Set((u.enemies||[]).map(String)) }; } } catch(e){}
   _bcAllEntries = null; // rebuild the combined list against the freshly loaded indexes
 }
 // One combined list of resources + enemies (each entry knows its kind). Cached — the indexes are
@@ -4609,8 +4615,8 @@ let _bcAllEntries = null;
 function bcAllEntries(){
   if (_bcAllEntries) return _bcAllEntries;
   const out = [];
-  for (const id in bcResourceIndex) out.push({ kind:'resource', id, ...bcResourceIndex[id] });
-  for (const id in bcCreatureIndex) out.push({ kind:'enemy',    id, ...bcCreatureIndex[id] });
+  for (const id in bcResourceIndex){ if (bcUntrackable.resources.has(id)) continue; out.push({ kind:'resource', id, ...bcResourceIndex[id] }); }
+  for (const id in bcCreatureIndex){ if (bcUntrackable.enemies.has(id))   continue; out.push({ kind:'enemy',    id, ...bcCreatureIndex[id] }); }
   return (_bcAllEntries = out);
 }
 function bcInitResourceFilters(){
