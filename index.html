@@ -1847,6 +1847,7 @@ async function refreshPlannerInv() {
 }
 
 function fmtTimeLeft(s) {
+  s = Math.floor(s);   // durations can be fractional seconds; floor so we never show "2.599s"
   if (s <= 0) return 'Finishing…';
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m`;
@@ -1857,12 +1858,18 @@ function startPassiveCraftTimer() {
   stopPassiveCraftTimer();
   passiveCraftTimer = setInterval(() => {
     const now = Math.floor(Date.now() / 1000);
+    // A craft with a KNOWN completion time (data-pts > 0) that has now passed is done — re-render from
+    // cached data so it jumps to "Ready to Claim" with a checkmark immediately (isComplete above is
+    // completion-aware). Crafts of unknown duration carry data-pts="0" and keep showing "Processing".
+    let anyDone = false;
     document.querySelectorAll('[data-pts]').forEach(el => {
       const ts = +el.dataset.pts;
+      if (ts > 0 && ts <= now) { anyDone = true; return; }   // will move to Ready on the re-render below
       const left = ts - now;
       el.textContent = left > 0 ? fmtTimeLeft(left) : (el.dataset.processing ? 'Processing' : 'Finishing…');
       el.style.color = left < 300 ? 'var(--green-light)' : 'var(--amber-light)';
     });
+    if (anyDone) trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId));
   }, 1000);
 }
 function stopPassiveCraftTimer() {
@@ -2203,7 +2210,17 @@ function passiveCompletionTs(c) {
 function renderPassiveCraftsHtml(passive, itemMap) {
   if (!passive || !passive.length) return '';
 
-  const isComplete = c => !!(c.completed || c.isCompleted || c.status === 'complete' || c.status === 'completed' || c.status === 'done');
+  // A passive craft is claimable once the server marks it complete OR its known completion time
+  // (start + recipe duration) has passed. The completion time is deterministic, so we flip it to
+  // "Ready to Claim" the instant the timer runs out instead of waiting for the next server poll to
+  // change its status — the timer (startPassiveCraftTimer) re-renders us the moment one crosses zero.
+  const now0 = Math.floor(Date.now() / 1000);
+  const isComplete = c => {
+    if (c.completed || c.isCompleted || c.status === 'complete' || c.status === 'completed' || c.status === 'done') return true;
+    if (passiveCraftDuration(c.recipeId) == null) return false;   // unknown duration → trust the server only
+    const t = passiveCompletionTs(c);
+    return t > 0 && t <= now0;
+  };
   const processing = passive.filter(c => !isComplete(c));
   const ready      = passive.filter(c =>  isComplete(c));
 
@@ -2233,7 +2250,10 @@ function renderPassiveCraftsHtml(passive, itemMap) {
       g.count++;
       const bn = c.buildingName || 'Unknown Building';
       g.buildings[bn] = (g.buildings[bn]||0) + 1;
-      if (mode === 'processing') g.completions.push(passiveCompletionTs(c));
+      // Only record a completion time we actually KNOW (recipe duration is known). Unknown-duration
+      // crafts push 0 → they render as "Processing" with data-pts="0", so the timer never treats them
+      // as done (passiveCompletionTs would otherwise fall back to the start time, i.e. the past).
+      if (mode === 'processing') g.completions.push(passiveCraftDuration(c.recipeId) != null ? passiveCompletionTs(c) : 0);
     });
     return byLoc;
   };
