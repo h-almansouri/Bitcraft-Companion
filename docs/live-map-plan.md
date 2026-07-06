@@ -144,9 +144,14 @@ an instant fallback if the relay is down).
    type × region, rebuilds points from the SDK cache on live insert/update/delete (200 ms throttle),
    coords ÷1000. Behind `bcUseRelay` (localStorage `bc_use_relay=0` to disable); on connect failure it
    flips to the REST poll. Verified live: 1,397 Sagi Birds, movement streaming, clean untrack/retrack.
-4. **Optional (next):** `growth_timers` respawn overlay on top of the existing aggregate resource layer.
-5. **Polish (next):** unsubscribe when leaving the Map tab (currently streams while enemies are tracked,
-   even off-map); optional per-animal icons / kill fade.
+4. ~~**Polish:** unsubscribe when leaving the Map tab~~ ✅ done — relay is gated on the Map tab
+   (`bcRelaySync` from `switchTab` + `visibilitychange`); redraw skipped while `document.hidden`. Verified.
+5. **Respawn overlay (next, de-risked):** `growth_timers` is tiny — **~21 rows region-wide** (single digits
+   per resource type), coords plain Small-Hex (÷1), `endTimestamp` is a SpacetimeDB Timestamp. So it can be
+   a proper marker layer (not canvas dots) with live respawn countdowns. Needs: a `growth_timers` region
+   subscription, a Leaflet marker layer, a 1 s countdown ticker, and a small lifecycle tweak (keep the
+   relay up on the Map tab for the region overlay, independent of tracked enemies). Its own focused pass.
+6. **Optional:** per-animal icons / a brief fade on kill.
 
 ### Rebuilding the vendored bundle
 
