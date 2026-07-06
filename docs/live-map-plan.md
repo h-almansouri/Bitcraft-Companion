@@ -26,8 +26,33 @@ reconnect (no game credentials).
 
 - `enemyType` / `resourceId` are **type** ids → map straight onto our existing `bcCreatureIndex` /
   `bcResourceIndex` (names, icons, tiers).
-- `x/z` are Small-Hex coords (0–23040), the same space our player markers already plot in
-  (`L.latLng(z, x)`). **To verify** during gating (moving entities are "floating hex" but stored as i32).
+- **Coordinate scale differs per table** (verified in gating): `enemy_location` x/z are **milli-hex**
+  (÷1000 → map space, e.g. `27555312 → 27555`); `resource_location` / `growth_timers` x/z are **plain
+  Small-Hex** (÷1, e.g. `27120`). Both then plot via `L.latLng(z, x)`, the same space as player markers.
+
+## Gating results (verified against the live relay)
+
+- ✅ **Anonymous connect works** — relay issues an identity + token, no game auth.
+- ✅ **Live animals with per-entity IDs** — `enemy_location WHERE regionId=19` streams
+  `{entityId, enemyType, x, z, regionId}`; `onInsert/onUpdate/onDelete` fire (spawn / move / kill).
+- ✅ **Region + type filters work**; coordinate scale confirmed (above); reused bitcraftmap's generated
+  bindings with SDK 2.6.1.
+- ⚠️ **Volume is the deciding factor:**
+  - A single **animal type** in a region ≈ **1,400 rows** (Sagi Bird = 1,392). Fine for a canvas layer
+    with throttled redraw — and live movement is the whole reason to do this.
+  - A single **resource type** in a region ≈ **125,000 rows** (Sticks = 125,650). That's a firehose to
+    stream/hold live, and our existing aggregate poll returns the same set as one compressed fetch. **The
+    relay is not worth it for resources.**
+- ⚠️ The SDK logs "updating a row not present in cache" for deltas that arrive before the initial
+  snapshot applies — benign; **gate row callbacks on `onApplied`** (as bitcraftmap does).
+
+## Refined strategy (post-gating)
+
+- **Animals → relay.** Subscribe per tracked enemy type × region; this is the real, tractable win.
+- **Resources → keep the aggregate REST poll** (or a static dataset). Do **not** stream `resource_location`
+  live (125k+/type). Optionally overlay `growth_timers` (small, sparse) to show which nodes are respawning
+  and when — a light enhancement on top of the aggregate layer.
+- **Players →** stay on the bitjita WS for now.
 
 ## How subscription works (from `relay-service.ts`)
 
@@ -82,20 +107,21 @@ zero-dep proxy and re-implements cross-client subscription refcounting — not w
   enemy / resource / growth `onInsert/onUpdate/onDelete` callbacks once.
 - Lifecycle: **connect when the Map tab is active AND ≥1 resource/enemy is tracked; disconnect on leaving
   the map / untracking all** — reuse the exact conditions from `bcScheduleResourcePoll` / `bcStopResourcePoll`.
-- `bcRelaySubscribe()` — rebuild the subscription array from `bcTrackedRes` (each `kind:id`) × `bcMapRegion`
-  (or all regions if unset). Re-subscribe on track/untrack (`bcToggleMapItem`) and region change
-  (`bcSetMapRegion`) — same call sites that call `bcRefreshAllTracked` today.
+- `bcRelaySubscribe()` — rebuild the subscription array from the tracked **enemy** entries in
+  `bcTrackedRes` (`kind==='enemy'`) × `bcMapRegion` (require a region — don't subscribe region-wide).
+  Re-subscribe on track/untrack (`bcToggleMapItem`) and region change (`bcSetMapRegion`).
 - Callbacks patch `bcTrackedRes[key].pts` from the SDK cache and call `bcRedrawTracked()`, throttled with
-  `requestAnimationFrame` (animals move continuously).
+  `requestAnimationFrame` (animals move continuously; ~1.4k points/type).
 
-**Replace / gate the old path:** `bcFetchResourcePts` + `bcScheduleResourcePoll` (the 60 s REST poll)
-become the **fallback**, used only if the relay fails to connect. Behind a flag `bcUseRelay` (default on)
-so we can A/B and instantly revert.
+**Old path stays for resources:** `bcFetchResourcePts` + `bcScheduleResourcePoll` (the 60 s aggregate poll)
+remain the resource path — the relay's `resource_location` is a 125k+/type firehose and not worth it.
+For **enemies**, the relay replaces the poll (behind a flag `bcUseRelay`, default on, so the REST path is
+an instant fallback if the relay is down).
 
-**Rendering upgrades this unlocks (same data):**
-- Resources: `resource_location` = solid dots (up); `growth_timers` = faded dots + respawn countdown
-  (`endTimestamp`).
-- Enemies: dots that move / disappear live (the bccodex behavior).
+**Rendering:**
+- Enemies (relay): canvas dots that move / spawn / disappear live — the bccodex behavior.
+- Resources (aggregate, unchanged) + optional `growth_timers` relay overlay: faded dots + respawn
+  countdown (`endTimestamp`) for depleted nodes. Sparse, cheap — a nice-to-have layered on top.
 
 **Players:** leave on the bitjita WS for now (it works); optionally migrate to `player_location` /
 `player_state` later for a single live source.
@@ -112,11 +138,13 @@ so we can A/B and instantly revert.
 
 ## Build order (one feature, staged commits)
 
-1. **Gating setup** — vendor SDK + generate bindings; standalone Node script connects, subscribes to
-   `enemy_location` for one region, logs rows; confirm connection, data shape, and coordinate scale.
-2. **Enemies** end-to-end (subscribe → cache → `bcRedrawTracked`), behind `bcUseRelay`, with REST fallback.
-3. **Resources + growth timers** (up vs respawning).
-4. Flip default to relay, keep REST fallback; polish (respawn countdowns, throttled redraw).
+1. ~~**Gating setup**~~ ✅ done — SDK + bindings verified; live connect, animal data, region/type filters,
+   and per-table coordinate scale all confirmed (see Gating results).
+2. **Vendor** the SDK ESM bundle + the generated JS bindings into `mapassets/` (one-time codegen).
+3. **Enemies** end-to-end (per-type × region subscribe → SDK cache → throttled `bcRedrawTracked`), behind
+   `bcUseRelay`, with the aggregate REST path as instant fallback.
+4. **Optional:** `growth_timers` respawn overlay on top of the existing aggregate resource layer.
+5. Polish (reconnect/backoff, respawn countdowns, lifecycle tied to Map tab + tracked enemies).
 
 ## References
 
