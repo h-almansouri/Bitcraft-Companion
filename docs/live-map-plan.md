@@ -138,13 +138,27 @@ an instant fallback if the relay is down).
 
 ## Build order (one feature, staged commits)
 
-1. ~~**Gating setup**~~ ✅ done — SDK + bindings verified; live connect, animal data, region/type filters,
-   and per-table coordinate scale all confirmed (see Gating results).
-2. **Vendor** the SDK ESM bundle + the generated JS bindings into `mapassets/` (one-time codegen).
-3. **Enemies** end-to-end (per-type × region subscribe → SDK cache → throttled `bcRedrawTracked`), behind
-   `bcUseRelay`, with the aggregate REST path as instant fallback.
-4. **Optional:** `growth_timers` respawn overlay on top of the existing aggregate resource layer.
-5. Polish (reconnect/backoff, respawn countdowns, lifecycle tied to Map tab + tracked enemies).
+1. ~~**Gating setup**~~ ✅ done.
+2. ~~**Vendor** the SDK + bindings~~ ✅ done → `mapassets/prism-relay.js` (107 KB, browser ESM). Recipe below.
+3. ~~**Enemies** end-to-end~~ ✅ done — `bcRelay*` in `index.html` connects on enemy-track, subscribes per
+   type × region, rebuilds points from the SDK cache on live insert/update/delete (200 ms throttle),
+   coords ÷1000. Behind `bcUseRelay` (localStorage `bc_use_relay=0` to disable); on connect failure it
+   flips to the REST poll. Verified live: 1,397 Sagi Birds, movement streaming, clean untrack/retrack.
+4. **Optional (next):** `growth_timers` respawn overlay on top of the existing aggregate resource layer.
+5. **Polish (next):** unsubscribe when leaving the Map tab (currently streams while enemies are tracked,
+   even off-map); optional per-animal icons / kill fade.
+
+### Rebuilding the vendored bundle
+
+Bindings are bitcraftmap's generated `src/relay-bindings/` (SpacetimeDB CLI 2.4; SDK `spacetimedb@^2`).
+```
+# entry.ts: export { DbConnection, tables } from "./relay-bindings/index";
+npm i spacetimedb esbuild
+npx esbuild entry.ts --bundle --format=esm --platform=browser --target=es2020 --minify \
+  --outfile=mapassets/prism-relay.js
+```
+`index.html` loads it via `import(`${API}/mapassets/prism-relay.js`)` (proxy serves `.js` as
+`text/javascript` with `Access-Control-Allow-Origin: *`, so the cross-origin module import works).
 
 ## References
 
