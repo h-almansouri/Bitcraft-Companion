@@ -7304,7 +7304,7 @@ const ALERT_DEFAULTS = {
   types: {
     buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
     stamina:   { on:false, sound:'coin', dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
-    craftDone: { on:false, sound:'ding' },
+    craftDone: { on:false, sound:'ding', muteSecs:60 },     // muteSecs: after a craft-done ping, stay quiet this long (de-dupes a wave)
     idle:      { on:false, sound:'alarm', seconds:60 },
   }
 };
@@ -7480,7 +7480,8 @@ document.addEventListener('click', (e) => {
 let alertTimer = null;
 let alertState = {}; // entityId -> tracking between polls (baselines)
 const ALERT_POLL_MS = 15000;
-const CRAFT_DONE_MUTE_MS = 30000;  // after a "passive craft done" ping, stay quiet this long so a wave of stations finishing seconds apart pings once, not ten times
+// "Passive craft done" quiet window is per-player + configurable (alertSettings.types.craftDone.muteSecs,
+// default 60s; per-player override via palCraftMute) so a wave of stations finishing together pings once.
 // Per-player alert config: each tracked player's on/off + thresholds override the global default in
 // alertSettings.types. pal* return the EFFECTIVE value (player override if set, else the global default),
 // so existing setups keep working and each player can be tuned independently.
@@ -7488,10 +7489,12 @@ function palPlayers(){ loadAlerts(); if (!alertSettings.players || typeof alertS
 function palOn(id, key){ const p = palPlayers()[String(id)]; return (p && p[key] !== undefined) ? !!p[key] : !!(alertSettings.types[key] && alertSettings.types[key].on); }
 function palStaminaDrop(id){ const p = palPlayers()[String(id)]; return (p && p.staminaDrop != null) ? p.staminaDrop : (alertSettings.types.stamina.dropPct || 0); }
 function palIdleSecs(id){ const p = palPlayers()[String(id)]; return (p && p.idleSecs != null) ? p.idleSecs : (alertSettings.types.idle.seconds || 60); }
+function palCraftMute(id){ const p = palPlayers()[String(id)]; return (p && p.craftMuteSecs != null) ? p.craftMuteSecs : (alertSettings.types.craftDone.muteSecs != null ? alertSettings.types.craftDone.muteSecs : 60); }
 function palAnyOn(id){ return ['buffLost','stamina','craftDone','idle'].some(k => palOn(id, k)); }
 function setPlayerAlert(id, key, on){ const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {})[key] = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
 function setPlayerStaminaDrop(id, v){ let n = parseInt(v,10); if (isNaN(n)) n = 0; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).staminaDrop = Math.max(0, Math.min(99, n)); saveAlerts(); restartAlerts(); }
 function setPlayerIdleSecs(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 10) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).idleSecs = n; saveAlerts(); restartAlerts(); }
+function setPlayerCraftMute(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).craftMuteSecs = n; saveAlerts(); }
 function alertsEnabled(){ loadAlerts(); if (!alertsActive() || !trackedPlayers.length) return false; return activePlayers().some(p => !isPlayerAlertsMuted(p.entityId) && palAnyOn(p.entityId)); }
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
@@ -7559,7 +7562,7 @@ async function alertsTick(){
           const nowMs = Date.now();
           if (!(st.craftDoneMuteUntil > nowMs)){   // fire once, then mute so a wave of stations finishing seconds apart doesn't spam
             fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`);
-            st.craftDoneMuteUntil = nowMs + CRAFT_DONE_MUTE_MS;
+            st.craftDoneMuteUntil = nowMs + palCraftMute(id) * 1000;   // per-player quiet window (default 60s)
           }
         }
         // Rebuild the watch set from crafts still cooking (completion in the future).
@@ -7586,6 +7589,7 @@ function renderAlerts(){
     if (key==='buffLost') extra = `<select class="sj-input al-extra" onchange="setAlertScope(this.value)"><option value="food"${t.scope==='food'?' selected':''}>Food buff only</option><option value="any"${t.scope==='any'?' selected':''}>Any buff</option></select>`;
     if (key==='idle') extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${t.seconds}" class="sj-input" style="width:64px" onchange="setAlertIdleSecs(this.value)"> s</label>`;
     if (key==='stamina') extra = `<label class="al-secs" title="Only alert when stamina refills to full IF it first dropped below this % of max. 0 = alert on any refill.">only if it fell below <input type="number" min="0" max="99" step="5" value="${t.dropPct||0}" class="sj-input" style="width:56px" onchange="setAlertStaminaDrop(this.value)">%</label>`;
+    if (key==='craftDone') extra = `<label class="al-secs" title="After a craft-done ping, stay quiet this long so a wave of stations finishing together pings once.">quiet for <input type="number" min="0" step="5" value="${t.muteSecs!=null?t.muteSecs:60}" class="sj-input" style="width:56px" onchange="setAlertCraftMute(this.value)"> s</label>`;
     return `<div class="al-row${t.on?'':' al-off'}">
       <label class="al-toggle"><input type="checkbox" ${t.on?'checked':''} onchange="toggleAlertType('${key}',this.checked)"> <i class="ti ${m.icon}"></i> <span class="al-name">${m.label}</span></label>
       <div class="al-desc">${m.desc}</div>
@@ -7617,6 +7621,7 @@ function renderAlerts(){
       let extra = '';
       if (key === 'stamina' && on) extra = `<label class="al-secs" title="only alert if stamina first fell below this % of max (0 = any dip)">below <input type="number" min="0" max="99" step="5" value="${palStaminaDrop(id)}" class="sj-input" style="width:54px" onchange="setPlayerStaminaDrop('${id}',this.value)">%</label>`;
       if (key === 'idle' && on)    extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${palIdleSecs(id)}" class="sj-input" style="width:60px" onchange="setPlayerIdleSecs('${id}',this.value)">s</label>`;
+      if (key === 'craftDone' && on) extra = `<label class="al-secs" title="stay quiet this long after a craft-done ping (de-dupes a wave)">quiet <input type="number" min="0" step="5" value="${palCraftMute(id)}" class="sj-input" style="width:56px" onchange="setPlayerCraftMute('${id}',this.value)">s</label>`;
       return `<div class="al-pchip-wrap"><label class="al-pchip${on?' on':''}"><input type="checkbox" ${on?'checked':''} onchange="setPlayerAlert('${id}','${key}',this.checked)"> <i class="ti ${meta.icon}"></i> ${meta.label}</label>${extra}</div>`;
     }).join('');
     return `<div class="al-pcard${muted?' al-pcard-muted':''}">
@@ -7654,6 +7659,7 @@ function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v
 function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
 function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); saveAlerts(); restartAlerts(); }
 function setAlertStaminaDrop(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n)) n = 0; alertSettings.types.stamina.dropPct = Math.max(0, Math.min(99, n)); saveAlerts(); restartAlerts(); }
+function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; alertSettings.types.craftDone.muteSecs = n; saveAlerts(); }
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
 // ══════════════════════════════════════════════════════════════════════════
