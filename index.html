@@ -356,6 +356,15 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .craft-tab:hover{color:var(--text)}
 .craft-tab.active{color:var(--teal-light);border-bottom-color:var(--teal)}
 .craft-search{margin-bottom:1rem}
+/* Open Crafts (claim active-craft monitor) */
+.oc-toolbar{display:flex;align-items:center;gap:.6rem;margin-bottom:1rem;flex-wrap:wrap}
+.oc-search{flex:1;min-width:220px;max-width:360px}
+.oc-toggle{display:flex;align-items:center;gap:.35rem;font-size:12px;color:var(--text2);white-space:nowrap;cursor:pointer}
+.oc-claim-block{margin-bottom:0}
+.oc-badge-pub{background:rgba(29,158,117,.16);color:var(--teal-light)}
+.oc-badge-priv{background:var(--bg4);color:var(--text3)}
+.oc-badge-open{background:rgba(99,153,34,.14);color:var(--green-light)}
+.oc-badge-use{background:rgba(186,117,23,.16);color:var(--amber-light)}
 
 /* ── TASKS ── */
 .task-rotation{display:flex;align-items:center;gap:.75rem;padding:.6rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin-bottom:1.25rem;font-size:13px}
@@ -678,6 +687,7 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
     <div class="nav-item" data-tab="crafting" onclick="switchTab('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
     <div class="nav-item" data-tab="tasks" onclick="switchTab('tasks')"><i class="ti ti-checklist"></i> Tasks</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
+    <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts</div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
     <div class="nav-item" data-tab="deals" onclick="switchTab('deals')"><i class="ti ti-trending-up"></i> Deals</div>
     <div class="nav-item" data-tab="shopping" onclick="switchTab('shopping')"><i class="ti ti-shopping-cart"></i> Shopping List</div>
@@ -709,6 +719,7 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
     <div id="tab-market" style="display:none"><div id="market-content"></div></div>
     <div id="tab-deals" style="display:none"><div id="deals-content"></div></div>
     <div id="tab-shopping" style="display:none"><div id="shopping-content"></div></div>
+    <div id="tab-opencrafts" style="display:none"><div id="opencrafts-content"></div></div>
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
     <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
@@ -1173,9 +1184,10 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
+  if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
   document.getElementById('tab-' + tab).style.display = '';
@@ -1210,6 +1222,7 @@ function switchTab(tab) {
   else if (tab === 'tools') renderToolCrafting();
   else if (tab === 'effort') renderEffort();
   else if (tab === 'alerts') renderAlerts();
+  else if (tab === 'opencrafts') renderOpenCraftsTab();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
   bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
@@ -2346,6 +2359,167 @@ function renderPassiveCraftsHtml(passive, itemMap) {
 
   return sectionHtml('In Progress', 'ti-hourglass-high', {bg:'var(--bg2)', border:'var(--border2)', fg:'var(--text)'}, procByLoc, processing.length, 'processing')
        + sectionHtml('Ready to Claim', 'ti-circle-check', {bg:'rgba(99,153,34,.08)', border:'rgba(99,153,34,.25)', fg:'var(--green-light)'}, readyByLoc, ready.length, 'ready');
+}
+
+// ── OPEN CRAFTS (claim active-crafting-station monitor) ──
+// Shows the ACTIVE crafts running on stations at the claim(s) you pin. Active crafts are tagged with a
+// claimEntityId but bitjita has no claim-crafts endpoint, so we aggregate each claim member's active
+// crafts (/api/players/{id}/crafts) and keep the ones whose claimEntityId is that claim.
+let openCraftClaims = [];        // [{entityId,name,regionName,regionId}] pinned claims (persisted)
+let openCraftData = {};          // claimId -> { crafts:[], itemMap:{}, loading:bool, error:msg, ts }
+let openCraftPublicOnly = false; // filter to public (open-to-anyone) orders only (persisted)
+let openCraftLive = false;       // auto-refresh toggle (persisted)
+let openCraftLiveId = null;      // interval handle
+let ocSearchTimer = null;
+function saveOpenCraftClaims(){ safeSetItem('bc_opencraft_claims', JSON.stringify(openCraftClaims)); }
+
+function renderOpenCraftsTab(){
+  const el = document.getElementById('opencrafts-content'); if (!el) return;
+  el.innerHTML = `
+    <div class="oc-toolbar">
+      <div class="search-wrap oc-search">
+        <i class="ti ti-search si"></i>
+        <input id="oc-claim-input" placeholder="Search a claim to monitor…" autocomplete="off">
+        <div id="oc-search-results" class="search-results" style="display:none"></div>
+      </div>
+      <label class="oc-toggle" title="Only show public crafting orders (open for anyone to work)"><input type="checkbox" ${openCraftPublicOnly?'checked':''} onchange="setOpenCraftPublicOnly(this.checked)"> Public only</label>
+      <button class="btn ctrl-btn" onclick="refreshOpenCrafts()"><i class="ti ti-refresh"></i> Refresh</button>
+      <button id="oc-live-btn" class="btn live-btn${openCraftLive?' live-btn-on':''}" onclick="toggleOpenCraftLive()"><i class="ti ti-player-${openCraftLive?'pause':'play'}"></i> Live</button>
+    </div>
+    <div id="oc-claim-list"></div>`;
+  const input = document.getElementById('oc-claim-input');
+  input.addEventListener('input', () => {
+    clearTimeout(ocSearchTimer);
+    const q = input.value.trim();
+    if (q.length < 2){ ocHideResults(); return; }
+    ocSearchTimer = setTimeout(() => ocSearch(q), 350);
+  });
+  if (!window.__ocDocBound){ window.__ocDocBound = true; document.addEventListener('click', e => { if (!e.target.closest('.oc-search')) ocHideResults(); }); }
+  renderOpenCraftList();
+  openCraftClaims.forEach(c => { if (!openCraftData[c.entityId]) loadClaimActiveCrafts(c.entityId); });
+  if (openCraftLive) startOpenCraftLive();
+}
+function renderOpenCraftList(){
+  const list = document.getElementById('oc-claim-list'); if (!list) return;
+  if (!openCraftClaims.length){ list.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-building-factory-2"></i><span>Search a claim above to monitor its active crafting stations</span></div>'; return; }
+  list.innerHTML = openCraftClaims.map(c => `<div id="oc-claim-${c.entityId}" class="oc-claim-block"></div>`).join('');
+  openCraftClaims.forEach(c => renderClaimCraftsSection(c.entityId));
+}
+async function ocSearch(q){
+  try {
+    const d = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`);
+    const claims = d.claims || [];
+    const el = document.getElementById('oc-search-results'); if (!el) return;
+    if (!claims.length){ el.innerHTML = '<div class="search-result-item">No claims found</div>'; el.style.display = 'block'; return; }
+    el.innerHTML = claims.slice(0, 8).map(c => {
+      const pinned = openCraftClaims.some(x => String(x.entityId) === String(c.entityId));
+      return `<div class="search-result-item" onclick='ocAddClaim(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionName:c.regionName,regionId:c.regionId}))})'>${escHtml(c.name||'Unnamed claim')}${pinned?' <span style="color:var(--teal-light)">· pinned</span>':''}<small>${escHtml(c.regionName||('R'+c.regionId))} · ${fmtCount(c.numTiles||0)} tiles</small></div>`;
+    }).join('');
+    el.style.display = 'block';
+  } catch(e){ ocHideResults(); }
+}
+function ocHideResults(){ const el = document.getElementById('oc-search-results'); if (el) el.style.display = 'none'; }
+function ocAddClaim(raw){
+  const c = JSON.parse(raw);
+  if (!openCraftClaims.some(x => String(x.entityId) === String(c.entityId))) openCraftClaims.push(c);
+  saveOpenCraftClaims();
+  const input = document.getElementById('oc-claim-input'); if (input) input.value = '';
+  ocHideResults();
+  renderOpenCraftList();
+  loadClaimActiveCrafts(c.entityId);
+}
+function ocRemoveClaim(id){
+  id = String(id);
+  openCraftClaims = openCraftClaims.filter(c => String(c.entityId) !== id);
+  delete openCraftData[id];
+  saveOpenCraftClaims();
+  renderOpenCraftList();
+}
+// Aggregate active crafts across a claim's citizens, keeping only the ones AT this claim (still cooking).
+async function loadClaimActiveCrafts(claimId){
+  claimId = String(claimId);
+  openCraftData[claimId] = { ...(openCraftData[claimId]||{}), loading:true, error:null };
+  renderClaimCraftsSection(claimId);
+  try {
+    let cz = [];
+    try { cz = (await apiFetch(`/api/claims/${claimId}/citizens`)).citizens || []; } catch(e){}
+    if (!cz.length){ try { cz = (await apiFetch(`/api/claims/${claimId}/members`)).members || []; } catch(e){} }
+    const ids = cz.map(c => c.entityId || c.playerEntityId).filter(Boolean);
+    const itemMap = {}, crafts = [];
+    // small concurrency pool so a big claim doesn't fan out dozens of requests at once
+    let i = 0;
+    async function worker(){
+      while (i < ids.length){
+        const pid = ids[i++];
+        try {
+          const d = await apiFetch(`/api/players/${pid}/crafts?completed=all`);
+          (d.items||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
+          (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
+          (d.craftResults || d.crafts || []).forEach(cr => { if (String(cr.claimEntityId) === claimId && !cr.completed) crafts.push(cr); });
+        } catch(e){}
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(6, ids.length||1)}, worker));
+    crafts.sort((a,b) => (a.buildingName||'').localeCompare(b.buildingName||'') || (b.progress/b.totalActionsRequired||0) - (a.progress/a.totalActionsRequired||0));
+    openCraftData[claimId] = { crafts, itemMap, loading:false, error:null, ts:Date.now() };
+  } catch(e){
+    openCraftData[claimId] = { ...(openCraftData[claimId]||{}), loading:false, error: e.message || 'Failed to load' };
+  }
+  renderClaimCraftsSection(claimId);
+}
+function renderClaimCraftsSection(claimId){
+  claimId = String(claimId);
+  const host = document.getElementById('oc-claim-' + claimId); if (!host) return;
+  const claim = openCraftClaims.find(c => String(c.entityId) === claimId) || { name:'Claim', entityId:claimId };
+  const data = openCraftData[claimId] || {};
+  let crafts = data.crafts || [];
+  if (openCraftPublicOnly) crafts = crafts.filter(c => c.isPublic);
+  const now = Date.now();
+  const body = data.loading ? `<div class="craft-card">${loading()}</div>`
+    : data.error ? `<div class="craft-card"><span style="color:var(--red-light,#e06666)">${escHtml(data.error)}</span></div>`
+    : !crafts.length ? `<div class="craft-card"><span style="color:var(--text3)">No active crafts${openCraftPublicOnly?' (public)':''} at this claim right now.</span></div>`
+    : crafts.map(cr => {
+        const it = data.itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id];
+        const name = it ? itemLabel(it, cr.craftedItem[0].item_id, cr.craftedItem[0].item_type) : (cr.recipeName || ('Recipe #'+cr.recipeId));
+        const icon = it && it.iconAssetName ? gameIconImg(it.iconAssetName, 30) : '<i class="ti ti-hammer"></i>';
+        const total = cr.totalActionsRequired || 0, pct = total > 0 ? Math.max(0, Math.min(100, Math.round(cr.progress / total * 100))) : 0;
+        const locked = cr.lockExpiration && new Date(cr.lockExpiration).getTime() > now;
+        const cnt = cr.craftCount && cr.craftCount > 1 ? `${fmtCount(cr.craftCount)}× ` : '';
+        const pubBadge = cr.isPublic ? '<span class="badge oc-badge-pub">Public</span>' : '<span class="badge oc-badge-priv">Private</span>';
+        const useBadge = locked ? '<span class="badge oc-badge-use">In use</span>' : '<span class="badge oc-badge-open">Open</span>';
+        return `<div class="craft-card">
+          <div class="craft-card-icon">${icon}</div>
+          <div class="craft-card-body">
+            <div class="craft-card-name">${cnt}${escHtml(name)} ${pubBadge} ${useBadge}</div>
+            <div class="craft-card-meta"><i class="ti ti-building-factory-2" style="font-size:11px"></i> ${escHtml(cr.buildingName||'Station')} · by ${escHtml(cr.ownerUsername||'?')}</div>
+            <div class="craft-progress-wrap"><div class="craft-progress active" style="width:${pct}%"></div></div>
+          </div>
+          <span class="craft-status status-active">${pct}%</span>
+        </div>`;
+      }).join('');
+  const count = data.loading ? '' : `<span class="badge badge-tier" style="font-size:11px">${crafts.length}</span>`;
+  const region = claim.regionName ? `<span style="color:var(--text3)">${escHtml(claim.regionName)}</span>` : '';
+  host.innerHTML = `<div class="craft-location-card">
+    <div class="craft-location-header" style="cursor:default">
+      <div class="craft-location-name"><i class="ti ti-map-pin"></i> ${escHtml(claim.name)} ${region}</div>
+      <div class="craft-location-meta">${count}<i class="ti ti-x" title="Remove claim" style="cursor:pointer;font-size:15px" onclick="ocRemoveClaim('${claimId}')"></i></div>
+    </div>
+    <div>${body}</div>
+  </div>`;
+}
+function refreshOpenCrafts(){ openCraftClaims.forEach(c => loadClaimActiveCrafts(c.entityId)); }
+function setOpenCraftPublicOnly(on){ openCraftPublicOnly = !!on; safeSetItem('bc_opencraft_public', openCraftPublicOnly?'1':'0'); openCraftClaims.forEach(c => renderClaimCraftsSection(c.entityId)); }
+function startOpenCraftLive(){
+  if (openCraftLiveId) return;
+  openCraftLiveId = setInterval(() => { if (currentTab !== 'opencrafts' || document.hidden) return; refreshOpenCrafts(); }, 30000);
+}
+function stopOpenCraftLive(){ if (openCraftLiveId){ clearInterval(openCraftLiveId); openCraftLiveId = null; } }
+function toggleOpenCraftLive(){
+  openCraftLive = !openCraftLive;
+  safeSetItem('bc_opencraft_live', openCraftLive?'1':'0');
+  const btn = document.getElementById('oc-live-btn');
+  if (btn){ btn.classList.toggle('live-btn-on', openCraftLive); btn.innerHTML = `<i class="ti ti-player-${openCraftLive?'pause':'play'}"></i> Live`; }
+  if (openCraftLive){ startOpenCraftLive(); refreshOpenCrafts(); } else stopOpenCraftLive();
 }
 
 // ── TASKS ──
@@ -7340,6 +7514,9 @@ function effortMatrixHeatmap(grid){
   try { const am = JSON.parse(localStorage.getItem('bc_players_alerts_muted') || '[]'); if (Array.isArray(am)) playerAlertsMuted = new Set(am.map(String)); } catch(e) {}
   try { const tc = JSON.parse(localStorage.getItem('bc_task_traders_collapsed') || '[]'); if (Array.isArray(tc)) taskTraderCollapsed = new Set(tc); } catch(e) {}
   try { const sc = JSON.parse(localStorage.getItem('bc_skill_calc') || '{}'); if (sc && typeof sc === 'object') skillCalcPrefs = sc; } catch(e) {}
+  try { const oc = JSON.parse(localStorage.getItem('bc_opencraft_claims') || '[]'); if (Array.isArray(oc)) openCraftClaims = oc; } catch(e) {}
+  openCraftPublicOnly = localStorage.getItem('bc_opencraft_public') === '1';
+  openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
