@@ -289,6 +289,22 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .eff-b-craft{background:rgba(29,158,117,.16);color:var(--teal-light)}
 .eff-b-passive{background:rgba(111,92,240,.17);color:#b0a4f0}
 .eff-b-raw{background:var(--bg4);color:var(--text3)}
+.eff-qty{color:var(--text3);font-weight:600}
+.eff-clickable{cursor:pointer}
+table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
+.eff-det{margin-top:1rem;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:.85rem 1rem}
+.eff-det-hdr{display:flex;align-items:center;font-size:14px;color:var(--text);margin-bottom:.6rem}
+.eff-det-x{cursor:pointer;color:var(--text3);font-size:16px}
+.eff-det-x:hover{color:var(--text)}
+.eff-det-tbl{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:.7rem}
+.eff-det-tbl td{padding:.35rem .2rem;border-bottom:1px solid var(--border);color:var(--text2)}
+.eff-det-tbl td.eff-det-num{text-align:right;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:.75rem}
+.eff-det-tbl tr.eff-det-total td{border-bottom:none;color:var(--text);font-weight:600;padding-top:.5rem}
+.eff-det-tbl tr.eff-det-total td.eff-det-num{color:var(--teal-light);font-size:14px}
+.eff-det-dim{color:var(--text3);font-weight:400}
+.eff-det-sub{font-size:11px;color:var(--text3);margin:.3rem 0 .45rem}
+.eff-det-tree{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:.5rem .7rem}
+.eff-det-note{font-size:11px;color:var(--text3);margin-top:.6rem;line-height:1.45}
 /* alerts / notifications */
 .al-wrap{max-width:760px}
 .al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
@@ -7757,6 +7773,8 @@ const EFFORT_MATRIX_DEFAULT = ['Ingot','Plank','Rope','Leather','Raw Pelt','Wood
 let effortMatrixRows = null;                 // ordered catalog keys shown as rows (persisted)
 let effortCatalog = null, effortCatalogByKey = {};   // discovered families: key -> { key, label, tiers:{t:item} }
 let effortMatrixGrid = [];                   // last-built grid (for the heatmap)
+let effortCellIndex = {};                    // item.id -> cell (for the click-to-expand breakdown)
+let effortDetailOpen = null;                 // item.id of the currently expanded cell
 async function loadEffortData(){
   if (effortData) return;
   const d = await apiFetch('/effort-data?v=2');
@@ -7867,13 +7885,14 @@ async function effortPrice(id){
   catch(e){ effortPriceCache[id] = null; return null; }
 }
 function fmtEffort(n){ if (n>=100) return Math.round(n).toString(); if (n>=1) return (Math.round(n*10)/10).toString(); return (Math.round(n*100)/100).toString(); }
-function effortTreeHtml(id, memo, depth){
+function effortTreeHtml(id, memo, depth, qty){
   const e = memo.get(id); if (!e) return '';
   const it = (craftingData.itemsById[id]) || { name:'#'+id };
   const B = { gather:'eff-b-gather', craft:'eff-b-craft', passive:'eff-b-passive', raw:'eff-b-raw' }[e.how] || 'eff-b-raw';
-  const tag = e.how==='craft' ? `craft · ${e.actions} act` : (e.how==='passive' ? 'passive · 0' : (e.how==='gather' ? 'gather' : 'raw'));
-  let html = `<div class="eff-node" style="padding-left:${depth*18}px"><span class="eff-eff">${fmtEffort(e.effort)}</span><span style="flex:1">${escHtml(it.name)}</span><span class="eff-badge ${B}">${tag}</span></div>`;
-  if (e.kids && depth < 6) for (const k of e.kids) html += `<div class="eff-node" style="padding-left:${(depth+1)*18}px;color:var(--text3);font-size:11px">${k.qty}×</div>` + effortTreeHtml(k.id, memo, depth+1);
+  const tag = e.how==='craft' ? `craft · ${e.actions} act` : (e.how==='passive' ? 'passive · 0 act' : (e.how==='gather' ? 'gather' : 'raw'));
+  const q = (qty && qty !== 1) ? `<span class="eff-qty">${fmtCount(qty)}×</span> ` : '';
+  let html = `<div class="eff-node" style="padding-left:${depth*16}px"><span class="eff-eff">${fmtEffort(e.effort)}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${q}${escHtml(it.name)}</span><span class="eff-badge ${B}">${tag}</span></div>`;
+  if (e.kids && depth < 6) for (const k of e.kids) html += effortTreeHtml(k.id, memo, depth+1, k.qty);
   return html;
 }
 // Discover the family catalog from item names (once). Group items by "core" after stripping a leading
@@ -7974,13 +7993,15 @@ async function renderEffortMatrix(seq){
       const e = effItem ? computeEffort(effItem.id, toolMap, memo, undefined, skills) : null;
       if (e == null){ row.tiers[t] = { item:priceItem, blocked:true }; continue; }      // has a path but skill/tool gated
       if (!(e.effort > 0)){ row.tiers[t] = { item:priceItem, nodata:true }; continue; } // no gather/recipe effort data
-      const c = { item:priceItem, tier:t, e, price: effortPriceCache[priceItem.id], hpe:null };
+      const c = { item:priceItem, tier:t, e, effId: effItem.id, price: effortPriceCache[priceItem.id], hpe:null };
       if (c.price != null) c.hpe = c.price / e.effort;
       row.tiers[t] = c; if (c.price === undefined) cells.push(c);
     }
     return row;
   }).filter(Boolean);
   effortMatrixGrid = grid;
+  effortDetailOpen = null;   // a fresh matrix render closes any open breakdown
+  effortCellIndex = {}; grid.forEach(r => Object.values(r.tiers).forEach(c => { if (c && c.item && c.e) effortCellIndex[String(c.item.id)] = c; }));
   const head = `<tr><th class="eff-mx-fam"></th>${Array.from({length:10},(_,i)=>`<th>T${i+1}</th>`).join('')}</tr>`;
   const bodyRows = grid.map(row => {
     const tds = Array.from({length:10}, (_, i) => {
@@ -7989,13 +8010,14 @@ async function renderEffortMatrix(seq){
       if (c.blocked) return `<td class="eff-mx-blocked" title="${escHtml(c.item.name)} — your skills/tools can't make this yet">✕</td>`;
       if (c.nodata) return `<td class="eff-mx-empty" title="${escHtml(c.item.name)} — no gather/recipe effort data">—</td>`;
       const disp = c.hpe!=null ? fmtHpe(c.hpe) : (c.price===undefined ? '·' : '—');
-      return `<td id="eff-mx-${c.item.id}" title="${escHtml(c.item.name)} · ${fmtEffort(c.e.effort)} effort">${disp}</td>`;
+      return `<td id="eff-mx-${c.item.id}" class="eff-clickable" onclick="effortCellDetail('${c.item.id}')" title="${escHtml(c.item.name)} · ${fmtEffort(c.e.effort)} effort — click for the breakdown">${disp}</td>`;
     }).join('');
     return `<tr><th class="eff-mx-fam"><button class="eff-mx-x" title="Remove row" onclick="effortMatrixRemove(&quot;${escHtml(row.key)}&quot;)">×</button>${escHtml(row.label)}</th>${tds}</tr>`;
   }).join('');
   const table = grid.length ? `<div class="eff-mx-wrap"><table class="eff-mx">${head}${bodyRows}</table></div>` : '<div class="empty"><span>No rows — add a material above.</span></div>';
-  body.innerHTML = `<div class="eff-mx-meta">Cells = hex / effort for the base material at each tier, greener = better. <span class="eff-mx-blocked-k">✕</span> = your skills/tools can't make it yet · <b>—</b> = no market/effort data · <span style="color:var(--text3)">blank = no such tier</span>. <span id="eff-mx-prog" style="margin-left:.4rem"></span></div>
-    ${table}`;
+  body.innerHTML = `<div class="eff-mx-meta">Cells = hex / effort for the base material at each tier, greener = better. Click a cell for the math. <span class="eff-mx-blocked-k">✕</span> = your skills/tools can't make it yet · <b>—</b> = no market/effort data · <span style="color:var(--text3)">blank = no such tier</span>. <span id="eff-mx-prog" style="margin-left:.4rem"></span></div>
+    ${table}
+    <div id="eff-mx-detail"></div>`;
   // price the cells, then colour the grid as a heatmap
   let done = 0; const total = cells.length; let idx = 0;
   const prog = () => { const p = document.getElementById('eff-mx-prog'); if (p) p.textContent = done<total ? `pricing ${done}/${total}…` : ''; };
@@ -8016,6 +8038,38 @@ async function renderEffortMatrix(seq){
   if (seq !== effortSeq) return;
   effortMatrixHeatmap(grid);
 }
+// Click a matrix cell → expand a breakdown of how its hex/effort was computed.
+function effortCellDetail(itemId){
+  itemId = String(itemId);
+  const det = document.getElementById('eff-mx-detail'); if (!det) return;
+  document.querySelectorAll('#eff-body td.eff-sel').forEach(td => td.classList.remove('eff-sel'));
+  if (effortDetailOpen === itemId){ effortDetailOpen = null; det.innerHTML = ''; return; }   // toggle off
+  const c = effortCellIndex[itemId]; if (!c || !c.e) return;
+  effortDetailOpen = itemId;
+  const td = document.getElementById('eff-mx-' + itemId); if (td) td.classList.add('eff-sel');
+  const price = c.price, effort = c.e.effort;
+  const hpe = (price != null && effort > 0) ? price / effort : null;
+  const tierBadge = c.tier ? `<span class="badge badge-tier" style="margin-left:.35rem">T${c.tier}</span>` : '';
+  const priceStr = price === undefined ? 'loading…' : (price == null ? 'no market data'
+    : ((price >= 100 ? Math.round(price).toLocaleString() : String(Math.round(price*100)/100)) + ' ⬡'));  // keep small prices precise so value ÷ effort reads right
+  const method = c.e.how === 'gather' ? 'gathered — damage dealt to a node per unit yielded'
+    : c.e.how === 'craft'   ? `crafted — ${c.e.actions} action${c.e.actions===1?'':'s'}${(c.e.kids&&c.e.kids.length)?' + inputs':''}${c.e.outQty>1?(', ÷ '+c.e.outQty+' output'):''}`
+    : c.e.how === 'passive' ? 'passive craft — 0 active actions + inputs'
+    : 'raw base material';
+  det.innerHTML = `<div class="eff-det">
+    <div class="eff-det-hdr"><b>${escHtml(c.item.name)}</b>${tierBadge}<span style="flex:1"></span><i class="ti ti-x eff-det-x" title="Close" onclick="effortCellClose()"></i></div>
+    <table class="eff-det-tbl">
+      <tr><td>Market value <span class="eff-det-dim">(bitjita 7-day avg)</span></td><td class="eff-det-num">${priceStr}</td></tr>
+      <tr><td>Effort to produce 1 <span class="eff-det-dim">(${escHtml(method)})</span></td><td class="eff-det-num">${fmtEffort(effort)}</td></tr>
+      <tr class="eff-det-total"><td>Hex per effort <span class="eff-det-dim">= value ÷ effort</span></td><td class="eff-det-num">${hpe!=null?fmtHpe(hpe):'—'}</td></tr>
+    </table>
+    <div class="eff-det-sub">Effort breakdown — min-effort path per 1 unit &nbsp;<span class="eff-det-dim">(effort · item · method)</span></div>
+    <div class="eff-det-tree">${effortTreeHtml(c.effId, effortMemo, 0)}</div>
+    <div class="eff-det-note">Effort is the work to make one unit from raw: gather damage + active craft actions (passive crafts cost 0), summed down the recipe tree. It's tool-independent — a better tool is faster, not less effort. Greener cells = more hex per unit of effort.</div>
+  </div>`;
+  det.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function effortCellClose(){ effortDetailOpen = null; const det = document.getElementById('eff-mx-detail'); if (det) det.innerHTML = ''; document.querySelectorAll('#eff-body td.eff-sel').forEach(td => td.classList.remove('eff-sel')); }
 function effortMatrixHeatmap(grid){
   const vals = [];
   grid.forEach(r => Object.values(r.tiers).forEach(c => { if (c && c.hpe!=null) vals.push(c.hpe); }));
