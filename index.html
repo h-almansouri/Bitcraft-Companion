@@ -428,6 +428,10 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .oc-pin{cursor:pointer;font-size:15px;color:var(--text3);transform:rotate(45deg)}
 .oc-pin:hover{color:var(--text)}
 .oc-pin.on{color:var(--teal-light)}
+.oc-home{cursor:pointer;font-size:15px;color:var(--text3)}
+.oc-home:hover{color:var(--text)}
+.oc-home.on{color:var(--amber-light)}
+.oc-home-tag{font-size:9px;font-weight:700;letter-spacing:.04em;color:var(--amber-light);background:rgba(186,117,23,.16);padding:1px 5px;border-radius:3px}
 
 /* ── TASKS ── */
 .task-rotation{display:flex;align-items:center;gap:.75rem;padding:.6rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin-bottom:1.25rem;font-size:13px}
@@ -2443,8 +2447,12 @@ let ocRegions = {};                // regionId -> name
 let ocGroupsById = {};             // claimId -> group, so a collapse/expand re-renders just one card
 let ocOpenDrop = null;             // which filter dropdown is open ('region'|'tier'|'skill'|'claim')
 let ocSkillQuery = '', ocClaimQuery = '';
+let ocHome = null;                 // { entityId, name, x, z } — home claim to measure distance from (persisted)
+let ocSortMode = 'crafts';         // claim sort: 'crafts' (most total crafts) | 'distance' (nearest home first) (persisted)
 let openCraftLive = false, openCraftLiveId = null, ocSearchTimer = null;
 const OC_PAGE = 25;
+function ocSaveHome(){ safeSetItem('bc_opencraft_home', ocHome ? JSON.stringify(ocHome) : ''); }
+function ocSaveSort(){ safeSetItem('bc_opencraft_sort', ocSortMode); }
 function saveOpenCraftClaims(){ safeSetItem('bc_opencraft_claims', JSON.stringify(openCraftClaims)); }
 function saveOpenCraftCollapsed(){ safeSetItem('bc_opencraft_collapsed', JSON.stringify([...openCraftCollapsed])); }
 function saveOpenCraftProfOpen(){ safeSetItem('bc_opencraft_profopen', JSON.stringify([...openCraftProfOpen])); }
@@ -2470,6 +2478,8 @@ function ocTierBadge(t, suffix, extraClass){
   return `<span class="skill-tier-badge ${extraClass||''}" style="--tc:${col.c}">${t?('T'+t):'—'}${suffix||''}</span>`;
 }
 function ocProfId(cr){ const l = (cr.levelRequirements&&cr.levelRequirements[0]) || (cr.experiencePerProgress&&cr.experiencePerProgress[0]); return l ? l.skill_id : 0; }
+function ocTierOf(cr){ const it = openCraftAll.itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id]; return it && it.tier > 0 ? it.tier : 0; }
+function ocClaimDist(g){ if (!ocHome || g.x == null || g.z == null) return Infinity; const dx = (+g.x) - (+ocHome.x), dz = (+g.z) - (+ocHome.z); return Math.sqrt(dx*dx + dz*dz); }
 
 function renderOpenCraftsTab(){
   const el = document.getElementById('opencrafts-content'); if (!el) return;
@@ -2502,6 +2512,7 @@ function ocRenderFilterBar(){
     ${btn('tier','ti-stack-2')}
     ${btn('skill','ti-tools')}
     ${btn('claim','ti-building-community')}
+    <button class="oc-fbtn oc-sortbtn${ocSortMode==='distance'?' on':''}" title="${ocHome?'':'Set a home claim (home icon on a card) to sort by distance'}" onclick="ocCycleSort()"><i class="ti ti-arrows-sort"></i> <span class="oc-fbtn-lbl">Sort: ${ocSortMode==='distance'&&ocHome?'Nearest home':'Most crafts'}</span></button>
     ${anyFilter?'<button class="oc-clear" onclick="ocClearFilters()"><i class="ti ti-x"></i> Clear</button>':''}
     <span style="flex:1"></span>
     <button class="btn ctrl-btn" onclick="ocFetchGlobal(true)"><i class="ti ti-refresh"></i> Refresh</button>
@@ -2517,8 +2528,10 @@ function ocGroups(){
   if (ocFilterSkills.size)  crafts=crafts.filter(c=>ocFilterSkills.has(ocProfId(c)));
   if (ocFilterTiers.size)   crafts=crafts.filter(c=>{ const it=openCraftAll.itemMap[c.craftedItem&&c.craftedItem[0]&&c.craftedItem[0].item_id]; return ocFilterTiers.has(it&&it.tier>0?it.tier:0); });
   const byClaim={};
-  crafts.forEach(c=>{ const id=String(c.claimEntityId); (byClaim[id] = byClaim[id] || { id, name:c.claimName||'Claim', regionId:c.regionId, crafts:[] }).crafts.push(c); });
-  const groups = Object.values(byClaim).sort((a,b)=> b.crafts.length - a.crafts.length);  // most total crafts first
+  crafts.forEach(c=>{ const id=String(c.claimEntityId); (byClaim[id] = byClaim[id] || { id, name:c.claimName||'Claim', regionId:c.regionId, x:c.claimLocationX, z:c.claimLocationZ, crafts:[] }).crafts.push(c); });
+  const groups = Object.values(byClaim);
+  if (ocSortMode==='distance' && ocHome) groups.sort((a,b)=> ocClaimDist(a) - ocClaimDist(b));  // nearest home first
+  else groups.sort((a,b)=> b.crafts.length - a.crafts.length);                                    // most total crafts first
   ocGroupsById = {}; groups.forEach(g=>ocGroupsById[g.id]=g);
   return groups;
 }
@@ -2644,6 +2657,17 @@ function ocTogglePin(raw){ const o=JSON.parse(raw); const id=String(o.id);
   else openCraftClaims.push({entityId:id, name:o.name, regionId:o.regionId});
   saveOpenCraftClaims(); ocRerenderCard(id); if (ocScope==='pinned') ocRenderBrowse();
 }
+function ocToggleHome(raw){ const o=JSON.parse(raw); const id=String(o.entityId);
+  if (ocHome && String(ocHome.entityId)===id){ ocHome=null; ocSortMode='crafts'; }        // clicking the home claim clears it
+  else { ocHome={entityId:id, name:o.name, x:o.x, z:o.z}; ocSortMode='distance'; }          // set home → sort by distance
+  ocSaveHome(); ocSaveSort(); ocRenderFilterBar(); ocRenderBrowse();
+}
+function ocCycleSort(){
+  if (ocSortMode==='distance') ocSortMode='crafts';
+  else if (ocHome) ocSortMode='distance';
+  else return;   // no home set → nothing to sort by distance from
+  ocSaveSort(); ocRenderFilterBar(); ocRenderBrowse();
+}
 function ocToggleClaim(id){ id=String(id); if (openCraftCollapsed.has(id)) openCraftCollapsed.delete(id); else openCraftCollapsed.add(id); saveOpenCraftCollapsed(); ocRerenderCard(id); }
 function ocToggleProf(id, sid){ const k=id+':'+sid; if (openCraftProfOpen.has(k)) openCraftProfOpen.delete(k); else openCraftProfOpen.add(k); saveOpenCraftProfOpen(); ocRerenderCard(id); }
 async function ocLoadMyClaims(){
@@ -2692,7 +2716,7 @@ function ocClaimCardHtml(g){
     const open = openCraftProfOpen.has(claimId + ':' + p.sid);
     const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
       .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
-    const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
+    const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> ocTierOf(b)-ocTierOf(a) || Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
     return `<div class="oc-prof">
       <div class="oc-prof-hdr" onclick="ocToggleProf('${claimId}','${p.sid}')">
         <i class="ti ${ocSkillIcon(p.name)} oc-prof-ico"></i>
@@ -2707,14 +2731,19 @@ function ocClaimCardHtml(g){
     </div>`;
   }).join('');
   const pinned = ocIsPinned(claimId);
+  const isHome = ocHome && String(ocHome.entityId) === claimId;
+  const dist = (ocHome && !isHome) ? ocClaimDist(g) : null;
+  const distLabel = isHome ? ' · <span class="oc-home-tag">HOME</span>'
+    : (dist != null && isFinite(dist)) ? ` · ${fmtCount(Math.round(dist))} tiles from home` : '';
   return `<div class="craft-location-card">
     <div class="craft-location-header oc-claim-hdr" onclick="ocToggleClaim('${claimId}')">
       <div class="craft-location-name" style="flex-direction:column;align-items:flex-start;gap:1px">
         <span><i class="ti ti-map-pin"></i> <b>${escHtml(g.name)}</b> ${region}</span>
-        <span class="oc-claim-sub">${crafts.length} craft${crafts.length!==1?'s':''} · ${fmtCount(totalLeft)} actions remaining · ${profCount} profession${profCount!==1?'s':''}</span>
+        <span class="oc-claim-sub">${crafts.length} craft${crafts.length!==1?'s':''} · ${fmtCount(totalLeft)} actions remaining · ${profCount} profession${profCount!==1?'s':''}${distLabel}</span>
       </div>
       <div class="craft-location-meta">
         ${totalActive?`<span class="oc-active-pill oc-active-pill-lg"><i class="ti ti-bolt" style="font-size:11px"></i> ${totalActive} active</span>`:''}
+        <i class="ti ti-home oc-home${isHome?' on':''}" title="${isHome?'Home claim (click to clear)':'Set as home — sort claims by distance'}" onclick='event.stopPropagation();ocToggleHome(${JSON.stringify(JSON.stringify({entityId:claimId,name:g.name,x:g.x,z:g.z}))})'></i>
         <i class="ti ti-pin${pinned?'-filled':''} oc-pin${pinned?' on':''}" title="${pinned?'Unpin claim':'Pin claim'}" onclick='event.stopPropagation();ocTogglePin(${JSON.stringify(JSON.stringify({id:claimId,name:g.name,regionId:g.regionId}))})'></i>
         <i class="ti ti-chevron-${collapsed?'down':'up'}"></i>
       </div>
@@ -7732,6 +7761,8 @@ function effortMatrixHeatmap(grid){
   try { const oq = JSON.parse(localStorage.getItem('bc_opencraft_collapsed') || '[]'); if (Array.isArray(oq)) openCraftCollapsed = new Set(oq.map(String)); } catch(e) {}
   try { const op = JSON.parse(localStorage.getItem('bc_opencraft_profopen') || '[]'); if (Array.isArray(op)) openCraftProfOpen = new Set(op.map(String)); } catch(e) {}
   try { const of = JSON.parse(localStorage.getItem('bc_opencraft_filters') || '{}'); if (of && typeof of === 'object'){ ocFilterTiers = new Set((of.tiers||[]).map(Number)); ocFilterSkills = new Set((of.skills||[]).map(Number)); ocFilterRegions = new Set((of.regions||[]).map(Number)); ocScope = of.scope || 'all'; ocScopeName = of.scopeName || ''; } } catch(e) {}
+  try { const oh = localStorage.getItem('bc_opencraft_home'); if (oh) ocHome = JSON.parse(oh); } catch(e) {}
+  ocSortMode = localStorage.getItem('bc_opencraft_sort') === 'distance' ? 'distance' : 'crafts';
   openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
