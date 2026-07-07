@@ -99,6 +99,13 @@ main.planner-mode{max-width:none;padding:1rem}
 .badge-tier{background:var(--bg4);color:var(--text2)}
 .badge-sell{background:var(--red-dim);color:#f09595}
 .badge-buy{background:var(--green-dim);color:var(--green-light)}
+.ord-section-hdr{display:flex;align-items:center;gap:.5rem;margin:1rem 0 .6rem;padding:.5rem .85rem;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;font-weight:600;font-size:13px;color:var(--c,var(--text))}
+.ord-row{display:flex;align-items:center;gap:.5rem;padding:.5rem .9rem;border-top:1px solid var(--border);font-size:12px}
+.ord-item{display:flex;align-items:center;gap:.4rem;min-width:0}
+.ord-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.ord-qty{color:var(--text2);font-size:11px;white-space:nowrap}
+.ord-coins{color:var(--amber-light);font-weight:600;white-space:nowrap}
+.price-sell,.price-buy{font-weight:600;white-space:nowrap}
 .badge-common{background:var(--bg4);color:var(--text2)}
 .badge-uncommon{background:rgba(99,153,34,.15);color:#97c459}
 .badge-rare{background:rgba(85,160,245,.22);color:#a8d0ff;border:1px solid rgba(85,160,245,.35)}
@@ -753,6 +760,7 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
     <div class="nav-item" data-tab="inventory" onclick="switchTab('inventory')"><i class="ti ti-backpack"></i> Inventory</div>
     <div class="nav-item" data-tab="crafting" onclick="switchTab('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
     <div class="nav-item" data-tab="tasks" onclick="switchTab('tasks')"><i class="ti ti-checklist"></i> Tasks</div>
+    <div class="nav-item" data-tab="orders" onclick="switchTab('orders')"><i class="ti ti-receipt-2"></i> Orders</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
     <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts <span class="nav-wip">WIP</span></div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
@@ -783,6 +791,7 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
     <div id="tab-inventory" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-crafting" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-tasks" style="display:none"><div id="tasks-content"></div></div>
+    <div id="tab-orders" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-market" style="display:none"><div id="market-content"></div></div>
     <div id="tab-deals" style="display:none"><div id="deals-content"></div></div>
     <div id="tab-shopping" style="display:none"><div id="shopping-content"></div></div>
@@ -1251,7 +1260,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
@@ -1290,6 +1299,7 @@ function switchTab(tab) {
   else if (tab === 'effort') renderEffort();
   else if (tab === 'alerts') renderAlerts();
   else if (tab === 'opencrafts') renderOpenCraftsTab();
+  else if (tab === 'orders') renderOrdersTab();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
   bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
@@ -1298,6 +1308,7 @@ function loadTab(tab, silent=false) {
   if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
   if (tab === 'inventory') { renderInventoryTab(silent); return; } // multi-player: one section per player
   if (tab === 'crafting') { renderCraftingTab(silent); return; }
+  if (tab === 'orders') { renderOrdersTab(silent); return; }
 }
 
 // ── PLAYER SEARCH ──
@@ -1874,7 +1885,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
 // ── LIVE REFRESH ──
 let liveRefreshId = null;
 const tabLiveIds = {};   // user-controlled per-tab live refresh
-const REFRESH_MS = {skills:10000, inventory:30000, crafting:10000, tasks:10000};
+const REFRESH_MS = {skills:10000, inventory:30000, crafting:10000, tasks:10000, orders:30000};
 function startLiveRefresh(tab) {
   stopLiveRefresh();
   const ms = REFRESH_MS[tab];
@@ -2085,6 +2096,97 @@ async function renderInventoryTab(silent) {
     fillPlayerInvCached(p.entityId);
   }));
   startLiveRefresh('inventory');
+}
+
+// ── ORDERS (market listings + collections) ──
+// Per tracked player: /api/players/{id}/market → { sellOrders, buyOrders }. Each order carries its
+// claim + region + item. "Collections to pick up" = sell orders with storedCoins > 0 (coins earned from
+// sales, awaiting collection). Buy-order storedCoins is just the escrow (price×qty), so it's not a
+// collection — and the API doesn't expose the items a filled buy order yields, so those aren't shown.
+let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders }
+async function fetchPlayerMarket(id){
+  const d = await apiFetch(`/api/players/${id}/market`);
+  return { sellOrders: d.sellOrders || [], buyOrders: d.buyOrders || [] };
+}
+function ordersContentHtml(data){
+  if (!data) return '';
+  const num = x => +x || 0;
+  const sells = data.sellOrders || [], buys = data.buyOrders || [];
+  const orders = [
+    ...sells.filter(o => num(o.quantity) > 0).map(o => ({ ...o, kind:'sell' })),
+    ...buys.filter(o => num(o.quantity) > 0).map(o => ({ ...o, kind:'buy' })),
+  ];
+  const collections = sells.filter(o => num(o.storedCoins) > 0).map(o => ({ ...o, coins: num(o.storedCoins) }));
+  if (!orders.length && !collections.length)
+    return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No market orders or collections</span></div>';
+
+  const groupByLoc = arr => {
+    const g = {};
+    arr.forEach(o => { const k = o.claimEntityId || o.claimName || '?'; if (!g[k]) g[k] = { name:o.claimName||'Unknown', regionId:o.regionId, regionName:o.regionName, items:[] }; g[k].items.push(o); });
+    return Object.values(g).sort((a,b) => b.items.length - a.items.length);
+  };
+  const icon = o => o.iconAssetName ? gameIconImg(o.iconAssetName, 22) : '';
+  const tierB = o => (o.tier > 0) ? ocTierBadge(o.tier) : '';
+  const nameCell = o => `<span class="ord-item">${icon(o)} <span class="ord-name">${escHtml(o.itemName||('Item '+o.itemId))}</span> ${tierB(o)}</span>`;
+  const region = loc => `<span class="oc-region">${escHtml(loc.regionName||('R'+loc.regionId))} (R${loc.regionId})</span>`;
+  const locCard = (loc, rows, meta) => `<div class="craft-location-card">
+    <div class="craft-location-header" style="cursor:default">
+      <div class="craft-location-name"><i class="ti ti-map-pin"></i> <b>${escHtml(loc.name)}</b> ${region(loc)}</div>
+      <div class="craft-location-meta">${meta}</div>
+    </div>
+    <div>${rows}</div>
+  </div>`;
+  const orderRow = o => `<div class="ord-row">
+    <span class="badge badge-${o.kind}">${o.kind==='sell'?'Sell':'Buy'}</span>
+    ${nameCell(o)}<span style="flex:1"></span>
+    <span class="ord-qty">×${fmtCount(num(o.quantity))}</span>
+    <span class="price-${o.kind}">${fmtCoin(num(o.priceThreshold))}</span>
+  </div>`;
+  const collRow = o => `<div class="ord-row">${nameCell(o)}<span style="flex:1"></span><span class="ord-coins">${fmtCoin(o.coins)}</span></div>`;
+  const sectionHdr = (label, ic, color, total) => `<div class="ord-section-hdr" style="--c:${color}"><i class="ti ${ic}"></i> <span>${label}</span><span style="flex:1"></span><span class="badge badge-tier">${total}</span></div>`;
+
+  let html = '';
+  if (collections.length){
+    const groups = groupByLoc(collections);
+    html += sectionHdr('Collections to pick up', 'ti-coins', 'var(--amber-light)', collections.length);
+    html += groups.map(loc => locCard(loc, loc.items.map(collRow).join(''), `<span class="ord-coins">${fmtCoin(loc.items.reduce((s,o)=>s+o.coins,0))}</span>`)).join('');
+  }
+  if (orders.length){
+    const groups = groupByLoc(orders);
+    html += sectionHdr('Listed orders', 'ti-receipt-2', 'var(--text)', orders.length);
+    html += groups.map(loc => {
+      const s = loc.items.filter(o=>o.kind==='sell').length, b = loc.items.filter(o=>o.kind==='buy').length;
+      const meta = `${s?`<span class="badge badge-sell">${s} sell</span>`:''} ${b?`<span class="badge badge-buy">${b} buy</span>`:''}`;
+      // sells first, then buys, each by item name
+      const rows = loc.items.slice().sort((a,b)=> (a.kind===b.kind ? (a.itemName||'').localeCompare(b.itemName||'') : (a.kind==='sell'?-1:1))).map(orderRow).join('');
+      return locCard(loc, rows, meta);
+    }).join('');
+  }
+  return html;
+}
+function fillPlayerOrdersCached(id){
+  const b = document.getElementById('psec-orders-' + id);
+  if (b) b.innerHTML = ordersContentHtml(ordersByPlayer[id]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>';
+}
+async function renderOrdersTab(silent){
+  const el = document.getElementById('tab-orders'); if (!el) return;
+  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!silent || !document.getElementById('orders-toolbar')){
+    el.innerHTML = `
+      <div id="orders-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
+        <button id="live-btn-orders" class="btn live-btn" onclick="toggleTabLive('orders')"><i class="ti ti-player-play"></i> Live</button>
+        <button class="btn ctrl-btn" onclick="renderOrdersTab()"><i class="ti ti-refresh"></i> Refresh</button>
+      </div>
+      <div id="orders-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-orders-' + p.entityId)).join('')}</div>`;
+    updateLiveBtns();
+  }
+  await Promise.all(trackedPlayers.map(async p => {
+    if (silent && isPlayerPaused(p.entityId) && ordersByPlayer[p.entityId]) return;
+    try { ordersByPlayer[p.entityId] = await fetchPlayerMarket(p.entityId); }
+    catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[] }; }
+    fillPlayerOrdersCached(p.entityId);
+  }));
+  startLiveRefresh('orders');
 }
 
 // ── CRAFTING ──
