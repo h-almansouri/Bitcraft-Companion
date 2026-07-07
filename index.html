@@ -421,8 +421,8 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .oc-sub2{font-size:10px;color:var(--text3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* browse layout */
 .oc-count{font-size:11px;color:var(--text3);margin-bottom:.6rem}
-.oc-cols{column-width:400px;column-gap:1rem}
-.oc-claim-block{break-inside:avoid;-webkit-column-break-inside:avoid;margin-bottom:1rem}
+.oc-cols{display:flex;gap:1rem;align-items:flex-start}
+.oc-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:1rem}
 .oc-claim-block .craft-location-card{margin-bottom:0}
 .oc-more{margin-top:.5rem;text-align:center}
 .oc-pin{cursor:pointer;font-size:15px;color:var(--text3);transform:rotate(45deg)}
@@ -2488,6 +2488,7 @@ function renderOpenCraftsTab(){
     <div id="oc-drop" class="oc-drop" style="display:none"></div>
     <div id="oc-browse" class="oc-browse"></div>`;
   if (!window.__ocDocBound){ window.__ocDocBound = true; document.addEventListener('click', e => { if (!e.target.closest('#oc-drop') && !e.target.closest('.oc-fbtn')) ocCloseDrop(); }); }
+  if (!window.__ocResizeBound){ window.__ocResizeBound = true; let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (currentTab==='opencrafts') ocRenderBrowse(); }, 150); }); }  // re-balance the masonry columns on resize
   ocRenderFilterBar();
   ocRenderBrowse();
   ocFetchGlobal();
@@ -2542,7 +2543,14 @@ function ocRenderBrowse(){
   const groups = ocGroups();
   if (!groups.length){ host.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-building-factory-2"></i><span>No crafts match these filters</span></div>'; return; }
   const shown = groups.slice(0, ocShowCount);
-  const cards = `<div class="oc-cols">${shown.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`;
+  // Masonry that reads left-to-right, top-to-bottom (1-2 / 3-4 / 5-6): round-robin the cards into N
+  // independent-height columns, instead of CSS column-major fill (which puts ranks 1-26 in col 1, 27-51
+  // in col 2 — so col 2's top was a far-down claim).
+  const width = host.clientWidth || (document.querySelector('main')||{}).clientWidth || 1000;
+  const N = Math.max(1, Math.min(4, Math.floor(width / 400)));
+  const cols = Array.from({length:N}, ()=>[]);
+  shown.forEach((g,i)=> cols[i % N].push(g));
+  const cards = `<div class="oc-cols">${cols.map(col=>`<div class="oc-col">${col.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`).join('')}</div>`;
   const more = groups.length > ocShowCount
     ? `<div class="oc-more"><button class="btn ctrl-btn" onclick="ocShowMore()">Show ${Math.min(OC_PAGE, groups.length-ocShowCount)} more · ${groups.length-ocShowCount} claims hidden</button></div>` : '';
   const count = `<div class="oc-count">${groups.length} claim${groups.length!==1?'s':''}${openCraftAll.loading?' · refreshing…':''}</div>`;
