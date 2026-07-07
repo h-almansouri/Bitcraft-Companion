@@ -2485,7 +2485,7 @@ function renderOpenCraftsTab(){
   if (!Object.keys(ocRegions).length) apiFetch('/api/regions').then(d => { (Array.isArray(d)?d:(d.regions||[])).forEach(r => { const id = r.regionId||r.id||r.entityId; if (id!=null) ocRegions[id] = r.name||r.regionName||('R'+id); }); ocRenderFilterBar(); }).catch(()=>{});
   if (openCraftLive) startOpenCraftLive();
 }
-function ocRegionName(id){ return ocRegions[id] || ('R' + id); }
+function ocRegionName(id){ const n = ocRegions[id]; return n ? `${n} (R${id})` : ('R' + id); }  // "Southern Islands (R3)" like the rest of the app
 function ocFilterLabel(kind){
   if (kind==='region') return ocFilterRegions.size ? [...ocFilterRegions].map(ocRegionName).join(', ') : 'All Regions';
   if (kind==='tier')   return ocFilterTiers.size ? [...ocFilterTiers].sort((a,b)=>a-b).map(t=>'T'+t).join(', ') : 'All Tiers';
