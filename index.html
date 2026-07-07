@@ -2568,7 +2568,7 @@ let ocFilterSkills = new Set();    // selected skill_ids (empty = all)
 let ocFilterRegions = new Set();   // selected regionIds (empty = all)
 let ocScope = 'all';               // 'all' | 'my' | 'pinned' | '<claimId>'
 let ocScopeName = '';              // display name when ocScope is a specific claim
-let ocShowCount = 25;              // claim cards shown; "Show more" adds another page
+let ocShowCount = 50;              // claim cards shown; "Show more" adds another page
 let ocMyClaims = [];               // [{entityId,name}] derived from tracked players (cached)
 let ocRegions = {};                // regionId -> name
 let ocGroupsById = {};             // claimId -> group, so a collapse/expand re-renders just one card
@@ -2577,7 +2577,7 @@ let ocSkillQuery = '', ocClaimQuery = '';
 let ocHome = null;                 // { entityId, name, x, z } — home claim to measure distance from (persisted)
 let ocSortMode = 'crafts';         // claim sort: 'crafts' (most total crafts) | 'distance' (nearest home first) (persisted)
 let openCraftLive = false, openCraftLiveId = null, ocSearchTimer = null;
-const OC_PAGE = 25;
+const OC_PAGE = 50;
 function ocSaveHome(){ safeSetItem('bc_opencraft_home', ocHome ? JSON.stringify(ocHome) : ''); }
 function ocSaveSort(){ safeSetItem('bc_opencraft_sort', ocSortMode); }
 function saveOpenCraftClaims(){ safeSetItem('bc_opencraft_claims', JSON.stringify(openCraftClaims)); }
@@ -2669,7 +2669,9 @@ function ocRenderBrowse(){
   if (openCraftAll.error){ host.innerHTML = `<div class="oc-msg" style="color:var(--red-light,#e06666)">${escHtml(openCraftAll.error)}</div>`; return; }
   const groups = ocGroups();
   if (!groups.length){ host.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-building-factory-2"></i><span>No crafts match these filters</span></div>'; return; }
-  const shown = groups.slice(0, ocShowCount);
+  // Filtering by region already narrows the set, so show every claim in it (no cap / "Show more").
+  const showAll = ocFilterRegions.size > 0;
+  const shown = showAll ? groups : groups.slice(0, ocShowCount);
   // Masonry that reads left-to-right, top-to-bottom (1-2 / 3-4 / 5-6): round-robin the cards into N
   // independent-height columns, instead of CSS column-major fill (which puts ranks 1-26 in col 1, 27-51
   // in col 2 — so col 2's top was a far-down claim).
@@ -2678,7 +2680,7 @@ function ocRenderBrowse(){
   const cols = Array.from({length:N}, ()=>[]);
   shown.forEach((g,i)=> cols[i % N].push(g));
   const cards = `<div class="oc-cols">${cols.map(col=>`<div class="oc-col">${col.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`).join('')}</div>`;
-  const more = groups.length > ocShowCount
+  const more = (!showAll && groups.length > ocShowCount)
     ? `<div class="oc-more"><button class="btn ctrl-btn" onclick="ocShowMore()">Show ${Math.min(OC_PAGE, groups.length-ocShowCount)} more · ${groups.length-ocShowCount} claims hidden</button></div>` : '';
   const count = `<div class="oc-count">${groups.length} claim${groups.length!==1?'s':''}${openCraftAll.loading?' · refreshing…':''}</div>`;
   host.innerHTML = count + cards + more;
