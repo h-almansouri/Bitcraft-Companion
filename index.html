@@ -4823,6 +4823,37 @@ function bcCopyStylesToPip(win){
     '.leaflet-tile,.leaflet-marker-icon,.leaflet-container img{-webkit-user-drag:none!important;pointer-events:auto}';
   win.document.head.appendChild(extra);
 }
+// Leaflet's map-drag registers its mousemove/mouseup on the MAIN document, but in PiP the real pointer
+// events fire in the PiP document. Patch the Draggable so that when a drag starts it ALSO binds the same
+// handlers to the PiP document — so the real events (correct coords) drive Leaflet's own smooth pan.
+function bcPipDragStart(){ return L.Browser.touch ? 'touchstart mousedown' : 'mousedown'; }
+function bcPipPatchDrag(pipDoc){
+  const drg = bcMap && bcMap.dragging && bcMap.dragging._draggable; if (!drg || drg._bcOrigOnDown) return;
+  drg._bcOrigOnDown = drg._onDown; drg._bcOrigOnUp = drg._onUp;
+  drg._onDown = function(e){
+    drg._bcOrigOnDown.call(drg, e);
+    const doc = (bcPipWin && bcPipWin.document) || pipDoc;
+    const mv = e.type==='touchstart' ? 'touchmove' : (e.type==='pointerdown' ? 'pointermove' : 'mousemove');
+    const up = e.type==='touchstart' ? 'touchend'  : (e.type==='pointerdown' ? 'pointerup'   : 'mouseup');
+    L.DomEvent.on(doc, mv, drg._onMove, drg);
+    L.DomEvent.on(doc, up, drg._onUp, drg);
+    drg._bcPipBind = { doc, mv, up };
+  };
+  drg._onUp = function(e){
+    if (drg._bcPipBind){ const b = drg._bcPipBind; drg._bcPipBind = null; try { L.DomEvent.off(b.doc, b.mv, drg._onMove, drg); L.DomEvent.off(b.doc, b.up, drg._onUp, drg); } catch(err){} }
+    drg._bcOrigOnUp.call(drg, e);
+  };
+  // swap just the mousedown listener so it uses the patched _onDown (avoids disable()'s finishDrag side-effects)
+  const S = bcPipDragStart();
+  try { L.DomEvent.off(drg._dragStartTarget, S, drg._bcOrigOnDown, drg); L.DomEvent.on(drg._dragStartTarget, S, drg._onDown, drg); } catch(err){}
+}
+function bcPipUnpatchDrag(){
+  const drg = bcMap && bcMap.dragging && bcMap.dragging._draggable; if (!drg || !drg._bcOrigOnDown) return;
+  if (drg._bcPipBind){ const b = drg._bcPipBind; drg._bcPipBind = null; try { L.DomEvent.off(b.doc, b.mv, drg._onMove, drg); L.DomEvent.off(b.doc, b.up, drg._onUp, drg); } catch(err){} }
+  const S = bcPipDragStart();
+  try { L.DomEvent.off(drg._dragStartTarget, S, drg._onDown, drg); L.DomEvent.on(drg._dragStartTarget, S, drg._bcOrigOnDown, drg); } catch(err){}
+  drg._onDown = drg._bcOrigOnDown; drg._onUp = drg._bcOrigOnUp; delete drg._bcOrigOnDown; delete drg._bcOrigOnUp;
+}
 async function bcMapPip(){
   if (!bcPipSupported()){ alert('Picture-in-Picture needs a Chromium browser (Chrome or Edge 116+).'); return; }
   if (bcPipWin){ bcPipWin.close(); return; }   // toggle off
@@ -4855,16 +4886,14 @@ async function bcMapPip(){
   // Leaflet adds its drag move/up listeners to the MAIN document, but pointer moves now happen in the PiP
   // document — relay them across so panning works. (Drag delta is client-coord based; both start and move
   // are in PiP-window coords, so the delta is correct.)
-  const relayTypes = ['mousemove','mouseup','pointermove','pointerup','touchmove','touchend'];
-  const relay = (e) => { try { const C = e.type.indexOf('pointer')===0 ? PointerEvent : (e.type.indexOf('touch')===0 ? TouchEvent : MouseEvent); document.dispatchEvent(new C(e.type, e)); } catch(err){} };
-  relayTypes.forEach(t => pip.document.addEventListener(t, relay, true));
+  bcPipPatchDrag(pip.document);   // route the PiP window's drag events into Leaflet's own drag handlers
   const noNativeDrag = (e) => e.preventDefault();   // stop native image/text drag from hijacking the pan
   pip.document.addEventListener('dragstart', noNativeDrag, true);
 
   const btn = document.getElementById('bc-pip-btn'); if (btn) btn.innerHTML = '<i class="ti ti-picture-in-picture-off"></i> Close pop-out';
   setTimeout(() => { try { bcMap.invalidateSize(); } catch(e){} }, 60);
   pip.addEventListener('pagehide', () => {
-    relayTypes.forEach(t => { try { pip.document.removeEventListener(t, relay, true); } catch(e){} });
+    bcPipUnpatchDrag();
     try { pip.document.removeEventListener('dragstart', noNativeDrag, true); } catch(e){}
     if (ctrl.parentNode) ctrl.remove();
     const ph2 = document.getElementById('bc-pip-ph');
