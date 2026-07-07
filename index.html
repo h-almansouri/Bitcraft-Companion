@@ -60,6 +60,7 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .nav-item i{font-size:16px;flex-shrink:0}
 .nav-item:hover{color:var(--text);background:var(--bg3)}
 .nav-item.active{color:var(--teal-light);background:rgba(29,158,117,.08);border-left-color:var(--teal)}
+.nav-wip{margin-left:auto;font-size:9px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--amber-light);background:rgba(186,117,23,.16);border:1px solid rgba(186,117,23,.3);border-radius:4px;padding:1px 5px;line-height:1.4;flex-shrink:0}
 
 /* ── MAIN ── */
 .main-wrap{margin-left:var(--sidebar);flex:1;display:flex;flex-direction:column;min-height:100vh}
@@ -687,14 +688,14 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
     <div class="nav-item" data-tab="crafting" onclick="switchTab('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
     <div class="nav-item" data-tab="tasks" onclick="switchTab('tasks')"><i class="ti ti-checklist"></i> Tasks</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
-    <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts</div>
+    <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts <span class="nav-wip">WIP</span></div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
     <div class="nav-item" data-tab="deals" onclick="switchTab('deals')"><i class="ti ti-trending-up"></i> Deals</div>
     <div class="nav-item" data-tab="shopping" onclick="switchTab('shopping')"><i class="ti ti-shopping-cart"></i> Shopping List</div>
     <div class="nav-item" data-tab="map" onclick="switchTab('map')"><i class="ti ti-map-2"></i> Map</div>
     <div class="nav-item" data-tab="planner" onclick="switchTab('planner')"><i class="ti ti-tool"></i> Planner</div>
-    <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting</div>
-    <div class="nav-item" data-tab="effort" onclick="switchTab('effort')"><i class="ti ti-coins"></i> Effort Profit</div>
+    <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting <span class="nav-wip">WIP</span></div>
+    <div class="nav-item" data-tab="effort" onclick="switchTab('effort')"><i class="ti ti-coins"></i> Effort Profit <span class="nav-wip">WIP</span></div>
     <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><i class="ti ti-bell"></i> Alerts</div>
   </div>
 </aside>
