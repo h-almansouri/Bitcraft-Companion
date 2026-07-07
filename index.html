@@ -4385,6 +4385,38 @@ function shoppingToggleExpand(id) {
   if (listEl) listEl.innerHTML = renderShoppingListHtml();
 }
 
+// Walk the (region/claim-filtered) sell orders cheapest-first to buy wantQty, returning the weighted
+// average price + total cost (e.g. 1900 wanted, 1839 @19 then 61 @25 → avg 19.2, total 36,466).
+function shoppingFill(pd, wantQty){
+  if (!pd || pd==='loading' || pd==='error' || !pd.allSell) return null;
+  const sells = shoppingOrderFilter(pd.allSell).slice().sort((a,b)=> +(a.price||a.priceThreshold||0) - +(b.price||b.priceThreshold||0));
+  let remaining = wantQty, cost = 0, filled = 0;
+  for (const o of sells){
+    if (remaining <= 0) break;
+    const p = +(o.price||o.priceThreshold||0), avail = +(o.quantity||0);
+    const take = Math.min(avail, remaining);
+    if (take <= 0) continue;
+    cost += take * p; filled += take; remaining -= take;
+  }
+  return { want: wantQty, filled, cost, avg: filled>0 ? cost/filled : 0, short: Math.max(0, remaining) };
+}
+function shoppingFillCell(fill, priceColor){
+  if (!fill) return `<span style="color:var(--text3);font-size:12px">—</span>`;
+  if (fill.filled === 0) return `<span style="color:var(--amber-light);font-size:12px">none listed${(shoppingRegionFilter||shoppingClaimFilter.length)?' in filter':''}</span>`;
+  const avgStr = fill.avg >= 100 ? fmtNum(Math.round(fill.avg)) : String(Math.round(fill.avg*10)/10);
+  return `<div style="line-height:1.4">
+    <span style="font-weight:600;color:${priceColor}">${avgStr}</span> <span style="font-size:11px;color:var(--text3)">avg</span>
+    <br><span style="font-size:11px;color:var(--text2)">${fmtCount(Math.round(fill.cost))} for ${fmtCount(fill.filled)}</span>
+    ${fill.short>0 ? `<br><span style="font-size:11px;color:var(--amber-light)">${fmtCount(fill.short)} short of ${fmtCount(fill.want)}</span>` : ''}
+  </div>`;
+}
+function shoppingSetQty(id, v){
+  const item = shoppingItems.find(x => String(x.id) === String(id)); if (!item) return;
+  const n = parseInt(v, 10);
+  item.qty = (!isNaN(n) && n > 0) ? n : 0;
+  saveShoppingLists();
+  const listEl = document.getElementById('shopping-list-el'); if (listEl) listEl.innerHTML = renderShoppingListHtml();
+}
 function renderShoppingListHtml() {
   if (!shoppingItems.length) {
     return `<div class="empty" style="padding:3rem 1rem">
@@ -4449,7 +4481,7 @@ function renderShoppingListHtml() {
     const sellSection = section('Sell orders','ti-tag','#f09595',sells,'var(--green-light)','sell');
     const buySection  = section('Buy orders','ti-shopping-cart','var(--green-light)',buys,'var(--amber-light)','buy');
 
-    return `<tr><td colspan="4" style="padding:0;background:var(--bg2)">${sellSection}${buySection}</td></tr>`;
+    return `<tr><td colspan="5" style="padding:0;background:var(--bg2)">${sellSection}${buySection}</td></tr>`;
   }
 
   const rows = shoppingItems.map((item, i) => {
@@ -4463,7 +4495,8 @@ function renderShoppingListHtml() {
     } else if (pd === 'error') {
       sellCell = buyCell = `<span style="font-size:11px;color:var(--red-light)">Error</span>`;
     } else if (pd) {
-      sellCell = orderCell(pd.sell || null, 'var(--green-light)');
+      const qty = +item.qty || 0;
+      sellCell = qty > 0 ? shoppingFillCell(shoppingFill(pd, qty), 'var(--green-light)') : orderCell(pd.sell || null, 'var(--green-light)');
       buyCell  = orderCell(pd.buy  || null, 'var(--amber-light)');
     }
 
@@ -4489,6 +4522,10 @@ function renderShoppingListHtml() {
           <i class="ti ti-chevron-${isExpanded?'up':'down'}" style="font-size:11px;color:var(--text3);margin-left:auto"></i>
         </div>
       </td>
+      <td style="padding:.5rem .5rem" onclick="event.stopPropagation()">
+        <input type="number" min="0" step="1" value="${item.qty||''}" placeholder="qty" onchange="shoppingSetQty('${item.id}', this.value)"
+          style="width:74px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;font-size:12px;outline:none">
+      </td>
       <td style="padding:.5rem .75rem">${sellCell}</td>
       <td style="padding:.5rem .75rem">${buyCell}</td>
       <td style="padding:.5rem .5rem;text-align:right" onclick="event.stopPropagation()">
@@ -4504,6 +4541,7 @@ function renderShoppingListHtml() {
       <thead>
         <tr style="background:var(--bg3);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3)">
           <th style="padding:.4rem .75rem;text-align:left;font-weight:600">Item</th>
+          <th style="padding:.4rem .5rem;text-align:left;font-weight:600">Buy qty</th>
           <th style="padding:.4rem .75rem;text-align:left;font-weight:600"><i class="ti ti-tag" style="color:#f09595;font-size:12px"></i> Best sell</th>
           <th style="padding:.4rem .75rem;text-align:left;font-weight:600"><i class="ti ti-shopping-cart" style="color:var(--green-light);font-size:12px"></i> Best buy</th>
           <th style="padding:.4rem .5rem;width:36px"></th>
