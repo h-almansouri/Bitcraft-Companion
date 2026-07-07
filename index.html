@@ -6069,6 +6069,9 @@ function plannerFilter() {
     });
   }
 
+  // Sort by tier (ascending), then name — otherwise results come back in raw data order
+  items = items.slice().sort((a, b) => ((a.tier || 0) - (b.tier || 0)) || (a.name || '').localeCompare(b.name || ''));
+
   const countEl = document.getElementById('planner-item-count');
   if (countEl) countEl.textContent = `(${items.length})`;
 
