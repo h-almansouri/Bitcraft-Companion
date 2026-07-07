@@ -7285,7 +7285,7 @@ function speakAlert(msg){
     const v = ttsPickVoice(); if (v) u.voice = v;
     u.rate = t.rate || 0.95;   // slightly slow = calmer
     u.pitch = 1;               // natural pitch (keeps it from getting shrill/harsh)
-    u.volume = 1;
+    u.volume = Math.max(0, Math.min(1, alertSettings.volume != null ? alertSettings.volume : 0.6)); // share the alert volume slider
     speechSynthesis.cancel();  // don't let a burst of alerts queue up
     speechSynthesis.speak(u);
   } catch(e){}
