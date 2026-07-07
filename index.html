@@ -4769,6 +4769,7 @@ function renderMap(){
           </div>
           <div class="map-side-sec map-side-grow">
             <div class="map-side-hdr"><i class="ti ti-map-search"></i> Live map</div>
+            <button class="bc-mp-btn bc-pip-btn" id="bc-pip-btn" onclick="bcMapPip()" title="Pop the map into a floating, always-on-top window (Chrome/Edge). It stays fully interactive — zoom &amp; pan work." style="display:none;width:100%;margin-bottom:5px"><i class="ti ti-picture-in-picture-on"></i> Pop out map</button>
             <select id="bc-region-sel" style="margin-bottom:4px" onchange="bcSetMapRegion(this.value)" title="Limit tracked resources to one region"></select>
             <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin-bottom:5px;cursor:pointer" title="Show depleted resource nodes and their live respawn countdown (live via prism-relay)"><input type="checkbox" id="bc-growth-toggle" style="width:auto" onchange="bcGrowthToggle(this.checked)"><i class="ti ti-hourglass-low" style="color:var(--teal-light)"></i> Respawn timers</label>
             <input id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
@@ -4793,6 +4794,52 @@ function renderMap(){
   } else if (bcMap){
     setTimeout(() => bcMap.invalidateSize(), 60);
   }
+  const pb = document.getElementById('bc-pip-btn'); if (pb) pb.style.display = bcPipSupported() ? '' : 'none';
+}
+
+// ===== Picture-in-Picture: pop the Leaflet map into a floating, always-on-top window (Document PiP API,
+// Chrome/Edge 116+). We physically move #map-el into the PiP document, so it stays the same live map —
+// zoom/pan and everything tracked keep working — then move it back when the window closes.
+let bcPipWin = null;
+function bcPipSupported(){ return 'documentPictureInPicture' in window; }
+function bcCopyStylesToPip(win){
+  for (const ss of document.styleSheets){
+    try {
+      const css = Array.from(ss.cssRules).map(r => r.cssText).join('\n');
+      const style = win.document.createElement('style'); style.textContent = css; win.document.head.appendChild(style);
+    } catch(e){
+      if (ss.href){ const link = win.document.createElement('link'); link.rel = 'stylesheet'; link.href = ss.href; win.document.head.appendChild(link); }  // cross-origin (CDN) — re-link
+    }
+  }
+  const extra = win.document.createElement('style');
+  extra.textContent = 'html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0c10}#map-el{width:100vw!important;height:100vh!important;border:none!important;border-radius:0!important}.leaflet-control-search{display:none!important}';
+  win.document.head.appendChild(extra);
+}
+async function bcMapPip(){
+  if (!bcPipSupported()){ alert('Picture-in-Picture needs a Chromium browser (Chrome or Edge 116+).'); return; }
+  if (bcPipWin){ bcPipWin.close(); return; }   // toggle off
+  const mapEl = document.getElementById('map-el'); if (!mapEl || !bcMap) return;
+  const rect = mapEl.getBoundingClientRect();
+  let pip;
+  try { pip = await documentPictureInPicture.requestWindow({ width: Math.max(360, Math.round(rect.width)||800), height: Math.max(280, Math.round(rect.height)||600) }); }
+  catch(e){ return; }   // user dismissed the prompt
+  bcPipWin = pip;
+  bcCopyStylesToPip(pip);
+  // leave a placeholder so the map returns to exactly its spot; move the live map element into the PiP doc
+  const ph = document.createElement('div'); ph.id = 'bc-pip-ph';
+  ph.style.cssText = 'flex:1;min-width:0;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--text3);font-size:13px;border:1px dashed var(--border2);border-radius:10px;padding:1rem';
+  ph.innerHTML = '<span><i class="ti ti-picture-in-picture-on" style="font-size:1.5rem;display:block;margin-bottom:.4rem"></i>Map is in the pop-out window.<br>Close it to bring the map back here.</span>';
+  mapEl.parentNode.insertBefore(ph, mapEl);
+  pip.document.body.appendChild(mapEl);
+  const btn = document.getElementById('bc-pip-btn'); if (btn) btn.innerHTML = '<i class="ti ti-picture-in-picture-off"></i> Close pop-out';
+  setTimeout(() => { try { bcMap.invalidateSize(); } catch(e){} }, 60);
+  pip.addEventListener('pagehide', () => {
+    const ph2 = document.getElementById('bc-pip-ph');
+    if (ph2 && ph2.parentNode){ ph2.parentNode.insertBefore(mapEl, ph2); ph2.remove(); }
+    bcPipWin = null;
+    const b = document.getElementById('bc-pip-btn'); if (b) b.innerHTML = '<i class="ti ti-picture-in-picture-on"></i> Pop out map';
+    setTimeout(() => { try { if (bcMap) bcMap.invalidateSize(); } catch(e){} }, 60);
+  }, { once:true });
 }
 
 async function bcInitMap(){
