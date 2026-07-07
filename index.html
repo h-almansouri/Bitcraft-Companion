@@ -2099,14 +2099,16 @@ async function renderInventoryTab(silent) {
 }
 
 // ── ORDERS (market listings + collections) ──
-// Per tracked player: /api/players/{id}/market → { sellOrders, buyOrders }. Each order carries its
-// claim + region + item. "Collections to pick up" = sell orders with storedCoins > 0 (coins earned from
-// sales, awaiting collection). Buy-order storedCoins is just the escrow (price×qty), so it's not a
-// collection — and the API doesn't expose the items a filled buy order yields, so those aren't shown.
-let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders }
+// Per tracked player: /api/players/{id}/market → active { sellOrders, buyOrders }, and
+// /api/players/{id}/market-collections → everything waiting to be picked up (coins earned from sells AND
+// items from filled buy orders), each tagged with its claim + region.
+let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders, collections }
 async function fetchPlayerMarket(id){
-  const d = await apiFetch(`/api/players/${id}/market`);
-  return { sellOrders: d.sellOrders || [], buyOrders: d.buyOrders || [] };
+  const [m, c] = await Promise.all([
+    apiFetch(`/api/players/${id}/market`),
+    apiFetch(`/api/players/${id}/market-collections`).catch(() => ({ collections: [] })),
+  ]);
+  return { sellOrders: m.sellOrders || [], buyOrders: m.buyOrders || [], collections: c.collections || [] };
 }
 function ordersContentHtml(data){
   if (!data) return '';
@@ -2116,7 +2118,8 @@ function ordersContentHtml(data){
     ...sells.filter(o => num(o.quantity) > 0).map(o => ({ ...o, kind:'sell' })),
     ...buys.filter(o => num(o.quantity) > 0).map(o => ({ ...o, kind:'buy' })),
   ];
-  const collections = sells.filter(o => num(o.storedCoins) > 0).map(o => ({ ...o, coins: num(o.storedCoins) }));
+  const collections = data.collections || [];   // coins (Hex Coin) from sells + items from filled buy orders
+  const isCoin = o => num(o.itemId) === 1 || /hex coin/i.test(o.itemName || '');
   if (!orders.length && !collections.length)
     return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No market orders or collections</span></div>';
 
@@ -2142,14 +2145,19 @@ function ordersContentHtml(data){
     <span class="ord-qty">×${fmtCount(num(o.quantity))}</span>
     <span class="price-${o.kind}">${fmtCoin(num(o.priceThreshold))}</span>
   </div>`;
-  const collRow = o => `<div class="ord-row">${nameCell(o)}<span style="flex:1"></span><span class="ord-coins">${fmtCoin(o.coins)}</span></div>`;
+  const collRow = o => `<div class="ord-row">${nameCell(o)}<span style="flex:1"></span>${isCoin(o)?`<span class="ord-coins">${fmtCoin(num(o.quantity))}</span>`:`<span class="ord-qty">×${fmtCount(num(o.quantity))}</span>`}</div>`;
   const sectionHdr = (label, ic, color, total) => `<div class="ord-section-hdr" style="--c:${color}"><i class="ti ${ic}"></i> <span>${label}</span><span style="flex:1"></span><span class="badge badge-tier">${total}</span></div>`;
 
   let html = '';
   if (collections.length){
     const groups = groupByLoc(collections);
     html += sectionHdr('Collections to pick up', 'ti-coins', 'var(--amber-light)', collections.length);
-    html += groups.map(loc => locCard(loc, loc.items.map(collRow).join(''), `<span class="ord-coins">${fmtCoin(loc.items.reduce((s,o)=>s+o.coins,0))}</span>`)).join('');
+    html += groups.map(loc => {
+      const coinTotal = loc.items.filter(isCoin).reduce((s,o)=>s+num(o.quantity),0);
+      const itemN = loc.items.filter(o=>!isCoin(o)).length;
+      const meta = [coinTotal?`<span class="ord-coins">${fmtCoin(coinTotal)}</span>`:'', itemN?`<span class="badge badge-tier">${itemN} item${itemN!==1?'s':''}</span>`:''].filter(Boolean).join(' ');
+      return locCard(loc, loc.items.map(collRow).join(''), meta);
+    }).join('');
   }
   if (orders.length){
     const groups = groupByLoc(orders);
