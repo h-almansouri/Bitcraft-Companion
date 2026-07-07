@@ -2419,6 +2419,11 @@ function ocSkillName(sid){
   return 'Skill ' + sid;
 }
 function ocSkillIcon(name){ return OC_PROF_ICONS[(name||'').toLowerCase()] || 'ti-hammer'; }
+// Tier-colored badge (matches the app's TIER_COLORS). suffix e.g. "×5"; tier 0 → neutral "—".
+function ocTierBadge(t, suffix, extraClass){
+  const col = TIER_COLORS[Math.min(t||0, TIER_COLORS.length-1)] || TIER_COLORS[0];
+  return `<span class="skill-tier-badge ${extraClass||''}" style="--tc:${col.c}">${t?('T'+t):'—'}${suffix||''}</span>`;
+}
 function ocProfId(cr){ const l = (cr.levelRequirements&&cr.levelRequirements[0]) || (cr.experiencePerProgress&&cr.experiencePerProgress[0]); return l ? l.skill_id : 0; }
 
 function renderOpenCraftsTab(){
@@ -2512,7 +2517,7 @@ function ocCraftCard(cr, itemMap, now){
   const active = cr.lockExpiration && new Date(cr.lockExpiration).getTime() > now;
   const cnt = cr.craftCount && cr.craftCount > 1 ? `${fmtCount(cr.craftCount)}× ` : '';
   return `<div class="oc-card${active?' oc-card-active':''}" title="${escHtml((cnt+name))} · ${escHtml(cr.buildingName||'')}">
-    <div class="oc-card-top"><span class="oc-card-name">${escHtml(name)}</span>${tier?`<span class="badge badge-tier oc-card-tier">T${tier}</span>`:''}</div>
+    <div class="oc-card-top"><span class="oc-card-name">${escHtml(name)}</span>${tier?ocTierBadge(tier,'','oc-card-tier'):''}</div>
     <div class="oc-card-bar"><div class="oc-card-fill${active?' on':''}" style="width:${pct}%"></div></div>
     <div class="oc-card-stat"><span>${fmtCount(left)} left</span><span class="oc-card-pct">${pct}%</span></div>
     <div class="oc-card-owner">by ${escHtml(cr.ownerUsername||'?')}${active?' <span class="oc-active-tag">ACTIVE</span>':''}</div>
@@ -2551,7 +2556,7 @@ function renderClaimCraftsSection(claimId){
     : profs.map(p => {
         const open = openCraftProfOpen.has(claimId + ':' + p.sid);
         const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
-          .map(t => `<span class="badge badge-tier oc-tier">${t?('T'+t):'—'}${p.tiers[t]>1?('×'+p.tiers[t]):''}</span>`).join('');
+          .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
         const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, data.itemMap, now)).join('')}</div>` : '';
         return `<div class="oc-prof">
           <div class="oc-prof-hdr" onclick="ocToggleProf('${claimId}','${p.sid}')">
