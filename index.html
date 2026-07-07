@@ -293,6 +293,8 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .al-toggle input{width:16px;height:16px;cursor:pointer;accent-color:var(--teal)}
 .al-master i{color:var(--teal-light)}
 .al-vol{display:flex;align-items:center;gap:.5rem;color:var(--text3)}
+.al-tts .al-vol{flex-wrap:wrap;justify-content:flex-end}
+.al-voice{max-width:200px;font-size:12px;padding:4px 8px}
 .al-vol input[type=range]{width:140px;accent-color:var(--teal)}
 .al-note{font-size:12px;color:var(--text3);line-height:1.5;display:flex;align-items:flex-start;gap:.4rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.6rem .75rem;margin-bottom:.9rem}
 .al-note i{margin-top:1px}
@@ -7171,6 +7173,7 @@ function slotContents(slot) {
 const STAT_IDX = { health:0, stamina:1 };
 const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
+  tts: { on:false, voice:'', rate:0.95 },   // spoken alerts (Web Speech); independent of the sound master
   types: {
     buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
     stamina:   { on:false, sound:'coin', dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
@@ -7191,6 +7194,7 @@ function loadAlerts(){
     const saved = JSON.parse(localStorage.getItem('bc_alerts') || '{}');
     alertSettings = { ...ALERT_DEFAULTS, ...saved, types: {} };
     for (const k of Object.keys(ALERT_DEFAULTS.types)) alertSettings.types[k] = { ...ALERT_DEFAULTS.types[k], ...((saved.types||{})[k]||{}) };
+    alertSettings.tts = { ...ALERT_DEFAULTS.tts, ...(saved.tts||{}) };
   } catch(e) { alertSettings = JSON.parse(JSON.stringify(ALERT_DEFAULTS)); }
 }
 function saveAlerts(){ try { safeSetItem('bc_alerts', JSON.stringify(alertSettings)); } catch(e){} }
@@ -7258,9 +7262,38 @@ function alertToast(msg, icon){
   requestAnimationFrame(()=>el.classList.add('show'));
   setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(), 300); }, 5000);
 }
+// ── Voice alerts (Web Speech API — built in, no dependency) ──
+// Independent of the sound master: sound plays if master is on, voice speaks if tts.on — either or both.
+function alertsActive(){ loadAlerts(); return alertSettings.master || !!(alertSettings.tts && alertSettings.tts.on); }
+function ttsVoices(){
+  if (!('speechSynthesis' in window)) return [];
+  // English voices only, nicer/more natural ones first so it doesn't sound harsh
+  const nice = /natural|neural|google|samantha|aria|jenny|libby|sonia|zira|serena|karen|moira|fiona|allison|ava|nathan|guy|daniel/i;
+  return speechSynthesis.getVoices().filter(v => /^en(-|_|$)/i.test(v.lang))
+    .sort((a,b) => (nice.test(b.name)?1:0) - (nice.test(a.name)?1:0) || a.name.localeCompare(b.name));
+}
+function ttsPickVoice(){
+  const voices = ttsVoices(); if (!voices.length) return null;
+  const want = alertSettings.tts && alertSettings.tts.voice;
+  return voices.find(v => v.voiceURI === want) || voices[0];
+}
+function speakAlert(msg){
+  try {
+    if (!('speechSynthesis' in window) || !msg) return;
+    const t = alertSettings.tts || {};
+    const u = new SpeechSynthesisUtterance(String(msg).replace(/[—·]/g, ', ')); // soften separators for speech
+    const v = ttsPickVoice(); if (v) u.voice = v;
+    u.rate = t.rate || 0.95;   // slightly slow = calmer
+    u.pitch = 1;               // natural pitch (keeps it from getting shrill/harsh)
+    u.volume = 1;
+    speechSynthesis.cancel();  // don't let a burst of alerts queue up
+    speechSynthesis.speak(u);
+  } catch(e){}
+}
 function fireAlert(typeKey, msg){
   const t = alertSettings.types[typeKey]; if (!t) return;
-  playAlertSound(t.sound);
+  if (alertSettings.master) playAlertSound(t.sound);
+  if (alertSettings.tts && alertSettings.tts.on) speakAlert(msg);
   alertToast(msg, (ALERT_META[typeKey]||{}).icon);
   recordNotif(typeKey, msg);
 }
@@ -7320,7 +7353,7 @@ let alertTimer = null;
 let alertState = {}; // entityId -> tracking between polls (baselines)
 const ALERT_POLL_MS = 15000;
 const CRAFT_DONE_MUTE_MS = 30000;  // after a "passive craft done" ping, stay quiet this long so a wave of stations finishing seconds apart pings once, not ten times
-function alertsEnabled(){ loadAlerts(); return alertSettings.master && trackedPlayers.length && Object.values(alertSettings.types).some(t=>t.on); }
+function alertsEnabled(){ loadAlerts(); return alertsActive() && trackedPlayers.length && Object.values(alertSettings.types).some(t=>t.on); }
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
 function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
@@ -7423,12 +7456,26 @@ function renderAlerts(){
       </div>
     </div>`;
   };
+  const _voices = ttsVoices();
+  if (!_voices.length && ('speechSynthesis' in window) && !window.__ttsVoiceBound){ window.__ttsVoiceBound = true; speechSynthesis.onvoiceschanged = () => { if (currentTab === 'alerts') renderAlerts(); }; }
+  const _tts = alertSettings.tts, _ttsOk = 'speechSynthesis' in window;
+  const _voiceOpts = _voices.map(v => `<option value="${escHtml(v.voiceURI)}"${_tts.voice===v.voiceURI?' selected':''}>${escHtml(v.name.replace(/\s*[-(].*$/,''))}</option>`).join('');
+  const _ttsSection = !_ttsOk ? '' : `
+      <div class="al-head al-tts">
+        <label class="al-toggle al-master"><input type="checkbox" ${_tts.on?'checked':''} onchange="toggleAlertTts(this.checked)"> <i class="ti ti-message-2"></i> <b>Spoken alerts (voice)</b></label>
+        <div class="al-vol">
+          <select class="sj-input al-voice" onchange="setAlertTtsVoice(this.value)"${_voices.length?'':' disabled'}>${_voiceOpts || '<option>Loading voices…</option>'}</select>
+          <label class="al-secs" title="Speaking speed">speed <input type="range" min="0.6" max="1.2" step="0.05" value="${_tts.rate}" oninput="setAlertTtsRate(this.value)"></label>
+          <button class="btn ctrl-btn" onclick="testAlertTts()">Test</button>
+        </div>
+      </div>`;
   el.innerHTML = `
     <div class="al-wrap">
       <div class="al-head">
         <label class="al-toggle al-master"><input type="checkbox" ${alertSettings.master?'checked':''} onchange="toggleAlertMaster(this.checked)"> <i class="ti ti-bell"></i> <b>Sound alerts</b></label>
         <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="playAlertSound('chime')">Test</button></div>
       </div>
+      ${_ttsSection}
       <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full (read from the game's stats API); if it never seems to trigger, the API may only report resting/max values for that player.</div>
       <div class="al-list">
         ${Object.keys(ALERT_META).map(typeRow).join('')}
@@ -7437,6 +7484,10 @@ function renderAlerts(){
 }
 function toggleAlertMaster(on){ loadAlerts(); alertSettings.master = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertVolume(v){ loadAlerts(); alertSettings.volume = parseFloat(v); saveAlerts(); }
+function toggleAlertTts(on){ loadAlerts(); alertSettings.tts.on = !!on; saveAlerts(); restartAlerts(); if (!on && 'speechSynthesis' in window) speechSynthesis.cancel(); if (on) testAlertTts(); renderAlerts(); }
+function setAlertTtsVoice(uri){ loadAlerts(); alertSettings.tts.voice = uri; saveAlerts(); testAlertTts(); }
+function setAlertTtsRate(v){ loadAlerts(); alertSettings.tts.rate = parseFloat(v) || 0.95; saveAlerts(); }
+function testAlertTts(){ loadAlerts(); speakAlert('Alert test — stamina is full.'); }
 function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); playAlertSound(v); }
 function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
@@ -7485,7 +7536,7 @@ const LIVE_BUFF_MIN_MS = 2500;
 function onLiveBuffs(id){
   id = String(id);
   loadAlerts();
-  if (!alertSettings.master || !alertSettings.types.buffLost.on) return;
+  if (!alertsActive() || !alertSettings.types.buffLost.on) return;
   if (isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id)) return;
   const p = trackedPlayers.find(x => String(x.entityId) === id); if (!p) return;
   const st = alertState[id] || (alertState[id] = {});
@@ -7516,7 +7567,7 @@ function onLiveStamina(id, data){
   liveStamina[id] = { current: cur, max };
   loadAlerts();
   const t = alertSettings.types.stamina;
-  if (!(t && t.on && alertSettings.master) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
+  if (!(t && t.on && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
   const st = alertState[id] || (alertState[id] = {});
   const dropLine = t.dropPct > 0 ? max * t.dropPct / 100 : max - 1;
   if (cur < dropLine) st.liveStamBelow = true;                 // dipped below the (customizable) threshold — arm the alert
