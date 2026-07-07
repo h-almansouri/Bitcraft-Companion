@@ -48,6 +48,9 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .search-result-item{padding:7px 10px;font-size:12px;cursor:pointer;color:var(--text);display:flex;flex-direction:column;gap:1px}
 .search-result-item:hover{background:var(--bg4)}
 .search-result-item small{color:var(--text3);font-size:10px}
+.shopping-chip{display:inline-flex;align-items:center;gap:.25rem;font-size:11px;background:var(--bg4);border:1px solid var(--border2);border-radius:12px;padding:2px 5px 2px 9px;color:var(--text);white-space:nowrap}
+.shopping-chip i{cursor:pointer;color:var(--text3);font-size:13px}
+.shopping-chip i:hover{color:var(--text)}
 .player-badge{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px}
 .player-badge-avatar{width:24px;height:24px;background:var(--teal-dim);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--teal-light);flex-shrink:0}
 .player-badge-name{font-size:12px;font-weight:500;color:var(--teal-light);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -951,6 +954,18 @@ let activeShoppingListId = null;  // id of currently-viewed list
 let shoppingItems = [];           // live reference to the active list's items array
 let shoppingPrices = {};      // id -> {sell:{price,qty,claim,regionName}, buy:{...}} | 'loading' | 'error'
 let shoppingRegionFilter = '';
+let shoppingClaimFilter = [];    // [{entityId,name,regionId}] — restrict prices to these claims ([] = all) (persisted)
+let shoppingClaimTimer = null;
+function saveShoppingClaims(){ safeSetItem('bc_shopping_claims', JSON.stringify(shoppingClaimFilter)); }
+// Region + claim filter applied to an item's market orders. Empty region/claim = no restriction on that axis.
+function shoppingOrderFilter(orders){
+  const regionId = shoppingRegionFilter || null;
+  const claimIds = shoppingClaimFilter.length ? new Set(shoppingClaimFilter.map(c => String(c.entityId))) : null;
+  if (!regionId && !claimIds) return orders;
+  return (orders||[]).filter(o =>
+    (!regionId || String(o.regionId) === String(regionId)) &&
+    (!claimIds || claimIds.has(String(o.claimEntityId))));
+}
 let shoppingExpandedItem = null; // id of expanded shopping list item (null = none)
 let shoppingPricingActive = false;
 let shoppingSearchResults = [];
@@ -4221,10 +4236,55 @@ function renderShoppingTab() {
       <button id="live-btn-shopping" class="btn live-btn" onclick="toggleTabLive('shopping')" title="Auto-refresh prices every 5 minutes"></button>
       <span id="shopping-live-label" class="live-status-label"></span>
     </div>
+    <div class="shopping-claims" style="display:flex;align-items:center;gap:.4rem;margin-bottom:.75rem;flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--text3);display:flex;align-items:center;gap:.3rem"><i class="ti ti-building-community"></i> Claims:</span>
+      ${shoppingClaimFilter.length
+        ? shoppingClaimFilter.map(c => `<span class="shopping-chip">${escHtml(c.name)}<i class="ti ti-x" title="Remove" onclick="shoppingRemoveClaim('${c.entityId}')"></i></span>`).join('')
+        : '<span style="font-size:12px;color:var(--text3)">All claims</span>'}
+      <div class="search-wrap shopping-claim-search" style="position:relative;width:190px">
+        <input type="text" id="shopping-claim-inp" placeholder="+ add claim…" autocomplete="off"
+          style="width:100%;padding:6px 10px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;font-size:12px;outline:none"
+          oninput="shoppingClaimSearchType(this.value)">
+        <div id="shopping-claim-results" class="search-results" style="display:none"></div>
+      </div>
+    </div>
     <div id="shopping-search-dropdown" style="position:relative;z-index:20;margin-bottom:.25rem"></div>
     <div id="shopping-list-el">${renderShoppingListHtml()}</div>`;
 
+  if (!window.__shopClaimBound){ window.__shopClaimBound = true; document.addEventListener('click', e => { if (!e.target.closest('.shopping-claim-search')){ const dd = document.getElementById('shopping-claim-results'); if (dd) dd.style.display = 'none'; } }); }
   updateLiveBtns();
+}
+function shoppingClaimSearchType(q){
+  clearTimeout(shoppingClaimTimer); q = (q||'').trim();
+  const dd = document.getElementById('shopping-claim-results'); if (!dd) return;
+  if (q.length < 2){ dd.style.display = 'none'; return; }
+  shoppingClaimTimer = setTimeout(async () => {
+    try {
+      const d = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`);
+      const claims = d.claims || [];
+      dd.innerHTML = claims.slice(0, 8).map(c => {
+        const on = shoppingClaimFilter.some(x => String(x.entityId) === String(c.entityId));
+        return `<div class="search-result-item" onclick='shoppingAddClaim(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionId:c.regionId}))})'>${escHtml(c.name||'Claim')}${on?' <span style="color:var(--teal-light)">· added</span>':''}<small>${escHtml(c.regionName||('R'+c.regionId))}</small></div>`;
+      }).join('') || '<div class="search-result-item">No claims found</div>';
+      dd.style.display = 'block';
+    } catch(e){ dd.style.display = 'none'; }
+  }, 350);
+}
+function shoppingAddClaim(raw){
+  const c = JSON.parse(raw);
+  if (!shoppingClaimFilter.some(x => String(x.entityId) === String(c.entityId))) shoppingClaimFilter.push(c);
+  saveShoppingClaims();
+  renderShoppingTab();
+  shoppingInvalidatePrices();
+  fetchAllShoppingPrices();
+}
+function shoppingRemoveClaim(id){
+  id = String(id);
+  shoppingClaimFilter = shoppingClaimFilter.filter(c => String(c.entityId) !== id);
+  saveShoppingClaims();
+  renderShoppingTab();
+  shoppingInvalidatePrices();
+  fetchAllShoppingPrices();
 }
 
 function shoppingSearchType(q) {
@@ -4353,7 +4413,7 @@ function renderShoppingListHtml() {
 
   function allOrdersHtml(pd, regionId) {
     if (!pd || pd === 'loading' || pd === 'error' || (!pd.allSell && !pd.allBuy)) return '';
-    const filter = orders => regionId ? orders.filter(o => String(o.regionId) === String(regionId)) : orders;
+    const filter = shoppingOrderFilter;
     const sells = filter(pd.allSell||[]).slice().sort((a,b) => +(a.price||0) - +(b.price||0));
     const buys  = filter(pd.allBuy||[]).slice().sort((a,b) => +(b.price||b.priceThreshold||0) - +(a.price||a.priceThreshold||0));
 
@@ -4384,7 +4444,7 @@ function renderShoppingListHtml() {
             <thead>${headerRow}</thead>
             <tbody>${orders.map(o=>orderRow(o,priceColor)).join('')}</tbody>
           </table>`
-        : `<div style="padding:0 .75rem .5rem;font-size:12px;color:var(--text3)">No ${kind} orders${regionId?' in this region':''}</div>`);
+        : `<div style="padding:0 .75rem .5rem;font-size:12px;color:var(--text3)">No ${kind} orders${(regionId||shoppingClaimFilter.length)?' matching the filter':''}</div>`);
 
     const sellSection = section('Sell orders','ti-tag','#f09595',sells,'var(--green-light)','sell');
     const buySection  = section('Buy orders','ti-shopping-cart','var(--green-light)',buys,'var(--amber-light)','buy');
@@ -4465,7 +4525,7 @@ async function fetchShoppingPrice(id, isCargo) {
 
     const pickOrder = (orders, compareFn) => {
       if (!orders || !orders.length) return null;
-      const filtered = regionId ? orders.filter(o => String(o.regionId) === String(regionId)) : orders;
+      const filtered = shoppingOrderFilter(orders);
       if (!filtered.length) return null;
       filtered.sort(compareFn);
       const best = filtered[0];
@@ -7958,6 +8018,7 @@ function effortMatrixHeatmap(grid){
   try { const oh = localStorage.getItem('bc_opencraft_home'); if (oh) ocHome = JSON.parse(oh); } catch(e) {}
   ocSortMode = localStorage.getItem('bc_opencraft_sort') === 'distance' ? 'distance' : 'crafts';
   openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
+  try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
