@@ -395,6 +395,39 @@ table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
 .oc-card-pct{font-weight:600;color:var(--text)}
 .oc-card-owner{font-size:10px;color:var(--text3);display:flex;align-items:center;gap:.35rem}
 .oc-active-tag{font-size:8px;font-weight:700;letter-spacing:.04em;color:var(--green-light);background:rgba(99,153,34,.16);padding:1px 4px;border-radius:3px}
+/* filter bar */
+.oc-filters{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap}
+.oc-fbtn{display:inline-flex;align-items:center;gap:.4rem;max-width:260px;font-size:12px;padding:6px 11px;border-radius:7px;background:var(--bg3);border:1px solid var(--border2);color:var(--text2);cursor:pointer;transition:border .12s,color .12s}
+.oc-fbtn:hover{color:var(--text);border-color:var(--border)}
+.oc-fbtn.on{color:var(--teal-light);border-color:var(--teal);background:rgba(29,158,117,.08)}
+.oc-fbtn-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+.oc-clear{font-size:12px;padding:6px 10px;border-radius:7px;background:transparent;border:1px solid var(--border2);color:var(--text3);cursor:pointer;display:inline-flex;align-items:center;gap:.3rem}
+.oc-clear:hover{color:var(--text);border-color:var(--border)}
+/* filter dropdown panel */
+.oc-drop{background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:.5rem;margin-bottom:1rem;max-width:440px;max-height:56vh;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.oc-drop-title{font-size:12px;font-weight:700;color:var(--text);padding:.2rem .4rem .5rem}
+.oc-drop-sub{font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--text3);padding:.5rem .4rem .25rem}
+.oc-drop-search{display:flex;align-items:center;gap:.4rem;background:var(--bg4);border:1px solid var(--border);border-radius:6px;padding:5px 9px;margin:0 .2rem .4rem;color:var(--text3)}
+.oc-drop-search input{flex:1;background:transparent;border:0;outline:0;color:var(--text);font-size:12px}
+.oc-drow{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:6px 8px;border-radius:6px;font-size:12px;color:var(--text);cursor:pointer}
+.oc-drow:hover{background:var(--bg4)}
+.oc-drow-l{display:flex;align-items:center;gap:.45rem;min-width:0}
+.oc-drow-ico{color:var(--text3);font-size:14px}
+.oc-drow input{cursor:pointer;accent-color:var(--teal)}
+.oc-dall{border-bottom:1px solid var(--border);border-radius:0;margin-bottom:.2rem}
+.oc-dim{opacity:.45}
+.oc-cnt{font-size:10px;color:var(--text3);background:var(--bg4);border-radius:8px;padding:0 6px}
+.oc-scope-chk{color:var(--teal-light)}
+.oc-sub2{font-size:10px;color:var(--text3);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* browse layout */
+.oc-count{font-size:11px;color:var(--text3);margin-bottom:.6rem}
+.oc-cols{column-width:400px;column-gap:1rem}
+.oc-claim-block{break-inside:avoid;-webkit-column-break-inside:avoid;margin-bottom:1rem}
+.oc-claim-block .craft-location-card{margin-bottom:0}
+.oc-more{margin-top:.5rem;text-align:center}
+.oc-pin{cursor:pointer;font-size:15px;color:var(--text3);transform:rotate(45deg)}
+.oc-pin:hover{color:var(--text)}
+.oc-pin.on{color:var(--teal-light)}
 
 /* ── TASKS ── */
 .task-rotation{display:flex;align-items:center;gap:.75rem;padding:.6rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin-bottom:1.25rem;font-size:13px}
@@ -2391,20 +2424,32 @@ function renderPassiveCraftsHtml(passive, itemMap) {
        + sectionHtml('Ready to Claim', 'ti-circle-check', {bg:'rgba(99,153,34,.08)', border:'rgba(99,153,34,.25)', fg:'var(--green-light)'}, readyByLoc, ready.length, 'ready');
 }
 
-// ── OPEN CRAFTS (claim craft monitor) ──
-// Monitors the active crafts at the claim(s) you pin, grouped by profession. Data comes from bitjita's
-// /api/crafts?claimEntityId=<id> (one request per claim → craftResults + items). Each craft's profession
-// is its levelRequirements[0].skill_id; skill names come from craftingData.
-let openCraftClaims = [];        // [{entityId,name,regionName,regionId}] pinned claims (persisted)
-let openCraftData = {};          // claimId -> { crafts:[], itemMap:{}, loading, error, ts }
-let openCraftCollapsed = new Set(); // claimIds whose card is collapsed (persisted)
-let openCraftProfOpen = new Set();  // "claimId:skillId" profession groups that are expanded (persisted)
-let openCraftLive = false;       // auto-refresh toggle (persisted)
-let openCraftLiveId = null;      // interval handle
-let ocSearchTimer = null;
+// ── OPEN CRAFTS (global craft browser) ──
+// Browses every active public craft (bitjita /api/crafts — ~2k crafts across ~650 claims), grouped by
+// claim then profession. Option A: fetch the full set ONCE, then filter entirely client-side (region /
+// tier / skill multi-select + claim scope). Each craft's profession is levelRequirements[0].skill_id.
+let openCraftAll = { crafts:[], itemMap:{}, loading:false, error:null, ts:0 };  // cached global set
+let openCraftClaims = [];          // pinned claims [{entityId,name,regionName,regionId}] (persisted)
+let openCraftCollapsed = new Set(); // claimIds collapsed in the browse (persisted)
+let openCraftProfOpen = new Set();  // "claimId:skillId" expanded profession groups (persisted)
+let ocFilterTiers = new Set();     // selected tiers (empty = all)
+let ocFilterSkills = new Set();    // selected skill_ids (empty = all)
+let ocFilterRegions = new Set();   // selected regionIds (empty = all)
+let ocScope = 'all';               // 'all' | 'my' | 'pinned' | '<claimId>'
+let ocScopeName = '';              // display name when ocScope is a specific claim
+let ocShowCount = 25;              // claim cards shown; "Show more" adds another page
+let ocMyClaims = [];               // [{entityId,name}] derived from tracked players (cached)
+let ocRegions = {};                // regionId -> name
+let ocGroupsById = {};             // claimId -> group, so a collapse/expand re-renders just one card
+let ocOpenDrop = null;             // which filter dropdown is open ('region'|'tier'|'skill'|'claim')
+let ocSkillQuery = '', ocClaimQuery = '';
+let openCraftLive = false, openCraftLiveId = null, ocSearchTimer = null;
+const OC_PAGE = 25;
 function saveOpenCraftClaims(){ safeSetItem('bc_opencraft_claims', JSON.stringify(openCraftClaims)); }
 function saveOpenCraftCollapsed(){ safeSetItem('bc_opencraft_collapsed', JSON.stringify([...openCraftCollapsed])); }
 function saveOpenCraftProfOpen(){ safeSetItem('bc_opencraft_profopen', JSON.stringify([...openCraftProfOpen])); }
+function ocSaveFilters(){ safeSetItem('bc_opencraft_filters', JSON.stringify({tiers:[...ocFilterTiers], skills:[...ocFilterSkills], regions:[...ocFilterRegions], scope:ocScope, scopeName:ocScopeName})); }
+function ocIsPinned(id){ return openCraftClaims.some(c => String(c.entityId) === String(id)); }
 
 const OC_PROF_ICONS = { farming:'ti-plant-2', forestry:'ti-tree', carpentry:'ti-tools', masonry:'ti-wall',
   mining:'ti-pick', smithing:'ti-hammer', scholar:'ti-book', leatherworking:'ti-shoe', hunting:'ti-bow',
@@ -2429,83 +2474,185 @@ function ocProfId(cr){ const l = (cr.levelRequirements&&cr.levelRequirements[0])
 function renderOpenCraftsTab(){
   const el = document.getElementById('opencrafts-content'); if (!el) return;
   el.innerHTML = `
-    <div class="oc-toolbar">
-      <div class="search-wrap oc-search">
-        <i class="ti ti-search si"></i>
-        <input id="oc-claim-input" placeholder="Search a claim to monitor…" autocomplete="off">
-        <div id="oc-search-results" class="search-results" style="display:none"></div>
-      </div>
-      <button class="btn ctrl-btn" onclick="refreshOpenCrafts()"><i class="ti ti-refresh"></i> Refresh</button>
-      <button id="oc-live-btn" class="btn live-btn${openCraftLive?' live-btn-on':''}" onclick="toggleOpenCraftLive()"><i class="ti ti-player-${openCraftLive?'pause':'play'}"></i> Live</button>
-    </div>
-    <div id="oc-claim-list"></div>`;
-  const input = document.getElementById('oc-claim-input');
-  input.addEventListener('input', () => {
-    clearTimeout(ocSearchTimer);
-    const q = input.value.trim();
-    if (q.length < 2){ ocHideResults(); return; }
-    ocSearchTimer = setTimeout(() => ocSearch(q), 350);
-  });
-  if (!window.__ocDocBound){ window.__ocDocBound = true; document.addEventListener('click', e => { if (!e.target.closest('.oc-search')) ocHideResults(); }); }
-  renderOpenCraftList();
-  openCraftClaims.forEach(c => { if (!openCraftData[c.entityId]) loadClaimActiveCrafts(c.entityId); });
+    <div class="oc-filters" id="oc-filters"></div>
+    <div id="oc-drop" class="oc-drop" style="display:none"></div>
+    <div id="oc-browse" class="oc-browse"></div>`;
+  if (!window.__ocDocBound){ window.__ocDocBound = true; document.addEventListener('click', e => { if (!e.target.closest('#oc-drop') && !e.target.closest('.oc-fbtn')) ocCloseDrop(); }); }
+  ocRenderFilterBar();
+  ocRenderBrowse();
+  ocFetchGlobal();
+  // region names for the Region filter (reuse the app's regions list)
+  if (!Object.keys(ocRegions).length) apiFetch('/api/regions').then(d => { (Array.isArray(d)?d:(d.regions||[])).forEach(r => { const id = r.regionId||r.id||r.entityId; if (id!=null) ocRegions[id] = r.name||r.regionName||('R'+id); }); ocRenderFilterBar(); }).catch(()=>{});
   if (openCraftLive) startOpenCraftLive();
 }
-function renderOpenCraftList(){
-  const list = document.getElementById('oc-claim-list'); if (!list) return;
-  if (!openCraftClaims.length){ list.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-building-factory-2"></i><span>Search a claim above to monitor its active crafts</span></div>'; return; }
-  list.innerHTML = openCraftClaims.map(c => `<div id="oc-claim-${c.entityId}" class="oc-claim-block"></div>`).join('');
-  openCraftClaims.forEach(c => renderClaimCraftsSection(c.entityId));
+function ocRegionName(id){ return ocRegions[id] || ('R' + id); }
+function ocFilterLabel(kind){
+  if (kind==='region') return ocFilterRegions.size ? [...ocFilterRegions].map(ocRegionName).join(', ') : 'All Regions';
+  if (kind==='tier')   return ocFilterTiers.size ? [...ocFilterTiers].sort((a,b)=>a-b).map(t=>'T'+t).join(', ') : 'All Tiers';
+  if (kind==='skill')  return ocFilterSkills.size ? [...ocFilterSkills].map(ocSkillName).join(', ') : 'All Skills';
+  if (kind==='claim')  return ocScope==='all'?'All Claims' : ocScope==='my'?'My Claims' : ocScope==='pinned'?'Pinned Claims' : (ocScopeName||'1 claim');
+  return '';
 }
-async function ocSearch(q){
-  try {
-    const d = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`);
-    const claims = d.claims || [];
-    const el = document.getElementById('oc-search-results'); if (!el) return;
-    if (!claims.length){ el.innerHTML = '<div class="search-result-item">No claims found</div>'; el.style.display = 'block'; return; }
-    el.innerHTML = claims.slice(0, 8).map(c => {
-      const pinned = openCraftClaims.some(x => String(x.entityId) === String(c.entityId));
-      return `<div class="search-result-item" onclick='ocAddClaim(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionName:c.regionName,regionId:c.regionId}))})'>${escHtml(c.name||'Unnamed claim')}${pinned?' <span style="color:var(--teal-light)">· pinned</span>':''}<small>${escHtml(c.regionName||('R'+c.regionId))} · ${fmtCount(c.numTiles||0)} tiles</small></div>`;
-    }).join('');
-    el.style.display = 'block';
-  } catch(e){ ocHideResults(); }
+function ocRenderFilterBar(){
+  const bar = document.getElementById('oc-filters'); if (!bar) return;
+  const anyFilter = ocFilterTiers.size || ocFilterSkills.size || ocFilterRegions.size || ocScope!=='all';
+  const btn = (kind,icon) => `<button class="oc-fbtn${(kind==='tier'?ocFilterTiers.size:kind==='skill'?ocFilterSkills.size:kind==='region'?ocFilterRegions.size:ocScope!=='all')?' on':''}" onclick="ocToggleDrop('${kind}')"><i class="ti ${icon}"></i> <span class="oc-fbtn-lbl">${escHtml(ocFilterLabel(kind))}</span> <i class="ti ti-chevron-down" style="font-size:12px"></i></button>`;
+  bar.innerHTML = `
+    ${btn('region','ti-map-2')}
+    ${btn('tier','ti-stack-2')}
+    ${btn('skill','ti-tools')}
+    ${btn('claim','ti-building-community')}
+    ${anyFilter?'<button class="oc-clear" onclick="ocClearFilters()"><i class="ti ti-x"></i> Clear</button>':''}
+    <span style="flex:1"></span>
+    <button class="btn ctrl-btn" onclick="ocFetchGlobal(true)"><i class="ti ti-refresh"></i> Refresh</button>
+    <button id="oc-live-btn" class="btn live-btn${openCraftLive?' live-btn-on':''}" onclick="toggleOpenCraftLive()"><i class="ti ti-player-${openCraftLive?'pause':'play'}"></i> Live</button>`;
 }
-function ocHideResults(){ const el = document.getElementById('oc-search-results'); if (el) el.style.display = 'none'; }
-function ocAddClaim(raw){
-  const c = JSON.parse(raw);
-  if (!openCraftClaims.some(x => String(x.entityId) === String(c.entityId))) openCraftClaims.push(c);
-  saveOpenCraftClaims();
-  const input = document.getElementById('oc-claim-input'); if (input) input.value = '';
-  ocHideResults();
-  renderOpenCraftList();
-  loadClaimActiveCrafts(c.entityId);
+// Apply scope + filters to the cached set, group by claim, sort by most total crafts.
+function ocGroups(){
+  let crafts = openCraftAll.crafts;
+  if (ocScope==='pinned'){ const ids=new Set(openCraftClaims.map(c=>String(c.entityId))); crafts=crafts.filter(c=>ids.has(String(c.claimEntityId))); }
+  else if (ocScope==='my'){ const ids=new Set(ocMyClaims.map(c=>String(c.entityId))); crafts=crafts.filter(c=>ids.has(String(c.claimEntityId))); }
+  else if (ocScope!=='all'){ crafts=crafts.filter(c=>String(c.claimEntityId)===ocScope); }
+  if (ocFilterRegions.size) crafts=crafts.filter(c=>ocFilterRegions.has(c.regionId));
+  if (ocFilterSkills.size)  crafts=crafts.filter(c=>ocFilterSkills.has(ocProfId(c)));
+  if (ocFilterTiers.size)   crafts=crafts.filter(c=>{ const it=openCraftAll.itemMap[c.craftedItem&&c.craftedItem[0]&&c.craftedItem[0].item_id]; return ocFilterTiers.has(it&&it.tier>0?it.tier:0); });
+  const byClaim={};
+  crafts.forEach(c=>{ const id=String(c.claimEntityId); (byClaim[id] = byClaim[id] || { id, name:c.claimName||'Claim', regionId:c.regionId, crafts:[] }).crafts.push(c); });
+  const groups = Object.values(byClaim).sort((a,b)=> b.crafts.length - a.crafts.length);  // most total crafts first
+  ocGroupsById = {}; groups.forEach(g=>ocGroupsById[g.id]=g);
+  return groups;
 }
-function ocRemoveClaim(id){
-  id = String(id);
-  openCraftClaims = openCraftClaims.filter(c => String(c.entityId) !== id);
-  delete openCraftData[id];
-  saveOpenCraftClaims();
-  renderOpenCraftList();
+function ocRenderBrowse(){
+  const host = document.getElementById('oc-browse'); if (!host) return;
+  if (openCraftAll.loading && !openCraftAll.crafts.length){ host.innerHTML = `<div class="oc-msg">${loading()}</div>`; return; }
+  if (openCraftAll.error){ host.innerHTML = `<div class="oc-msg" style="color:var(--red-light,#e06666)">${escHtml(openCraftAll.error)}</div>`; return; }
+  const groups = ocGroups();
+  if (!groups.length){ host.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-building-factory-2"></i><span>No crafts match these filters</span></div>'; return; }
+  const shown = groups.slice(0, ocShowCount);
+  const cards = `<div class="oc-cols">${shown.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`;
+  const more = groups.length > ocShowCount
+    ? `<div class="oc-more"><button class="btn ctrl-btn" onclick="ocShowMore()">Show ${Math.min(OC_PAGE, groups.length-ocShowCount)} more · ${groups.length-ocShowCount} claims hidden</button></div>` : '';
+  const count = `<div class="oc-count">${groups.length} claim${groups.length!==1?'s':''}${openCraftAll.loading?' · refreshing…':''}</div>`;
+  host.innerHTML = count + cards + more;
 }
-function ocToggleClaim(id){ id = String(id); if (openCraftCollapsed.has(id)) openCraftCollapsed.delete(id); else openCraftCollapsed.add(id); saveOpenCraftCollapsed(); renderClaimCraftsSection(id); }
-function ocToggleProf(id, sid){ const k = id + ':' + sid; if (openCraftProfOpen.has(k)) openCraftProfOpen.delete(k); else openCraftProfOpen.add(k); saveOpenCraftProfOpen(); renderClaimCraftsSection(id); }
-// One request per claim: /api/crafts?claimEntityId=<id> returns every active craft at the claim + item meta.
-async function loadClaimActiveCrafts(claimId){
-  claimId = String(claimId);
-  openCraftData[claimId] = { ...(openCraftData[claimId]||{}), loading:true, error:null };
-  renderClaimCraftsSection(claimId);
+function ocShowMore(){ ocShowCount += OC_PAGE; ocRenderBrowse(); }
+function ocRerenderCard(id){ id=String(id); const g=ocGroupsById[id]; const host=document.getElementById('oc-claim-'+id); if (g && host) host.innerHTML = ocClaimCardHtml(g); }
+// Fetch the whole public craft board once (cached). All filtering is client-side (Option A).
+async function ocFetchGlobal(force){
+  if (openCraftAll.loading) return;
+  if (!force && openCraftAll.crafts.length && Date.now() - openCraftAll.ts < 20000){ ocRenderBrowse(); return; }
+  openCraftAll = { ...openCraftAll, loading:true, error:null };
+  ocRenderBrowse();
   try {
     await loadCraftingData().catch(()=>{});   // skill names for the profession groups
-    const d = await apiFetch(`/api/crafts?claimEntityId=${encodeURIComponent(claimId)}`);
+    const d = await apiFetch('/api/crafts');
     const itemMap = {};
     (d.items||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
     (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
     const crafts = (d.craftResults || []).filter(c => !c.completed);
-    openCraftData[claimId] = { crafts, itemMap, loading:false, error:null, ts:Date.now() };
-  } catch(e){
-    openCraftData[claimId] = { ...(openCraftData[claimId]||{}), loading:false, error: e.message || 'Failed to load' };
+    openCraftAll = { crafts, itemMap, loading:false, error:null, ts:Date.now() };
+  } catch(e){ openCraftAll = { ...openCraftAll, loading:false, error: e.message || 'Failed to load crafts' }; }
+  ocRenderBrowse();
+  ocRenderFilterBar();
+}
+// Option counts across the whole set, so each filter dropdown can show how many crafts it would match.
+function ocFacets(){
+  const tiers={}, skills={}, regions={};
+  openCraftAll.crafts.forEach(c => {
+    const it = openCraftAll.itemMap[c.craftedItem && c.craftedItem[0] && c.craftedItem[0].item_id];
+    const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0)+1;
+    const s = ocProfId(c); skills[s] = (skills[s]||0)+1;
+    regions[c.regionId] = (regions[c.regionId]||0)+1;
+  });
+  return { tiers, skills, regions };
+}
+function ocToggleDrop(kind){
+  if (ocOpenDrop === kind){ ocCloseDrop(); return; }
+  ocOpenDrop = kind; ocSkillQuery = ''; ocClaimQuery = '';
+  const d = document.getElementById('oc-drop'); d.innerHTML = ocDropHtml(kind); d.style.display = 'block';
+  if (kind === 'claim' && !ocMyClaims.length) ocLoadMyClaims();
+}
+function ocCloseDrop(){ ocOpenDrop = null; const d = document.getElementById('oc-drop'); if (d) d.style.display = 'none'; }
+function ocSkillRows(){
+  const f = ocFacets();
+  return Object.keys(f.skills).map(Number).map(sid => ({ sid, name: ocSkillName(sid), n: f.skills[sid] }))
+    .filter(s => !ocSkillQuery || s.name.toLowerCase().includes(ocSkillQuery))
+    .sort((a,b) => a.name.localeCompare(b.name))
+    .map(s => `<label class="oc-drow"><span class="oc-drow-l"><i class="ti ${ocSkillIcon(s.name)} oc-drow-ico"></i> ${escHtml(s.name)} <span class="oc-cnt">${s.n}</span></span><input type="checkbox" ${ocFilterSkills.has(s.sid)?'checked':''} onchange="ocToggleFilter('skill',${s.sid})"></label>`).join('');
+}
+function ocDropHtml(kind){
+  const f = ocFacets();
+  if (kind === 'tier'){
+    const rows = [1,2,3,4,5,6,7,8,9,10].map(t => { const n=f.tiers[t]||0;
+      return `<label class="oc-drow${n?'':' oc-dim'}"><span class="oc-drow-l">${ocTierBadge(t)} Tier ${t}${n?` <span class="oc-cnt">${n}</span>`:''}</span><input type="checkbox" ${ocFilterTiers.has(t)?'checked':''} onchange="ocToggleFilter('tier',${t})"></label>`; }).join('');
+    return `<div class="oc-drop-title">Select Tiers</div><label class="oc-drow oc-dall"><span class="oc-drow-l"><i class="ti ti-list"></i> All Tiers</span><input type="checkbox" ${!ocFilterTiers.size?'checked':''} onchange="ocClearFilter('tier')"></label><div class="oc-drop-list">${rows}</div>`;
   }
-  renderClaimCraftsSection(claimId);
+  if (kind === 'region'){
+    const rows = Object.keys(f.regions).map(Number).sort((a,b)=>a-b).map(id =>
+      `<label class="oc-drow"><span class="oc-drow-l"><i class="ti ti-map-pin oc-drow-ico"></i> ${escHtml(ocRegionName(id))} <span class="oc-cnt">${f.regions[id]}</span></span><input type="checkbox" ${ocFilterRegions.has(id)?'checked':''} onchange="ocToggleFilter('region',${id})"></label>`).join('');
+    return `<div class="oc-drop-title">Select Regions</div><label class="oc-drow oc-dall"><span class="oc-drow-l"><i class="ti ti-list"></i> All Regions</span><input type="checkbox" ${!ocFilterRegions.size?'checked':''} onchange="ocClearFilter('region')"></label><div class="oc-drop-list">${rows}</div>`;
+  }
+  if (kind === 'skill'){
+    return `<div class="oc-drop-title">Select Skills</div>
+      <div class="oc-drop-search"><i class="ti ti-search"></i><input placeholder="Search skills…" value="${escHtml(ocSkillQuery)}" oninput="ocSkillSearchInput(this.value)"></div>
+      <label class="oc-drow oc-dall"><span class="oc-drow-l"><i class="ti ti-list"></i> All Skills</span><input type="checkbox" ${!ocFilterSkills.size?'checked':''} onchange="ocClearFilter('skill')"></label>
+      <div class="oc-drop-sub">PROFESSION</div><div id="oc-skill-list" class="oc-drop-list">${ocSkillRows()}</div>`;
+  }
+  if (kind === 'claim'){
+    const myNames = ocMyClaims.slice(0,3).map(c=>c.name).join(', ') + (ocMyClaims.length>3?'…':'');
+    const pinNames = openCraftClaims.slice(0,3).map(c=>c.name).join(', ') + (openCraftClaims.length>3?'…':'');
+    const chk = s => ocScope===s ? '<i class="ti ti-check oc-scope-chk"></i>' : '';
+    return `<div class="oc-drop-title">Select Claim</div>
+      <div class="oc-drop-search"><i class="ti ti-search"></i><input placeholder="Search claims…" oninput="ocClaimSearchInput(this.value)"></div>
+      <div class="oc-drow oc-scope" onclick="ocSetScope('all')"><span class="oc-drow-l"><i class="ti ti-list"></i> All Claims</span>${chk('all')}</div>
+      <div class="oc-drow oc-scope" onclick="ocSetScope('my')"><span class="oc-drow-l"><i class="ti ti-user"></i> My Claims ${ocMyClaims.length?`<span class="oc-sub2">${escHtml(myNames)}</span>`:'<span class="oc-sub2">— track a player first</span>'}</span>${chk('my')}</div>
+      <div class="oc-drow oc-scope" onclick="ocSetScope('pinned')"><span class="oc-drow-l"><i class="ti ti-pin"></i> Pinned Claims ${openCraftClaims.length?`<span class="oc-sub2">${escHtml(pinNames)}</span>`:'<span class="oc-sub2">— none pinned yet</span>'}</span>${chk('pinned')}</div>
+      <div id="oc-claim-results" class="oc-drop-list"></div>`;
+  }
+  return '';
+}
+function ocToggleFilter(kind, val){
+  const set = kind==='tier'?ocFilterTiers : kind==='skill'?ocFilterSkills : ocFilterRegions;
+  if (set.has(val)) set.delete(val); else set.add(val);
+  ocSaveFilters(); ocShowCount = OC_PAGE;
+  if (kind==='skill'){ const l=document.getElementById('oc-skill-list'); if(l) l.innerHTML = ocSkillRows(); } // keep search focus
+  else { const d=document.getElementById('oc-drop'); if(d && ocOpenDrop) d.innerHTML = ocDropHtml(ocOpenDrop); }
+  ocRenderFilterBar(); ocRenderBrowse();
+}
+function ocClearFilter(kind){
+  (kind==='tier'?ocFilterTiers:kind==='skill'?ocFilterSkills:ocFilterRegions).clear();
+  ocSaveFilters(); ocShowCount = OC_PAGE;
+  const d=document.getElementById('oc-drop'); if(d && ocOpenDrop) d.innerHTML = ocDropHtml(ocOpenDrop);
+  ocRenderFilterBar(); ocRenderBrowse();
+}
+function ocSetScope(scope, name){ ocScope=scope; ocScopeName=name||''; ocSaveFilters(); ocShowCount=OC_PAGE; ocCloseDrop(); ocRenderFilterBar(); ocRenderBrowse(); }
+function ocClearFilters(){ ocFilterTiers.clear(); ocFilterSkills.clear(); ocFilterRegions.clear(); ocScope='all'; ocScopeName=''; ocSaveFilters(); ocShowCount=OC_PAGE; ocCloseDrop(); ocRenderFilterBar(); ocRenderBrowse(); }
+function ocSkillSearchInput(v){ ocSkillQuery=(v||'').toLowerCase().trim(); const l=document.getElementById('oc-skill-list'); if(l) l.innerHTML = ocSkillRows(); }
+function ocClaimSearchInput(v){
+  clearTimeout(ocSearchTimer); const q=(v||'').trim();
+  const box=document.getElementById('oc-claim-results'); if(!box) return;
+  if (q.length<2){ box.innerHTML=''; return; }
+  ocSearchTimer=setTimeout(async()=>{
+    try{ const d=await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`); const claims=d.claims||[];
+      box.innerHTML = claims.slice(0,8).map(c=>`<div class="oc-drow oc-scope" onclick='ocPickClaim(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionName:c.regionName,regionId:c.regionId}))})'><span class="oc-drow-l">${escHtml(c.name||'Claim')} <span class="oc-sub2">${escHtml(c.regionName||('R'+c.regionId))}</span></span>${ocIsPinned(c.entityId)?'<i class="ti ti-pin-filled oc-scope-chk"></i>':''}</div>`).join('') || '<div class="oc-msg" style="color:var(--text3)">No claims found</div>';
+    }catch(e){ box.innerHTML=''; }
+  },350);
+}
+function ocPickClaim(raw){ const c=JSON.parse(raw); if(!ocIsPinned(c.entityId)){ openCraftClaims.push({entityId:String(c.entityId), name:c.name, regionId:c.regionId, regionName:c.regionName}); saveOpenCraftClaims(); } ocSetScope(String(c.entityId), c.name); }
+function ocTogglePin(raw){ const o=JSON.parse(raw); const id=String(o.id);
+  if (ocIsPinned(id)) openCraftClaims=openCraftClaims.filter(c=>String(c.entityId)!==id);
+  else openCraftClaims.push({entityId:id, name:o.name, regionId:o.regionId});
+  saveOpenCraftClaims(); ocRerenderCard(id); if (ocScope==='pinned') ocRenderBrowse();
+}
+function ocToggleClaim(id){ id=String(id); if (openCraftCollapsed.has(id)) openCraftCollapsed.delete(id); else openCraftCollapsed.add(id); saveOpenCraftCollapsed(); ocRerenderCard(id); }
+function ocToggleProf(id, sid){ const k=id+':'+sid; if (openCraftProfOpen.has(k)) openCraftProfOpen.delete(k); else openCraftProfOpen.add(k); saveOpenCraftProfOpen(); ocRerenderCard(id); }
+async function ocLoadMyClaims(){
+  const players = (typeof trackedPlayers!=='undefined'?trackedPlayers:[]);
+  if (!players.length){ ocMyClaims=[]; return; }
+  const seen={};
+  await Promise.all(players.map(async p=>{ try{ const d=await apiFetch(`/api/players/${p.entityId}`); ((d.player&&d.player.claims)||[]).forEach(c=>{ seen[String(c.entityId)]={entityId:String(c.entityId), name:c.name, regionId:c.regionId}; }); }catch(e){} }));
+  ocMyClaims=Object.values(seen);
+  if (ocOpenDrop==='claim'){ const d=document.getElementById('oc-drop'); if(d) d.innerHTML=ocDropHtml('claim'); }
 }
 function ocCraftCard(cr, itemMap, now){
   const it = itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id];
@@ -2523,77 +2670,62 @@ function ocCraftCard(cr, itemMap, now){
     <div class="oc-card-owner">by ${escHtml(cr.ownerUsername||'?')}${active?' <span class="oc-active-tag">ACTIVE</span>':''}</div>
   </div>`;
 }
-function renderClaimCraftsSection(claimId){
-  claimId = String(claimId);
-  const host = document.getElementById('oc-claim-' + claimId); if (!host) return;
-  const claim = openCraftClaims.find(c => String(c.entityId) === claimId) || { name:'Claim', entityId:claimId };
-  const data = openCraftData[claimId] || {};
-  const crafts = data.crafts || [];
-  const now = Date.now();
+// Render one claim's card from a group {id,name,regionId,crafts}: profession rows (collapsed) → craft cards.
+function ocClaimCardHtml(g){
+  const claimId = String(g.id), crafts = g.crafts || [], now = Date.now();
   const collapsed = openCraftCollapsed.has(claimId);
-  const region = claim.regionName ? `<span class="oc-region">${escHtml(claim.regionName)}</span>` : '';
-
-  // ── group by profession ──
+  const region = `<span class="oc-region">${escHtml(ocRegionName(g.regionId))}</span>`;
   const byProf = {};
   crafts.forEach(cr => { const sid = ocProfId(cr); (byProf[sid] = byProf[sid] || []).push(cr); });
   const totalLeft = crafts.reduce((s,c) => s + Math.max(0, (c.totalActionsRequired||0) - (c.progress||0)), 0);
   const totalActive = crafts.filter(c => c.lockExpiration && new Date(c.lockExpiration).getTime() > now).length;
   const profCount = Object.keys(byProf).length;
-
-  // profession groups sorted by remaining actions (biggest first), like the reference
   const profs = Object.keys(byProf).map(sid => {
     const cs = byProf[sid];
     const left = cs.reduce((s,c) => s + Math.max(0, (c.totalActionsRequired||0) - (c.progress||0)), 0);
     const active = cs.filter(c => c.lockExpiration && new Date(c.lockExpiration).getTime() > now).length;
     const tiers = {};
-    cs.forEach(c => { const it = data.itemMap[c.craftedItem && c.craftedItem[0] && c.craftedItem[0].item_id]; const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0) + 1; });
+    cs.forEach(c => { const it = openCraftAll.itemMap[c.craftedItem && c.craftedItem[0] && c.craftedItem[0].item_id]; const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0) + 1; });
     return { sid, cs, left, active, tiers, name: ocSkillName(sid) };
   }).sort((a,b) => b.left - a.left);
-
-  const bodyInner = data.loading ? `<div class="oc-msg">${loading()}</div>`
-    : data.error ? `<div class="oc-msg" style="color:var(--red-light,#e06666)">${escHtml(data.error)}</div>`
-    : !crafts.length ? `<div class="oc-msg" style="color:var(--text3)">No active crafts at this claim right now.</div>`
-    : profs.map(p => {
-        const open = openCraftProfOpen.has(claimId + ':' + p.sid);
-        const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
-          .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
-        const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, data.itemMap, now)).join('')}</div>` : '';
-        return `<div class="oc-prof">
-          <div class="oc-prof-hdr" onclick="ocToggleProf('${claimId}','${p.sid}')">
-            <i class="ti ${ocSkillIcon(p.name)} oc-prof-ico"></i>
-            <span class="oc-prof-name">${escHtml(p.name)}</span>
-            <span class="oc-prof-tiers">${tierBadges}</span>
-            <span style="flex:1"></span>
-            <span class="oc-prof-meta">${p.cs.length} craft${p.cs.length!==1?'s':''} · ${fmtCount(p.left)} left</span>
-            ${p.active?`<span class="oc-active-pill">${p.active} active</span>`:''}
-            <i class="ti ti-chevron-${open?'up':'down'} oc-chev"></i>
-          </div>
-          ${cards}
-        </div>`;
-      }).join('');
-
-  const summary = data.loading ? 'Loading…'
-    : data.error ? ''
-    : `${crafts.length} craft${crafts.length!==1?'s':''} · ${fmtCount(totalLeft)} actions remaining · ${profCount} profession${profCount!==1?'s':''}`;
-  host.innerHTML = `<div class="craft-location-card">
+  const bodyInner = profs.map(p => {
+    const open = openCraftProfOpen.has(claimId + ':' + p.sid);
+    const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
+      .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
+    const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
+    return `<div class="oc-prof">
+      <div class="oc-prof-hdr" onclick="ocToggleProf('${claimId}','${p.sid}')">
+        <i class="ti ${ocSkillIcon(p.name)} oc-prof-ico"></i>
+        <span class="oc-prof-name">${escHtml(p.name)}</span>
+        <span class="oc-prof-tiers">${tierBadges}</span>
+        <span style="flex:1"></span>
+        <span class="oc-prof-meta">${p.cs.length} craft${p.cs.length!==1?'s':''} · ${fmtCount(p.left)} left</span>
+        ${p.active?`<span class="oc-active-pill">${p.active} active</span>`:''}
+        <i class="ti ti-chevron-${open?'up':'down'} oc-chev"></i>
+      </div>
+      ${cards}
+    </div>`;
+  }).join('');
+  const pinned = ocIsPinned(claimId);
+  return `<div class="craft-location-card">
     <div class="craft-location-header oc-claim-hdr" onclick="ocToggleClaim('${claimId}')">
       <div class="craft-location-name" style="flex-direction:column;align-items:flex-start;gap:1px">
-        <span><i class="ti ti-map-pin"></i> <b>${escHtml(claim.name)}</b> ${region}</span>
-        <span class="oc-claim-sub">${summary}</span>
+        <span><i class="ti ti-map-pin"></i> <b>${escHtml(g.name)}</b> ${region}</span>
+        <span class="oc-claim-sub">${crafts.length} craft${crafts.length!==1?'s':''} · ${fmtCount(totalLeft)} actions remaining · ${profCount} profession${profCount!==1?'s':''}</span>
       </div>
       <div class="craft-location-meta">
         ${totalActive?`<span class="oc-active-pill oc-active-pill-lg"><i class="ti ti-bolt" style="font-size:11px"></i> ${totalActive} active</span>`:''}
-        <i class="ti ti-x oc-remove" title="Remove claim" onclick="event.stopPropagation();ocRemoveClaim('${claimId}')"></i>
+        <i class="ti ti-pin${pinned?'-filled':''} oc-pin${pinned?' on':''}" title="${pinned?'Unpin claim':'Pin claim'}" onclick='event.stopPropagation();ocTogglePin(${JSON.stringify(JSON.stringify({id:claimId,name:g.name,regionId:g.regionId}))})'></i>
         <i class="ti ti-chevron-${collapsed?'down':'up'}"></i>
       </div>
     </div>
     ${collapsed ? '' : `<div class="oc-claim-body">${bodyInner}</div>`}
   </div>`;
 }
-function refreshOpenCrafts(){ openCraftClaims.forEach(c => loadClaimActiveCrafts(c.entityId)); }
+function refreshOpenCrafts(){ ocFetchGlobal(true); }
 function startOpenCraftLive(){
   if (openCraftLiveId) return;
-  openCraftLiveId = setInterval(() => { if (currentTab !== 'opencrafts' || document.hidden) return; refreshOpenCrafts(); }, 30000);
+  openCraftLiveId = setInterval(() => { if (currentTab !== 'opencrafts' || document.hidden) return; ocFetchGlobal(true); }, 30000);
 }
 function stopOpenCraftLive(){ if (openCraftLiveId){ clearInterval(openCraftLiveId); openCraftLiveId = null; } }
 function toggleOpenCraftLive(){
@@ -7599,6 +7731,7 @@ function effortMatrixHeatmap(grid){
   try { const oc = JSON.parse(localStorage.getItem('bc_opencraft_claims') || '[]'); if (Array.isArray(oc)) openCraftClaims = oc; } catch(e) {}
   try { const oq = JSON.parse(localStorage.getItem('bc_opencraft_collapsed') || '[]'); if (Array.isArray(oq)) openCraftCollapsed = new Set(oq.map(String)); } catch(e) {}
   try { const op = JSON.parse(localStorage.getItem('bc_opencraft_profopen') || '[]'); if (Array.isArray(op)) openCraftProfOpen = new Set(op.map(String)); } catch(e) {}
+  try { const of = JSON.parse(localStorage.getItem('bc_opencraft_filters') || '{}'); if (of && typeof of === 'object'){ ocFilterTiers = new Set((of.tiers||[]).map(Number)); ocFilterSkills = new Set((of.skills||[]).map(Number)); ocFilterRegions = new Set((of.regions||[]).map(Number)); ocScope = of.scope || 'all'; ocScopeName = of.scopeName || ''; } } catch(e) {}
   openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
   renderPlayerArea();
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
