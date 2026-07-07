@@ -314,6 +314,16 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .al-vol{display:flex;align-items:center;gap:.5rem;color:var(--text3)}
 .al-tts .al-vol{flex-wrap:wrap;justify-content:flex-end}
 .al-voice{max-width:200px;font-size:12px;padding:4px 8px}
+.al-section-title{font-size:12px;font-weight:700;color:var(--text2);margin:1.1rem 0 .55rem}
+.al-pcards{display:flex;flex-direction:column;gap:.6rem}
+.al-pcard{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem}
+.al-pcard-muted{opacity:.6}
+.al-pcard-hdr{font-size:13px;color:var(--text);margin-bottom:.55rem;display:flex;align-items:center;gap:.4rem}
+.al-pchips{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.al-pchip-wrap{display:flex;align-items:center;gap:.35rem}
+.al-pchip{display:inline-flex;align-items:center;gap:.35rem;font-size:12px;padding:4px 9px;border-radius:8px;background:var(--bg4);border:1px solid var(--border2);color:var(--text2);cursor:pointer;white-space:nowrap}
+.al-pchip.on{background:rgba(29,158,117,.14);border-color:var(--teal);color:var(--teal-light)}
+.al-pchip input{cursor:pointer;accent-color:var(--teal)}
 .al-vol input[type=range]{width:140px;accent-color:var(--teal)}
 .al-note{font-size:12px;color:var(--text3);line-height:1.5;display:flex;align-items:flex-start;gap:.4rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.6rem .75rem;margin-bottom:.9rem}
 .al-note i{margin-top:1px}
@@ -7290,6 +7300,7 @@ const STAT_IDX = { health:0, stamina:1 };
 const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
   tts: { on:false, voice:'', rate:0.95 },   // spoken alerts (Web Speech); independent of the sound master
+  players: {},                              // entityId -> per-player on/off + threshold overrides (see palOn)
   types: {
     buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
     stamina:   { on:false, sound:'coin', dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
@@ -7311,6 +7322,7 @@ function loadAlerts(){
     alertSettings = { ...ALERT_DEFAULTS, ...saved, types: {} };
     for (const k of Object.keys(ALERT_DEFAULTS.types)) alertSettings.types[k] = { ...ALERT_DEFAULTS.types[k], ...((saved.types||{})[k]||{}) };
     alertSettings.tts = { ...ALERT_DEFAULTS.tts, ...(saved.tts||{}) };
+    alertSettings.players = (saved.players && typeof saved.players === 'object') ? saved.players : {};
   } catch(e) { alertSettings = JSON.parse(JSON.stringify(ALERT_DEFAULTS)); }
 }
 function saveAlerts(){ try { safeSetItem('bc_alerts', JSON.stringify(alertSettings)); } catch(e){} }
@@ -7469,7 +7481,18 @@ let alertTimer = null;
 let alertState = {}; // entityId -> tracking between polls (baselines)
 const ALERT_POLL_MS = 15000;
 const CRAFT_DONE_MUTE_MS = 30000;  // after a "passive craft done" ping, stay quiet this long so a wave of stations finishing seconds apart pings once, not ten times
-function alertsEnabled(){ loadAlerts(); return alertsActive() && trackedPlayers.length && Object.values(alertSettings.types).some(t=>t.on); }
+// Per-player alert config: each tracked player's on/off + thresholds override the global default in
+// alertSettings.types. pal* return the EFFECTIVE value (player override if set, else the global default),
+// so existing setups keep working and each player can be tuned independently.
+function palPlayers(){ loadAlerts(); if (!alertSettings.players || typeof alertSettings.players !== 'object') alertSettings.players = {}; return alertSettings.players; }
+function palOn(id, key){ const p = palPlayers()[String(id)]; return (p && p[key] !== undefined) ? !!p[key] : !!(alertSettings.types[key] && alertSettings.types[key].on); }
+function palStaminaDrop(id){ const p = palPlayers()[String(id)]; return (p && p.staminaDrop != null) ? p.staminaDrop : (alertSettings.types.stamina.dropPct || 0); }
+function palIdleSecs(id){ const p = palPlayers()[String(id)]; return (p && p.idleSecs != null) ? p.idleSecs : (alertSettings.types.idle.seconds || 60); }
+function palAnyOn(id){ return ['buffLost','stamina','craftDone','idle'].some(k => palOn(id, k)); }
+function setPlayerAlert(id, key, on){ const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {})[key] = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
+function setPlayerStaminaDrop(id, v){ let n = parseInt(v,10); if (isNaN(n)) n = 0; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).staminaDrop = Math.max(0, Math.min(99, n)); saveAlerts(); restartAlerts(); }
+function setPlayerIdleSecs(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 10) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).idleSecs = n; saveAlerts(); restartAlerts(); }
+function alertsEnabled(){ loadAlerts(); if (!alertsActive() || !trackedPlayers.length) return false; return activePlayers().some(p => !isPlayerAlertsMuted(p.entityId) && palAnyOn(p.entityId)); }
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
 function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
@@ -7480,7 +7503,7 @@ async function checkPlayerBuffs(p){
   const id = String(p.entityId);
   const st = alertState[id] || (alertState[id] = {});
   loadAlerts(); const t = alertSettings.types.buffLost;
-  if (!t || !t.on || st.buffCheckInFlight) return;
+  if (!palOn(id,'buffLost') || st.buffCheckInFlight) return;
   st.buffCheckInFlight = true;
   try {
     const d = await apiFetch(`/api/players/${id}/buffs`);
@@ -7494,36 +7517,37 @@ async function checkPlayerBuffs(p){
 }
 async function alertsTick(){
   if (!alertsEnabled()){ stopAlerts(); return; }
-  const T = alertSettings.types;
   const players = activePlayers().filter(p => !isPlayerAlertsMuted(p.entityId));  // muted players still live-track, just no pings
   if (!players.length) return;
-  if (T.craftDone.on){ try { await loadCraftingData(); } catch(e){} }
+  if (players.some(p => palOn(p.entityId,'craftDone'))){ try { await loadCraftingData(); } catch(e){} }
   for (const p of players){
     const id = String(p.entityId);
     const st = alertState[id] || (alertState[id] = {});
     try {
-      if (T.buffLost.on) await checkPlayerBuffs(p);   // also fired instantly by the live buffs_state feed (onLiveBuffs) — this poll is the backstop
-      if (T.stamina.on && !liveConnected()){   // live feed handles stamina instantly when connected
+      if (palOn(id,'buffLost')) await checkPlayerBuffs(p);   // also fired instantly by the live buffs_state feed (onLiveBuffs) — this poll is the backstop
+      if (palOn(id,'stamina') && !liveConnected()){   // live feed handles stamina instantly when connected
         const d = await apiFetch(`/api/players/${id}/stats`);
         const v = d.stats && d.stats.values;
         const cur = v ? v[STAT_IDX.stamina] : undefined;
         if (typeof cur === 'number'){
           if (st.stamMax == null) st.stamMax = cur;      // baseline (don't fire on first sight)
           if (cur > st.stamMax) st.stamMax = cur;        // max grew (level/gear) → track upward
-          const dropLine = T.stamina.dropPct > 0 ? st.stamMax * T.stamina.dropPct / 100 : st.stamMax;
+          const _dp = palStaminaDrop(id);
+          const dropLine = _dp > 0 ? st.stamMax * _dp / 100 : st.stamMax;
           if (cur < dropLine) st.stamBelow = true;        // dipped below the (customizable) threshold — arm the alert
           else if (cur >= st.stamMax && st.stamBelow){ st.stamBelow = false; fireAlert('stamina', `${playerName(p)} — stamina full`); } // refilled to full
         }
       }
-      if (T.idle.on){
+      if (palOn(id,'idle')){
         const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
         const now = Date.now();
+        const secs = palIdleSecs(id);
         const key = pl.signedIn ? ((pl.experience||[]).reduce((s,e)=>s+(e.quantity||0),0) + '|' + pl.locationX + '|' + pl.locationZ) : null;
         if (!pl.signedIn){ st.actKey = null; st.actTs = now; st.idleFired = false; }
         else if (key !== st.actKey){ st.actKey = key; st.actTs = now; st.idleFired = false; }
-        else if (st.actTs && !st.idleFired && (now - st.actTs) >= (T.idle.seconds||60)*1000){ st.idleFired = true; fireAlert('idle', `${playerName(p)} has been idle for ${T.idle.seconds||60}s`); }
+        else if (st.actTs && !st.idleFired && (now - st.actTs) >= secs*1000){ st.idleFired = true; fireAlert('idle', `${playerName(p)} has been idle for ${secs}s`); }
       }
-      if (T.craftDone.on){
+      if (palOn(id,'craftDone')){
         const cd = await fetchPlayerCrafts(id);
         const now = Math.floor(Date.now()/1000);
         const prev = st.craftPending || {};       // key -> completion unix ts (crafts we were watching cook)
@@ -7585,6 +7609,24 @@ function renderAlerts(){
           <button class="btn ctrl-btn" onclick="testAlertTts()">Test</button>
         </div>
       </div>`;
+  const _alKeys = Object.keys(ALERT_META);
+  const _pcard = (p) => {
+    const id = String(p.entityId), muted = isPlayerAlertsMuted(id);
+    const chips = _alKeys.map(key => {
+      const on = palOn(id, key), meta = ALERT_META[key];
+      let extra = '';
+      if (key === 'stamina' && on) extra = `<label class="al-secs" title="only alert if stamina first fell below this % of max (0 = any dip)">below <input type="number" min="0" max="99" step="5" value="${palStaminaDrop(id)}" class="sj-input" style="width:54px" onchange="setPlayerStaminaDrop('${id}',this.value)">%</label>`;
+      if (key === 'idle' && on)    extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${palIdleSecs(id)}" class="sj-input" style="width:60px" onchange="setPlayerIdleSecs('${id}',this.value)">s</label>`;
+      return `<div class="al-pchip-wrap"><label class="al-pchip${on?' on':''}"><input type="checkbox" ${on?'checked':''} onchange="setPlayerAlert('${id}','${key}',this.checked)"> <i class="ti ${meta.icon}"></i> ${meta.label}</label>${extra}</div>`;
+    }).join('');
+    return `<div class="al-pcard${muted?' al-pcard-muted':''}">
+      <div class="al-pcard-hdr"><i class="ti ti-user"></i> <b>${escHtml(playerName(p))}</b>${muted?' <span class="badge" style="font-size:10px">muted</span>':''}</div>
+      <div class="al-pchips">${chips}</div>
+    </div>`;
+  };
+  const _playerSection = trackedPlayers.length
+    ? `<div class="al-pcards">${trackedPlayers.map(_pcard).join('')}</div>`
+    : `<div class="al-note" style="margin:0"><i class="ti ti-user-search"></i> Track a player to set their alerts — the defaults above apply until you customize a player here.</div>`;
   el.innerHTML = `
     <div class="al-wrap">
       <div class="al-head">
@@ -7593,9 +7635,12 @@ function renderAlerts(){
       </div>
       ${_ttsSection}
       <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full (read from the game's stats API); if it never seems to trigger, the API may only report resting/max values for that player.</div>
+      <div class="al-section-title">Default alerts &amp; sounds <span style="font-weight:400;color:var(--text3);font-size:11px">— apply to every tracked player unless overridden below</span></div>
       <div class="al-list">
-        ${Object.keys(ALERT_META).map(typeRow).join('')}
+        ${_alKeys.map(typeRow).join('')}
       </div>
+      <div class="al-section-title">Per-player <span style="font-weight:400;color:var(--text3);font-size:11px">— tick which alerts each tracked player gets, and their thresholds</span></div>
+      ${_playerSection}
     </div>`;
 }
 function toggleAlertMaster(on){ loadAlerts(); alertSettings.master = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
@@ -7652,7 +7697,7 @@ const LIVE_BUFF_MIN_MS = 2500;
 function onLiveBuffs(id){
   id = String(id);
   loadAlerts();
-  if (!alertsActive() || !alertSettings.types.buffLost.on) return;
+  if (!alertsActive() || !palOn(id,'buffLost')) return;
   if (isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id)) return;
   const p = trackedPlayers.find(x => String(x.entityId) === id); if (!p) return;
   const st = alertState[id] || (alertState[id] = {});
@@ -7682,10 +7727,10 @@ function onLiveStamina(id, data){
   const max = liveStaminaMax[id] ? liveStaminaMax[id].max : null;
   liveStamina[id] = { current: cur, max };
   loadAlerts();
-  const t = alertSettings.types.stamina;
-  if (!(t && t.on && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
+  if (!(palOn(id,'stamina') && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
   const st = alertState[id] || (alertState[id] = {});
-  const dropLine = t.dropPct > 0 ? max * t.dropPct / 100 : max - 1;
+  const _dp = palStaminaDrop(id);
+  const dropLine = _dp > 0 ? max * _dp / 100 : max - 1;
   if (cur < dropLine) st.liveStamBelow = true;                 // dipped below the (customizable) threshold — arm the alert
   else if (cur >= max - 1 && st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to full
 }
