@@ -169,6 +169,8 @@ main.planner-mode{max-width:none;padding:1rem}
 .sj-panel-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.6rem}
 .sj-row{display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:.45rem;gap:.5rem}
 .sj-row .k{color:var(--text3)}
+.sj-rate-reset{background:none;border:none;color:var(--text3);cursor:pointer;padding:0 0 0 .2rem;font-size:12px;line-height:1;vertical-align:middle;transition:color .12s}
+.sj-rate-reset:hover{color:var(--teal-light)}
 .sj-row .v{color:var(--text);font-weight:600}
 .sj-big{font-size:20px;font-weight:800;color:var(--tc,var(--teal-light))}
 .sj-target{display:flex;align-items:center;gap:.5rem}
@@ -1662,6 +1664,14 @@ function sessionRate(entityId, skillId){
   const hrs = (e.curTs - e.startTs)/3.6e6;
   return {xpHr: (hrs>0 && gained>0) ? gained/hrs : 0, gained};
 }
+// Re-anchor the rate clock to NOW so the measured XP/hr ignores past idle time (AFK / stamina regen /
+// stepping away). The next XP gain starts a fresh measurement window.
+function resetSkillRate(entityId, skillId){
+  entityId = String(entityId);
+  const e = skillSession[entityId] && skillSession[entityId][skillId];
+  if (e){ e.startXp = e.curXp; e.startTs = e.curTs = Date.now(); }
+  renderJourney(entityId);
+}
 function fmtDuration(sec){
   sec = Math.round(sec);
   if (sec < 60) return sec+'s';
@@ -1735,7 +1745,7 @@ function journeyHtml(entityId, sk, rank){
           <button id="sj-mode-manual-${entityId}" class="${mode==='manual'?'on':''}" onclick="setJourneyMode('${entityId}','manual')">Manual</button>
         </div>
         <div id="sj-live-${entityId}" style="display:${mode==='live'?'':'none'}">
-          <div class="sj-row"><span class="k">Measured XP/hr</span><span class="v" style="color:${ti.c}">${liveRate>0?fmtNum(Math.round(liveRate)):'—'}</span></div>
+          <div class="sj-row"><span class="k">Measured XP/hr <button class="sj-rate-reset" title="Reset — measure the rate fresh from now (clears AFK / idle time)" onclick="resetSkillRate('${entityId}',${sk.skillId})"><i class="ti ti-refresh"></i></button></span><span class="v" style="color:${ti.c}">${liveRate>0?fmtNum(Math.round(liveRate)):'—'}</span></div>
           <div class="sj-row"><span class="k">Session XP</span><span class="v">${gained>0?'+'+fmtNum(gained):'0'}</span></div>
           ${liveRate>0?'':'<div style="font-size:11px;color:var(--text3);line-height:1.4">Turn on <b>Live</b> and gain XP in-game to measure a rate.</div>'}
         </div>
