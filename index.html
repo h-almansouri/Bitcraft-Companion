@@ -4730,7 +4730,7 @@ async function bcInitMap(){
 // ===== Map layer control (expandable Claims/Caves by tier) =====
 let bcLayerReg = {};
 let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to their group only while in view
-const BC_CLAIM_GATE = -3, BC_CAVE_GATE = -2;    // hide these dense layers below this zoom (unreadable + slow)
+const BC_CLAIM_GATE = -3.5, BC_CAVE_GATE = -2;  // hide these dense layers below this zoom (unreadable + slow)
 let bcLayersOff = new Set();   // layer keys currently toggled OFF (default = all on); persisted
 function bcLoadLayers(){ try { const v = localStorage.getItem('bc_map_layers_v1'); if (v) bcLayersOff = new Set(JSON.parse(v)); } catch(e){} }
 function bcSaveLayers(){ safeSetItem('bc_map_layers_v1', JSON.stringify([...bcLayersOff])); }
