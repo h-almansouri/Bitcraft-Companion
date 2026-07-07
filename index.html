@@ -2659,7 +2659,7 @@ function ocRenderBrowse(){
   // independent-height columns, instead of CSS column-major fill (which puts ranks 1-26 in col 1, 27-51
   // in col 2 — so col 2's top was a far-down claim).
   const width = host.clientWidth || (document.querySelector('main')||{}).clientWidth || 1000;
-  const N = Math.max(1, Math.min(4, Math.floor(width / 400)));
+  const N = width >= 1440 ? 4 : width >= 760 ? 3 : width >= 500 ? 2 : 1;  // 3 columns at normal desktop widths
   const cols = Array.from({length:N}, ()=>[]);
   shown.forEach((g,i)=> cols[i % N].push(g));
   const cards = `<div class="oc-cols">${cols.map(col=>`<div class="oc-col">${col.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`).join('')}</div>`;
