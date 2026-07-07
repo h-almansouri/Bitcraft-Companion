@@ -4812,9 +4812,15 @@ function bcCopyStylesToPip(win){
     }
   }
   const extra = win.document.createElement('style');
-  // fill the window, drop the app's border/radius, and hide the map controls (search bar, zoom +/-, and the
-  // Roads/Claims/Caves layer checklist) for a clean small window — the layer settings themselves are kept.
-  extra.textContent = 'html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0c10}#map-el{width:100vw!important;height:100vh!important;border:none!important;border-radius:0!important}.leaflet-control-search,.leaflet-control-zoom,.bc-layerctrl{display:none!important}';
+  // fill the window, drop the app's border/radius, hide the map controls (search bar, zoom +/-, and the
+  // Roads/Claims/Caves layer checklist — layer settings themselves are kept), and stop native image/text
+  // dragging inside the PiP doc so it doesn't fight the map pan (Leaflet only disables that on the main doc).
+  extra.textContent =
+    'html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0a0c10}' +
+    '#map-el{position:fixed;inset:0;width:100vw!important;height:100vh!important;border:none!important;border-radius:0!important}' +
+    '.leaflet-control-search,.leaflet-control-zoom,.bc-layerctrl{display:none!important}' +
+    '.leaflet-container,.leaflet-container *{-webkit-user-select:none!important;user-select:none!important}' +
+    '.leaflet-tile,.leaflet-marker-icon,.leaflet-container img{-webkit-user-drag:none!important;pointer-events:auto}';
   win.document.head.appendChild(extra);
 }
 async function bcMapPip(){
@@ -4852,11 +4858,14 @@ async function bcMapPip(){
   const relayTypes = ['mousemove','mouseup','pointermove','pointerup','touchmove','touchend'];
   const relay = (e) => { try { const C = e.type.indexOf('pointer')===0 ? PointerEvent : (e.type.indexOf('touch')===0 ? TouchEvent : MouseEvent); document.dispatchEvent(new C(e.type, e)); } catch(err){} };
   relayTypes.forEach(t => pip.document.addEventListener(t, relay, true));
+  const noNativeDrag = (e) => e.preventDefault();   // stop native image/text drag from hijacking the pan
+  pip.document.addEventListener('dragstart', noNativeDrag, true);
 
   const btn = document.getElementById('bc-pip-btn'); if (btn) btn.innerHTML = '<i class="ti ti-picture-in-picture-off"></i> Close pop-out';
   setTimeout(() => { try { bcMap.invalidateSize(); } catch(e){} }, 60);
   pip.addEventListener('pagehide', () => {
     relayTypes.forEach(t => { try { pip.document.removeEventListener(t, relay, true); } catch(e){} });
+    try { pip.document.removeEventListener('dragstart', noNativeDrag, true); } catch(e){}
     if (ctrl.parentNode) ctrl.remove();
     const ph2 = document.getElementById('bc-pip-ph');
     if (ph2 && ph2.parentNode){ ph2.parentNode.insertBefore(mapEl, ph2); ph2.remove(); }
