@@ -6764,6 +6764,25 @@ function alertsEnabled(){ loadAlerts(); return alertSettings.master && trackedPl
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } }
 function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
+// Buff-loss check for one player. Shared by the 15s poll AND the live buffs_state trigger (onLiveBuffs),
+// so whichever notices first fires once and updates the shared baseline (alertState[id].buffs) — no
+// double-alert. The in-flight guard coalesces a poll + live check that land together.
+async function checkPlayerBuffs(p){
+  const id = String(p.entityId);
+  const st = alertState[id] || (alertState[id] = {});
+  loadAlerts(); const t = alertSettings.types.buffLost;
+  if (!t || !t.on || st.buffCheckInFlight) return;
+  st.buffCheckInFlight = true;
+  try {
+    const d = await apiFetch(`/api/players/${id}/buffs`);
+    const active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
+    const wanted = b => t.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
+    const cur = new Set(active.filter(wanted).map(b => b.buffTypeName || b.buffName));
+    if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
+    st.buffs = cur;
+  } catch(e){ /* skip this check */ }
+  finally { st.buffCheckInFlight = false; }
+}
 async function alertsTick(){
   if (!alertsEnabled()){ stopAlerts(); return; }
   const T = alertSettings.types;
@@ -6774,14 +6793,7 @@ async function alertsTick(){
     const id = String(p.entityId);
     const st = alertState[id] || (alertState[id] = {});
     try {
-      if (T.buffLost.on){
-        const d = await apiFetch(`/api/players/${id}/buffs`);
-        const active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
-        const wanted = b => T.buffLost.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
-        const cur = new Set(active.filter(wanted).map(b => b.buffTypeName || b.buffName));
-        if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
-        st.buffs = cur;
-      }
+      if (T.buffLost.on) await checkPlayerBuffs(p);   // also fired instantly by the live buffs_state feed (onLiveBuffs) — this poll is the backstop
       if (T.stamina.on && !liveConnected()){   // live feed handles stamina instantly when connected
         const d = await apiFetch(`/api/players/${id}/stats`);
         const v = d.stats && d.stats.values;
@@ -6900,6 +6912,26 @@ function handleLiveMessage(m){
   const data = m.data != null ? m.data : (m.payload != null ? m.payload : m);
   if (ch.indexOf('stamina_state') === 0) onLiveStamina(String(id), data);
   else if (ch.indexOf('experience_state') === 0) onLiveExperience(String(id), data);
+  else if (ch.indexOf('buffs_state') === 0) onLiveBuffs(String(id));
+}
+// A buffs_state message means this player's buff set changed (gained/lost/refreshed). We don't parse its
+// payload — we use it purely as a trigger to re-run the authoritative REST buff check, throttled per player
+// (leading-edge, ≥2.5s apart) so a chatty stream can't spam the API. Net effect: a food buff falling off
+// pings within a couple seconds instead of waiting on the 15s poll (instant when the stream is otherwise idle).
+const LIVE_BUFF_MIN_MS = 2500;
+function onLiveBuffs(id){
+  id = String(id);
+  loadAlerts();
+  if (!alertSettings.master || !alertSettings.types.buffLost.on) return;
+  if (isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id)) return;
+  const p = trackedPlayers.find(x => String(x.entityId) === id); if (!p) return;
+  const st = alertState[id] || (alertState[id] = {});
+  const since = Date.now() - (st.lastBuffCheck || 0);
+  if (since >= LIVE_BUFF_MIN_MS){ st.lastBuffCheck = Date.now(); checkPlayerBuffs(p); }
+  else if (!st.buffCheckScheduled){   // within the throttle window — schedule one trailing check at the boundary
+    st.buffCheckScheduled = true;
+    setTimeout(() => { st.buffCheckScheduled = false; st.lastBuffCheck = Date.now(); checkPlayerBuffs(p); }, LIVE_BUFF_MIN_MS - since);
+  }
 }
 // The live feed carries CURRENT stamina (a float that drains as you act); max stamina isn't in it,
 // so we read the true max from the REST stats endpoint (values[1]) and cache it per player.
