@@ -6613,7 +6613,7 @@ const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
   types: {
     buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
-    stamina:   { on:false, sound:'coin' },
+    stamina:   { on:false, sound:'coin', dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
     craftDone: { on:false, sound:'ding' },
     idle:      { on:false, sound:'alarm', seconds:60 },
   }
@@ -6801,8 +6801,9 @@ async function alertsTick(){
         if (typeof cur === 'number'){
           if (st.stamMax == null) st.stamMax = cur;      // baseline (don't fire on first sight)
           if (cur > st.stamMax) st.stamMax = cur;        // max grew (level/gear) → track upward
-          if (cur < st.stamMax) st.stamBelow = true;     // dipped below full
-          else if (st.stamBelow){ st.stamBelow = false; fireAlert('stamina', `${playerName(p)} — stamina full`); } // refilled to full
+          const dropLine = T.stamina.dropPct > 0 ? st.stamMax * T.stamina.dropPct / 100 : st.stamMax;
+          if (cur < dropLine) st.stamBelow = true;        // dipped below the (customizable) threshold — arm the alert
+          else if (cur >= st.stamMax && st.stamBelow){ st.stamBelow = false; fireAlert('stamina', `${playerName(p)} — stamina full`); } // refilled to full
         }
       }
       if (T.idle.on){
@@ -6851,6 +6852,7 @@ function renderAlerts(){
     let extra = '';
     if (key==='buffLost') extra = `<select class="sj-input al-extra" onchange="setAlertScope(this.value)"><option value="food"${t.scope==='food'?' selected':''}>Food buff only</option><option value="any"${t.scope==='any'?' selected':''}>Any buff</option></select>`;
     if (key==='idle') extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${t.seconds}" class="sj-input" style="width:64px" onchange="setAlertIdleSecs(this.value)"> s</label>`;
+    if (key==='stamina') extra = `<label class="al-secs" title="Only alert when stamina refills to full IF it first dropped below this % of max. 0 = alert on any refill.">only if it fell below <input type="number" min="0" max="99" step="5" value="${t.dropPct||0}" class="sj-input" style="width:56px" onchange="setAlertStaminaDrop(this.value)">%</label>`;
     return `<div class="al-row${t.on?'':' al-off'}">
       <label class="al-toggle"><input type="checkbox" ${t.on?'checked':''} onchange="toggleAlertType('${key}',this.checked)"> <i class="ti ${m.icon}"></i> <span class="al-name">${m.label}</span></label>
       <div class="al-desc">${m.desc}</div>
@@ -6879,6 +6881,7 @@ function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !
 function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); playAlertSound(v); }
 function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
 function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); saveAlerts(); restartAlerts(); }
+function setAlertStaminaDrop(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n)) n = 0; alertSettings.types.stamina.dropPct = Math.max(0, Math.min(99, n)); saveAlerts(); restartAlerts(); }
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -6955,8 +6958,9 @@ function onLiveStamina(id, data){
   const t = alertSettings.types.stamina;
   if (!(t && t.on && alertSettings.master) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
   const st = alertState[id] || (alertState[id] = {});
-  if (cur < max - 1) st.liveStamBelow = true;                 // dipped below full
-  else if (st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to max
+  const dropLine = t.dropPct > 0 ? max * t.dropPct / 100 : max - 1;
+  if (cur < dropLine) st.liveStamBelow = true;                 // dipped below the (customizable) threshold — arm the alert
+  else if (cur >= max - 1 && st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to full
 }
 function onLiveExperience(id, data){
   const store = skillsByPlayer[id]; if (!store || !store.skills) return;
