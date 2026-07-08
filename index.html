@@ -794,6 +794,7 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
     <div class="nav-item" data-tab="crafting" onclick="switchTab('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
     <div class="nav-item" data-tab="tasks" onclick="switchTab('tasks')"><i class="ti ti-checklist"></i> Tasks</div>
     <div class="nav-item" data-tab="orders" onclick="switchTab('orders')"><i class="ti ti-receipt-2"></i> Orders</div>
+    <div class="nav-item" data-tab="jsn" onclick="switchTab('jsn')"><i class="ti ti-wallet"></i> Jsn</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
     <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts <span class="nav-wip">WIP</span></div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
@@ -825,6 +826,7 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
     <div id="tab-crafting" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-tasks" style="display:none"><div id="tasks-content"></div></div>
     <div id="tab-orders" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
+    <div id="tab-jsn" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-market" style="display:none"><div id="market-content"></div></div>
     <div id="tab-deals" style="display:none"><div id="deals-content"></div></div>
     <div id="tab-shopping" style="display:none"><div id="shopping-content"></div></div>
@@ -1305,7 +1307,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Jsn — Inventory Value',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
@@ -1345,6 +1347,7 @@ function switchTab(tab) {
   else if (tab === 'alerts') renderAlerts();
   else if (tab === 'opencrafts') renderOpenCraftsTab();
   else if (tab === 'orders') renderOrdersTab();
+  else if (tab === 'jsn') renderJsnTab();
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
   bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
@@ -1964,13 +1967,14 @@ function toggleTabLive(tab) {
     tabLiveIds[tab] = null;
   } else {
     if (!currentPlayer && tab !== 'shopping') return;
-    const ms = tab === 'planner' ? 30000 : tab === 'shopping' ? 300000 : (REFRESH_MS[tab] || 30000);
+    const ms = tab === 'planner' ? 30000 : tab === 'shopping' ? 300000 : tab === 'jsn' ? 120000 : (REFRESH_MS[tab] || 30000);
     tabLiveIds[tab] = setInterval(() => {
       if (document.hidden) return;
       if (tab === 'tasks')   loadTasks(currentPlayer?.entityId, true);
       else if (tab === 'planner') refreshPlannerInv();
       else if (tab === 'tools') refreshToolInv();
       else if (tab === 'shopping') fetchAllShoppingPrices();
+      else if (tab === 'jsn') renderJsnTab(true);
       else loadTab(tab, true);
     }, ms);
   }
@@ -1985,7 +1989,7 @@ function stopAllLive() {
 }
 
 function updateLiveBtns() {
-  ['inventory', 'crafting', 'tasks', 'planner', 'shopping', 'tools'].forEach(tab => {
+  ['inventory', 'crafting', 'tasks', 'planner', 'shopping', 'tools', 'jsn'].forEach(tab => {
     const btn = document.getElementById('live-btn-' + tab);
     if (!btn) return;
     const on = isTabLive(tab);
@@ -2249,6 +2253,150 @@ async function renderOrdersTab(silent){
   }));
   startLiveRefresh('orders');
 }
+
+// ── JSN (inventory market value) ──
+// Two valuations of ALL tracked players' combined inventory, shown as per-item breakdowns (not a lone
+// number): (1) "Sellable now" — value if you filled existing BUY orders, walking highest buy price first
+// (region-filterable); (2) "7-day average value" — quantity × the item's 7d average traded price.
+let jsnMarket = {};              // "type:id" -> { buyOrders:[], avg7d:number|null }
+let jsnRegionFilter = (() => { try { return localStorage.getItem('bc_jsn_region') || ''; } catch(e){ return ''; } })();
+
+// Combine every tracked player's inventory (banks/storage/housing included) into per-item totals.
+function jsnAggregate(){
+  const agg = {};
+  trackedPlayers.forEach(p => {
+    const data = invByPlayer[p.entityId]; if (!data) return;
+    buildSlotsFor(data).forEach(s => {
+      if (!s.itemId || +s.itemId === 1) return;          // skip empty slots + Hex Coin (the currency itself)
+      const key = s.itemType + ':' + s.itemId;
+      if (!agg[key]) agg[key] = { key, id:s.itemId, itemType:s.itemType, qty:0, meta:s.meta };
+      agg[key].qty += (+s.quantity || 0);
+      if (!agg[key].meta && s.meta) agg[key].meta = s.meta;
+    });
+  });
+  return Object.values(agg).filter(a => a.qty > 0);
+}
+
+function jsnBuyPrice(o){ return +(o.price || o.priceThreshold || 0); }
+// Value of selling `qty` into existing buy orders (highest price first), optionally limited to one region.
+function jsnImmediate(buyOrders, qty, regionId){
+  let orders = (buyOrders||[]).filter(o => +o.quantity > 0 && jsnBuyPrice(o) > 0);
+  if (regionId) orders = orders.filter(o => String(o.regionId) === String(regionId));
+  orders.sort((a,b) => jsnBuyPrice(b) - jsnBuyPrice(a));
+  let remaining = qty, value = 0, sold = 0;
+  for (const o of orders){ if (remaining <= 0) break; const take = Math.min(remaining, +o.quantity); value += take * jsnBuyPrice(o); sold += take; remaining -= take; }
+  return { value, sold, top: orders.length ? jsnBuyPrice(orders[0]) : 0 };
+}
+
+// Fetch order book (buy orders) + 7d avg for each item not yet cached, with a small concurrency pool.
+async function jsnLoadMarket(items){
+  const pending = items.filter(it => !jsnMarket[it.key]);
+  let idx = 0, done = 0;
+  const setProg = () => { const e = document.getElementById('jsn-progress'); if (e) e.textContent = pending.length ? `Valuing items… ${done}/${pending.length}` : ''; };
+  setProg();
+  async function worker(){
+    while (idx < pending.length){
+      const it = pending[idx++];
+      const type = it.itemType === 1 ? 'cargo' : 'item';
+      let buyOrders = [], avg7d = null;
+      try { const d = await fetchWithCache(type, it.id, 12000); buyOrders = d.buyOrders || []; } catch(e){}
+      try { avg7d = await fetchShoppingAvg7d(it.id, it.itemType === 1); } catch(e){}
+      jsnMarket[it.key] = { buyOrders, avg7d };
+      done++; setProg();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker));
+}
+
+function jsnSetRegion(v){ jsnRegionFilter = v || ''; try { safeSetItem('bc_jsn_region', jsnRegionFilter); } catch(e){} jsnRenderResults(); }
+function jsnTierBadge(meta){ return (meta && meta.tier > 0) ? `<span class="badge badge-tier" style="font-size:10px;padding:1px 5px">T${meta.tier}</span>` : ''; }
+
+function jsnRenderResults(){
+  const host = document.getElementById('jsn-results'); if (!host) return;
+  const agg = jsnAggregate();
+  if (!agg.length){ host.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-mood-empty"></i><span>No inventory items to value.</span></div>'; return; }
+
+  // Section 1 — sellable now (fill buy orders, region-filtered)
+  const sellNow = [];
+  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m) return; const r = jsnImmediate(m.buyOrders, a.qty, jsnRegionFilter); if (r.value > 0) sellNow.push({ a, value:r.value, sold:r.sold, unit: r.sold ? r.value / r.sold : 0 }); });
+  sellNow.sort((x,y) => y.value - x.value);
+  const sellTotal = sellNow.reduce((s,x) => s + x.value, 0);
+
+  // Section 2 — 7d average value
+  const avgVal = [];
+  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m || !(m.avg7d > 0)) return; avgVal.push({ a, unit:m.avg7d, value: m.avg7d * a.qty }); });
+  avgVal.sort((x,y) => y.value - x.value);
+  const avgTotal = avgVal.reduce((s,x) => s + x.value, 0);
+
+  const itemCell = a => `<span style="display:inline-flex;align-items:center;gap:.4rem">${gameIconImg(a.meta?.iconAssetName, 20)}<span>${escHtml(a.meta?.name || ('Item '+a.id))}</span>${jsnTierBadge(a.meta)}</span>`;
+  const tableHead = qtyLabel => `<thead><tr style="background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
+    <th style="padding:.35rem .6rem;text-align:left;font-weight:600">Item</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">${qtyLabel}</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Unit ⬡</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Value</th>
+  </tr></thead>`;
+
+  const sellRows = sellNow.map(x => `<tr style="border-top:1px solid var(--border)">
+    <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}</td>
+    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light)">${fmtCoin(Math.round(x.value))}</td>
+  </tr>`).join('');
+  const avgRows = avgVal.map(x => `<tr style="border-top:1px solid var(--border)">
+    <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtCount(x.a.qty)}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}</td>
+    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light)">${fmtCoin(Math.round(x.value))}</td>
+  </tr>`).join('');
+
+  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px">
+    <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
+      <i class="ti ti-cash" style="color:var(--green-light)"></i><div style="font-weight:600">Sellable now</div>
+      <span style="font-size:11px;color:var(--text3)">${sellNow.length} item${sellNow.length!==1?'s':''}</span>
+      <span style="flex:1"></span><span style="font-weight:700;color:var(--green-light)">${fmtCoin(Math.round(sellTotal))}</span>
+    </div>
+    <div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem">
+      <span style="font-size:11px;color:var(--text3)">Buy orders in</span>
+      <select onchange="jsnSetRegion(this.value)" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:3px 6px;font-size:12px">${regionOptionsHtml(jsnRegionFilter)}</select>
+    </div>
+    ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${jsnRegionFilter?' in this region':''}.</span></div>`}
+  </div>`;
+  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px">
+    <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
+      <i class="ti ti-chart-line" style="color:var(--purple-light)"></i><div style="font-weight:600">7-day average value</div>
+      <span style="font-size:11px;color:var(--text3)">${avgVal.length} item${avgVal.length!==1?'s':''}</span>
+      <span style="flex:1"></span><span style="font-weight:700;color:var(--purple-light)">${fmtCoin(Math.round(avgTotal))}</span>
+    </div>
+    ${avgVal.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Qty')}<tbody>${avgRows}</tbody></table></div>` : '<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No items with a 7d average price.</span></div>'}
+  </div>`;
+
+  host.innerHTML = `<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start">${sellCard}${avgCard}</div>`;
+}
+
+async function renderJsnTab(silent){
+  const el = document.getElementById('tab-jsn'); if (!el) return;
+  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!silent || !document.getElementById('jsn-toolbar')){
+    el.innerHTML = `
+      <div id="jsn-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
+        <button id="live-btn-jsn" class="btn live-btn" onclick="toggleTabLive('jsn')"><i class="ti ti-player-play"></i> Live</button>
+        <button class="btn ctrl-btn" onclick="jsnRefresh()"><i class="ti ti-refresh"></i> Refresh</button>
+        <span id="jsn-progress" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+      <div id="jsn-results"><div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading inventory…</span></div></div>`;
+    updateLiveBtns();
+    if (!marketRegions.length){ apiFetch('/api/regions').then(d => { const rs = Array.isArray(d)?d:(d.regions||[]); if (rs.length){ marketRegions = rs; jsnRenderResults(); } }).catch(()=>{}); }
+  }
+  await Promise.all(trackedPlayers.map(async p => {
+    if (silent && isPlayerPaused(p.entityId) && invByPlayer[p.entityId]) return;   // keep cached for paused players
+    try { invByPlayer[p.entityId] = await fetchPlayerInv(p.entityId); }
+    catch(e){ if (!invByPlayer[p.entityId]) invByPlayer[p.entityId] = { inventories:[], items:{}, cargos:{} }; }
+  }));
+  await jsnLoadMarket(jsnAggregate());
+  const pe = document.getElementById('jsn-progress'); if (pe) pe.textContent = '';
+  jsnRenderResults();
+}
+function jsnRefresh(){ jsnMarket = {}; renderJsnTab(); }
 
 // ── CRAFTING ──
 let craftData = null;
