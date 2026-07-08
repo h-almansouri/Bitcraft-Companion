@@ -3222,9 +3222,7 @@ function ocClaimCardHtml(g){
     const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
       .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
     const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=>
-        (ocStationTier(b.buildingName)-ocStationTier(a.buildingName)) ||                 // higher-tier stations first
-        (a.buildingName||'').localeCompare(b.buildingName||'') ||                          // cluster identical stations together
-        (ocTierOf(b)-ocTierOf(a)) ||                                                       // then item tier
+        (ocTierOf(a)-ocTierOf(b)) ||                                                       // item tier ascending
         (Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress)))
       ).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
     return `<div class="oc-prof">
