@@ -4519,23 +4519,25 @@ function renderShoppingListHtml() {
     const sellSection = section('Sell orders','ti-tag','#f09595',sells,'var(--green-light)','sell');
     const buySection  = section('Buy orders','ti-shopping-cart','var(--green-light)',buys,'var(--amber-light)','buy');
 
-    return `<tr><td colspan="5" style="padding:0;background:var(--bg2)">${sellSection}${buySection}</td></tr>`;
+    return `<tr><td colspan="6" style="padding:0;background:var(--bg2)">${sellSection}${buySection}</td></tr>`;
   }
 
   const rows = shoppingItems.map((item, i) => {
     const pd = shoppingPrices[item.id];
     let sellCell = '<span style="color:var(--text3)">—</span>';
     let buyCell  = '<span style="color:var(--text3)">—</span>';
+    let avgCell  = '<span style="color:var(--text3)">—</span>';
     const isExpanded = shoppingExpandedItem !== null && String(shoppingExpandedItem) === String(item.id);
 
     if (pd === 'loading') {
-      sellCell = buyCell = `<span style="color:var(--text3);font-size:12px"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i></span>`;
+      sellCell = buyCell = avgCell = `<span style="color:var(--text3);font-size:12px"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i></span>`;
     } else if (pd === 'error') {
       sellCell = buyCell = `<span style="font-size:11px;color:var(--red-light)">Error</span>`;
     } else if (pd) {
       const qty = +item.qty || 0;
       sellCell = qty > 0 ? shoppingFillCell(shoppingFill(pd, qty), 'var(--green-light)') : orderCell(pd.sell || null, 'var(--green-light)');
       buyCell  = orderCell(pd.buy  || null, 'var(--amber-light)');
+      avgCell  = (pd.avg7d != null && pd.avg7d > 0) ? `<span style="font-weight:600;color:var(--text2)">${fmtNum(Math.round(pd.avg7d))}</span>` : '<span style="color:var(--text3);font-size:12px">—</span>';
     }
 
     // Tier/rarity chips (normalize rarity which may be number or string)
@@ -4566,6 +4568,7 @@ function renderShoppingListHtml() {
       </td>
       <td style="padding:.5rem .75rem">${sellCell}</td>
       <td style="padding:.5rem .75rem">${buyCell}</td>
+      <td style="padding:.5rem .75rem">${avgCell}</td>
       <td style="padding:.5rem .5rem;text-align:right" onclick="event.stopPropagation()">
         <button class="btn" style="padding:3px 7px;min-width:0;font-size:12px" onclick="shoppingRemove(${i})" title="Remove from list">
           <i class="ti ti-x" style="font-size:11px"></i>
@@ -4582,6 +4585,7 @@ function renderShoppingListHtml() {
           <th style="padding:.4rem .5rem;text-align:left;font-weight:600">Buy qty</th>
           <th style="padding:.4rem .75rem;text-align:left;font-weight:600"><i class="ti ti-tag" style="color:#f09595;font-size:12px"></i> Best sell</th>
           <th style="padding:.4rem .75rem;text-align:left;font-weight:600"><i class="ti ti-shopping-cart" style="color:var(--green-light);font-size:12px"></i> Best buy</th>
+          <th style="padding:.4rem .75rem;text-align:left;font-weight:600" title="Average traded price over the last 7 days (bitjita)"><i class="ti ti-chart-line" style="color:var(--purple-light);font-size:12px"></i> 7d avg</th>
           <th style="padding:.4rem .5rem;width:36px"></th>
         </tr>
       </thead>
@@ -4591,12 +4595,29 @@ function renderShoppingListHtml() {
   </div>`;
 }
 
+// 7d average traded price (avg of actual trades from bitjita's price-history — a truer "going rate" than
+// the single lowest sell order). Falls back to 24h if 7d is missing, and to the cargo/item alt type.
+// Never throws — returns null on any failure so it can't fail the order-book fetch it runs alongside.
+async function fetchShoppingAvg7d(id, isCargo) {
+  const t1 = isCargo ? 'cargo' : 'items', t2 = t1 === 'items' ? 'cargo' : 'items';
+  for (const t of [t1, t2]) {
+    try {
+      const d = await apiFetch(`/api/market/${t}/${id}/price-history?limit=1`);
+      if (d && d.priceStats){ const ps = d.priceStats; return ps.avg7d != null ? ps.avg7d : (ps.avg24h != null ? ps.avg24h : null); }
+    } catch(e){}
+  }
+  return null;
+}
+
 async function fetchShoppingPrice(id, isCargo) {
   shoppingPrices[id] = 'loading';
   _refreshShoppingRow(id);
   try {
     const type = isCargo ? 'cargo' : 'item';
-    const d = await fetchWithCache(type, id, 15000);
+    const [d, avg7d] = await Promise.all([
+      fetchWithCache(type, id, 15000),
+      fetchShoppingAvg7d(id, isCargo)
+    ]);
     const regionId = shoppingRegionFilter || null;
 
     const pickOrder = (orders, compareFn) => {
@@ -4617,7 +4638,8 @@ async function fetchShoppingPrice(id, isCargo) {
       sell: pickOrder(d.sellOrders||[], (a,b) => +(a.price||0) - +(b.price||0)),  // cheapest sell
       buy:  pickOrder(d.buyOrders||[],  (a,b) => +(b.price||b.priceThreshold||0) - +(a.price||a.priceThreshold||0)),   // highest buy
       allSell: d.sellOrders || [],
-      allBuy:  d.buyOrders  || []
+      allBuy:  d.buyOrders  || [],
+      avg7d
     };
   } catch(e) {
     shoppingPrices[id] = 'error';
