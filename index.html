@@ -2375,24 +2375,24 @@ function jsnRenderResults(){
   const itemCell = a => `<span style="display:inline-flex;align-items:center;gap:.4rem">${gameIconImg(a.meta?.iconAssetName, 20)}<span>${escHtml(a.meta?.name || ('Item '+a.id))}</span>${jsnTierBadge(a.meta)}</span>`;
   const tableHead = qtyLabel => `<thead><tr style="background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
     <th style="padding:.35rem .6rem;text-align:left;font-weight:600">Item</th>
-    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">${qtyLabel}</th>
-    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Unit ⬡</th>
-    <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Value</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600;white-space:nowrap">${qtyLabel}</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600;white-space:nowrap">Unit ⬡</th>
+    <th style="padding:.35rem .6rem;text-align:right;font-weight:600;white-space:nowrap">Value</th>
   </tr></thead>`;
 
   // Parenthetical 7d-average reference: the same sold quantity valued at the item's 7d avg price.
   const avgRef = (val) => `<span style="color:var(--text3);font-size:11px;font-weight:400"> (${fmtNum(Math.round(val))})</span>`;
   const sellRows = sellNow.map(x => `<tr style="border-top:1px solid var(--border)">
     <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
-    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
-    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}${x.avg7d > 0 ? avgRef(x.avg7d) : ''}</td>
-    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light)">${fmtCoin(Math.round(x.value))}${x.avg7d > 0 ? avgRef(x.avg7d * x.sold) : ''}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtNum(Math.round(x.unit))}${x.avg7d > 0 ? avgRef(x.avg7d) : ''}</td>
+    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}${x.avg7d > 0 ? avgRef(x.avg7d * x.sold) : ''}</td>
   </tr>`).join('');
   const avgRows = avgVal.map(x => `<tr style="border-top:1px solid var(--border)">
     <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
-    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtCount(x.a.qty)}</td>
-    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}</td>
-    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light)">${fmtCoin(Math.round(x.value))}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.a.qty)}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtNum(Math.round(x.unit))}</td>
+    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}</td>
   </tr>`).join('');
 
   // Row under each header. The 7d card gets an invisible clone of the region row so both cards line up
@@ -2408,7 +2408,7 @@ function jsnRenderResults(){
       <span style="visibility:hidden;display:inline-flex;align-items:center;gap:.4rem"><span style="font-size:11px">Buy orders in</span><select style="${selectStyle}"><option>—</option></select></span>
     </div>`;
 
-  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px;display:flex;flex-direction:column">
+  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-cash" style="color:var(--green-light)"></i><div style="font-weight:600">Sellable now</div>
       <span style="font-size:11px;color:var(--text3)">${sellNow.length} item${sellNow.length!==1?'s':''}</span>
@@ -2417,7 +2417,7 @@ function jsnRenderResults(){
     ${regionRow}
     ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${jsnRegionFilter?' in this region':''}.</span></div>`}
   </div>`;
-  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px;display:flex;flex-direction:column">
+  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-chart-line" style="color:var(--purple-light)"></i><div style="font-weight:600">7-day average value</div>
       <span style="font-size:11px;color:var(--text3)">${avgVal.length} item${avgVal.length!==1?'s':''}</span>
