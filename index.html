@@ -5486,7 +5486,7 @@ function bcPointLayerClass(){
 async function bcLoadIndexes(){
   try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=sailing2`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
   try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=sailing2`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
-  try { const r = await fetch(`${API}/mapassets/untrackable.json?v=1`); if (r.ok){ const u = await r.json(); bcUntrackable = { resources:new Set((u.resources||[]).map(String)), enemies:new Set((u.enemies||[]).map(String)) }; } } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/untrackable.json?v=2`); if (r.ok){ const u = await r.json(); bcUntrackable = { resources:new Set((u.resources||[]).map(String)), enemies:new Set((u.enemies||[]).map(String)) }; } } catch(e){}
   _bcAllEntries = null; // rebuild the combined list against the freshly loaded indexes
 }
 // One combined list of resources + enemies (each entry knows its kind). Cached — the indexes are
