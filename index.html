@@ -2255,27 +2255,63 @@ async function renderOrdersTab(silent){
 }
 
 // ── JSN (inventory market value) ──
-// Two valuations of ALL tracked players' combined inventory, shown as per-item breakdowns (not a lone
+// Two valuations of the tracked players' selected inventories, shown as per-item breakdowns (not a lone
 // number): (1) "Sellable now" — value if you filled existing BUY orders, walking highest buy price first
 // (region-filterable); (2) "7-day average value" — quantity × the item's 7d average traded price.
+// Uses the shared merged inventory (invData, same as Planner/Tools) with a per-location selector.
 let jsnMarket = {};              // "type:id" -> { buyOrders:[], avg7d:number|null }
 let jsnRegionFilter = (() => { try { return localStorage.getItem('bc_jsn_region') || ''; } catch(e){ return ''; } })();
+let jsnInvOpen = false;          // inventory-selector panel expanded?
+let jsnTrackedInvs = null;       // Set of invData.inventories indices included (null = not yet initialised)
+function _loadJsnTrackedNames(){ try { const v = localStorage.getItem('bc_jsn_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
+function _saveJsnTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (jsnTrackedInvs && jsnTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_jsn_tracked', JSON.stringify(names)); }
 
-// Combine every tracked player's inventory (banks/storage/housing included) into per-item totals.
+// Aggregate the SELECTED merged inventories into per-item totals (itemType:itemId -> {qty, meta}).
 function jsnAggregate(){
   const agg = {};
-  trackedPlayers.forEach(p => {
-    const data = invByPlayer[p.entityId]; if (!data) return;
-    buildSlotsFor(data).forEach(s => {
-      if (!s.itemId || +s.itemId === 1) return;          // skip empty slots + Hex Coin (the currency itself)
+  if (!invData || !jsnTrackedInvs) return [];
+  const { inventories=[], items={}, cargos={} } = invData;
+  inventories.forEach((inv, idx) => {
+    if (!jsnTrackedInvs.has(idx)) return;
+    (inv.pockets||[]).forEach(pk => {
+      const s = slotContents(pk); if (!s || !s.itemId || +s.itemId === 1) return;   // skip empty + Hex Coin
       const key = s.itemType + ':' + s.itemId;
-      if (!agg[key]) agg[key] = { key, id:s.itemId, itemType:s.itemType, qty:0, meta:s.meta };
+      const meta = s.itemType === 1 ? cargos[s.itemId] : items[s.itemId];
+      if (!agg[key]) agg[key] = { key, id:s.itemId, itemType:s.itemType, qty:0, meta };
       agg[key].qty += (+s.quantity || 0);
-      if (!agg[key].meta && s.meta) agg[key].meta = s.meta;
+      if (!agg[key].meta && meta) agg[key].meta = meta;
     });
   });
   return Object.values(agg).filter(a => a.qty > 0);
 }
+
+// Inventory-location selector (mirrors Tool crafting; all locations selected by default).
+function jsnInvSelectorHtml(){
+  const invs = invData ? (invData.inventories||[]) : [];
+  const total = invs.length, tracked = jsnTrackedInvs ? jsnTrackedInvs.size : 0;
+  return `<div id="jsn-inv-wrap" class="task-inv-selector planner-inv-section" style="margin-bottom:.6rem">
+    <div class="planner-inv-hdr" onclick="toggleJsnInvPanel()">
+      <i id="jsn-inv-chevron" class="ti ti-chevron-${jsnInvOpen?'down':'right'}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+      <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventories <span style="font-size:11px;font-weight:400;color:var(--text3)">(pooled across selected)</span></div>
+      <span class="planner-inv-hdr-sub">${tracked}/${total} selected</span>
+    </div>
+    <div class="planner-inv-body" style="display:${jsnInvOpen?'':'none'}">
+      <div class="planner-inv-cats">${invData ? renderTrackedInvChips(jsnTrackedInvs||new Set(), 'toggleJsnInvLoc') : '<div style="font-size:12px;color:var(--text3)"><span class="dot-spin"></span> Loading…</div>'}</div>
+      <div class="planner-inv-footer">
+        <span>${tracked}/${total} selected</span>
+        <span class="planner-inv-toggle" onclick="toggleAllJsnInvs(true)">All</span>
+        <span style="color:var(--text3)">·</span>
+        <span class="planner-inv-toggle" onclick="toggleAllJsnInvs(false)">None</span>
+      </div>
+    </div>
+  </div>`;
+}
+function jsnRenderSelector(){ const el = document.getElementById('jsn-inv-selector'); if (el) el.innerHTML = jsnInvSelectorHtml(); }
+function toggleJsnInvPanel(){ jsnInvOpen = !jsnInvOpen; const b=document.querySelector('#jsn-inv-wrap .planner-inv-body'); const c=document.getElementById('jsn-inv-chevron'); if(b)b.style.display=jsnInvOpen?'':'none'; if(c)c.className='ti ti-chevron-'+(jsnInvOpen?'down':'right'); }
+function toggleJsnInvLoc(idx){ if(!jsnTrackedInvs)jsnTrackedInvs=new Set(); if(jsnTrackedInvs.has(idx))jsnTrackedInvs.delete(idx); else jsnTrackedInvs.add(idx); _saveJsnTrackedNames(); jsnRenderSelector(); jsnRevalue(); }
+function toggleAllJsnInvs(all){ if(!invData)return; jsnTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveJsnTrackedNames(); jsnRenderSelector(); jsnRevalue(); }
+// Re-aggregate + re-render after a selection change; fetch market data for any newly-included items.
+async function jsnRevalue(){ jsnRenderResults(); await jsnLoadMarket(jsnAggregate()); const pe=document.getElementById('jsn-progress'); if(pe)pe.textContent=''; jsnRenderResults(); }
 
 function jsnBuyPrice(o){ return +(o.price || o.priceThreshold || 0); }
 // Value of selling `qty` into existing buy orders (highest price first), optionally limited to one region.
@@ -2318,7 +2354,7 @@ function jsnRenderResults(){
 
   // Section 1 — sellable now (fill buy orders, region-filtered)
   const sellNow = [];
-  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m) return; const r = jsnImmediate(m.buyOrders, a.qty, jsnRegionFilter); if (r.value > 0) sellNow.push({ a, value:r.value, sold:r.sold, unit: r.sold ? r.value / r.sold : 0 }); });
+  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m) return; const r = jsnImmediate(m.buyOrders, a.qty, jsnRegionFilter); if (r.value > 0) sellNow.push({ a, value:r.value, sold:r.sold, unit: r.sold ? r.value / r.sold : 0, avg7d: m.avg7d }); });
   sellNow.sort((x,y) => y.value - x.value);
   const sellTotal = sellNow.reduce((s,x) => s + x.value, 0);
 
@@ -2336,11 +2372,13 @@ function jsnRenderResults(){
     <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Value</th>
   </tr></thead>`;
 
+  // Parenthetical 7d-average reference: the same sold quantity valued at the item's 7d avg price.
+  const avgRef = (val) => `<span style="color:var(--text3);font-size:11px;font-weight:400"> (${fmtNum(Math.round(val))})</span>`;
   const sellRows = sellNow.map(x => `<tr style="border-top:1px solid var(--border)">
     <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
-    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}</td>
-    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light)">${fmtCoin(Math.round(x.value))}</td>
+    <td style="padding:.4rem .6rem;text-align:right;color:var(--text2)">${fmtNum(Math.round(x.unit))}${x.avg7d > 0 ? avgRef(x.avg7d) : ''}</td>
+    <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light)">${fmtCoin(Math.round(x.value))}${x.avg7d > 0 ? avgRef(x.avg7d * x.sold) : ''}</td>
   </tr>`).join('');
   const avgRows = avgVal.map(x => `<tr style="border-top:1px solid var(--border)">
     <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
@@ -2349,28 +2387,39 @@ function jsnRenderResults(){
     <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light)">${fmtCoin(Math.round(x.value))}</td>
   </tr>`).join('');
 
-  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px">
+  // Row under each header. The 7d card gets an invisible clone of the region row so both cards line up
+  // and match height (empty space where "Sellable now" has its region filter).
+  const selectStyle = 'background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:3px 6px;font-size:12px';
+  const regionRow = `<div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem">
+      <span style="font-size:11px;color:var(--text3)">Buy orders in</span>
+      <select onchange="jsnSetRegion(this.value)" style="${selectStyle}">${regionOptionsHtml(jsnRegionFilter)}</select>
+      <span style="flex:1"></span>
+      <span style="font-size:10px;color:var(--text3)" title="Values in parentheses use the 7-day average price">( ) = 7d avg</span>
+    </div>`;
+  const spacerRow = `<div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem" aria-hidden="true">
+      <span style="visibility:hidden;display:inline-flex;align-items:center;gap:.4rem"><span style="font-size:11px">Buy orders in</span><select style="${selectStyle}"><option>—</option></select></span>
+    </div>`;
+
+  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-cash" style="color:var(--green-light)"></i><div style="font-weight:600">Sellable now</div>
       <span style="font-size:11px;color:var(--text3)">${sellNow.length} item${sellNow.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--green-light)">${fmtCoin(Math.round(sellTotal))}</span>
     </div>
-    <div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem">
-      <span style="font-size:11px;color:var(--text3)">Buy orders in</span>
-      <select onchange="jsnSetRegion(this.value)" style="background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:3px 6px;font-size:12px">${regionOptionsHtml(jsnRegionFilter)}</select>
-    </div>
+    ${regionRow}
     ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${jsnRegionFilter?' in this region':''}.</span></div>`}
   </div>`;
-  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px">
+  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:330px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-chart-line" style="color:var(--purple-light)"></i><div style="font-weight:600">7-day average value</div>
       <span style="font-size:11px;color:var(--text3)">${avgVal.length} item${avgVal.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--purple-light)">${fmtCoin(Math.round(avgTotal))}</span>
     </div>
+    ${spacerRow}
     ${avgVal.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Qty')}<tbody>${avgRows}</tbody></table></div>` : '<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No items with a 7d average price.</span></div>'}
   </div>`;
 
-  host.innerHTML = `<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start">${sellCard}${avgCard}</div>`;
+  host.innerHTML = `<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:stretch">${sellCard}${avgCard}</div>`;
 }
 
 async function renderJsnTab(silent){
@@ -2383,20 +2432,23 @@ async function renderJsnTab(silent){
         <button class="btn ctrl-btn" onclick="jsnRefresh()"><i class="ti ti-refresh"></i> Refresh</button>
         <span id="jsn-progress" style="font-size:12px;color:var(--text3)"></span>
       </div>
+      <div id="jsn-inv-selector"></div>
       <div id="jsn-results"><div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading inventory…</span></div></div>`;
     updateLiveBtns();
     if (!marketRegions.length){ apiFetch('/api/regions').then(d => { const rs = Array.isArray(d)?d:(d.regions||[]); if (rs.length){ marketRegions = rs; jsnRenderResults(); } }).catch(()=>{}); }
   }
-  await Promise.all(trackedPlayers.map(async p => {
-    if (silent && isPlayerPaused(p.entityId) && invByPlayer[p.entityId]) return;   // keep cached for paused players
-    try { invByPlayer[p.entityId] = await fetchPlayerInv(p.entityId); }
-    catch(e){ if (!invByPlayer[p.entityId]) invByPlayer[p.entityId] = { inventories:[], items:{}, cargos:{} }; }
-  }));
+  if (silent) invData = null;                          // live refresh → pull fresh quantities
+  if (!invData) await loadPlannerInventory();          // shared merged inventory (Planner/Tools/Jsn)
+  // (re)resolve the selection against the current invData; default to ALL locations for a fresh user.
+  const savedNames = _loadJsnTrackedNames();
+  if (savedNames === null){ if (jsnTrackedInvs === null) jsnTrackedInvs = new Set((invData.inventories||[]).map((_,i)=>i)); }
+  else jsnTrackedInvs = _resolveTrackedByName(invData.inventories||[], savedNames);
+  jsnRenderSelector();
   await jsnLoadMarket(jsnAggregate());
   const pe = document.getElementById('jsn-progress'); if (pe) pe.textContent = '';
   jsnRenderResults();
 }
-function jsnRefresh(){ jsnMarket = {}; renderJsnTab(); }
+function jsnRefresh(){ jsnMarket = {}; invData = null; renderJsnTab(); }
 
 // ── CRAFTING ──
 let craftData = null;
