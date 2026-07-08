@@ -1014,7 +1014,8 @@ let craftingData = null;   // {items,recipes,skills,itemsById,recipesByOutput,sk
 let plannerPlan = [];      // [{itemId, qty}]
 let plannerSelId = null;   // currently selected item id in left panel
 let plannerSelRecipe = {}; // itemId -> recipeId overrides
-let bsChecked = new Set();      // 'g_itemId' or 'c_itemId' for checked building steps
+let bsChecked = new Set();      // 'g_itemId'/'c_itemId' the user explicitly TICKED (force done)
+let bsUnchecked = new Set();    // steps the user explicitly UN-ticked (force not-done, even if inventory covers them)
 let plannerTreeCollapsed = new Set(); // recipe-tree node itemIds collapsed (persisted; remembered per item)
 try { const v = localStorage.getItem('bc_planner_tree_collapsed'); if (v) plannerTreeCollapsed = new Set(JSON.parse(v).map(Number)); } catch(e){}
 function savePlannerTreeCollapsed(){ safeSetItem('bc_planner_tree_collapsed', JSON.stringify([...plannerTreeCollapsed])); }
@@ -6619,6 +6620,7 @@ function savePlanToStorage() {
   try {
     safeSetItem('bc_plan_v1', JSON.stringify(plannerPlan));
     safeSetItem('bc_plan_bs_v1', JSON.stringify([...bsChecked]));
+    safeSetItem('bc_plan_bsu_v1', JSON.stringify([...bsUnchecked]));
   } catch(e) {}
 }
 function loadPlanFromStorage() {
@@ -6627,6 +6629,8 @@ function loadPlanFromStorage() {
     if (p) plannerPlan = JSON.parse(p);
     const b = localStorage.getItem('bc_plan_bs_v1');
     if (b) bsChecked = new Set(JSON.parse(b));
+    const bu = localStorage.getItem('bc_plan_bsu_v1');
+    if (bu) bsUnchecked = new Set(JSON.parse(bu));
   } catch(e) {}
 }
 
@@ -6663,6 +6667,7 @@ function removeFromPlan(itemId) {
 function clearPlan() {
   plannerPlan = [];
   bsChecked = new Set();
+  bsUnchecked = new Set();
   savePlanToStorage();
   renderPlanPanel();
   if (plannerSelId) renderRecipePanel(plannerSelId);
@@ -7637,7 +7642,9 @@ function renderBuildingSteps() {
   const haveBadge = '<span class="bs-have" title="You already have enough of this item">have</span>';
   const coveredBadge = '<span class="bs-have bs-covered" title="Not needed — covered by something further along that you already have">not needed</span>';
   const doneBadge = '<span class="bs-have bs-manual" title="You ticked this step off manually">done</span>';
-  const isDone = (key, itemId) => bsChecked.has(key) || notNeeded(itemId);
+  // An explicit user tick/untick always wins; otherwise the step follows inventory coverage. This keeps
+  // your manual edits from being reverted when the steps re-render (e.g. after changing tracked inventories).
+  const isDone = (key, itemId) => bsUnchecked.has(key) ? false : (bsChecked.has(key) || notNeeded(itemId));
   const checkedCount = [...gather, ...craft].filter(s => isDone((gather.includes(s)?'g_':'c_')+s.itemId, s.itemId)).length;
 
   // "Missing only" hides steps already done (manually checked or covered by inventory).
@@ -7653,7 +7660,8 @@ function renderBuildingSteps() {
       // Covered-but-not-held: drop the misleading partial-have coloring (you don't have this item —
       // it's just not needed because you have what it feeds).
       const chip = invAwareChip(s.qty, s.itemId, isCraft?'craft-out':'gather', covered && !self);
-      const badge = self ? haveBadge : (covered ? coveredBadge : (bsChecked.has(key) ? doneBadge : ''));
+      // Force-unticked steps show no "have/not needed/done" badge — you've chosen to make them anyway.
+      const badge = bsUnchecked.has(key) ? '' : (self ? haveBadge : (covered ? coveredBadge : (bsChecked.has(key) ? doneBadge : '')));
       const fromLine = isCraft ? `<div class="bs-line2"><span class="bs-from">from</span>${s.inputs.map(inp => invAwareChip(inp.qty, inp.itemId, '')).join(' ')}</div>` : '';
       h += `<div class="bs-row${done?' bs-done':''}">
         <input type="checkbox"${done?' checked':''} onchange="toggleBsStep('${key}',this)">
@@ -7683,7 +7691,9 @@ function renderBuildingSteps() {
 }
 
 function toggleBsStep(key, cb) {
-  if (cb.checked) bsChecked.add(key); else bsChecked.delete(key);
+  // Record the explicit choice in both directions so it survives re-renders / inventory changes.
+  if (cb.checked) { bsChecked.add(key); bsUnchecked.delete(key); }
+  else { bsChecked.delete(key); bsUnchecked.add(key); }
   savePlanToStorage();
   const row = cb.closest('.bs-row');
   if (row) row.classList.toggle('bs-done', cb.checked);
