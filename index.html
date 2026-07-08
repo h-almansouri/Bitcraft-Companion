@@ -439,6 +439,8 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .oc-card-stat{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text2)}
 .oc-card-pct{font-weight:600;color:var(--text)}
 .oc-card-owner{font-size:10px;color:var(--text3);display:flex;align-items:center;gap:.35rem}
+.oc-card-station{font-size:10px;color:var(--text3);display:flex;align-items:center;gap:.3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oc-card-station i{font-size:11px;color:var(--text3);flex-shrink:0}
 .oc-active-tag{font-size:8px;font-weight:700;letter-spacing:.04em;color:var(--green-light);background:rgba(99,153,34,.16);padding:1px 4px;border-radius:3px}
 /* filter bar */
 .oc-filters{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap}
@@ -3174,6 +3176,10 @@ async function ocLoadMyClaims(){
   ocMyClaims=Object.values(seen);
   if (ocOpenDrop==='claim'){ const d=document.getElementById('oc-drop'); if(d) d.innerHTML=ocDropHtml('claim'); }
 }
+// Station tier is carried as the adjective in the building name (Rough=T1 … Flawless=T10).
+const OC_STATION_TIER = { rough:1, simple:2, sturdy:3, fine:4, exquisite:5, peerless:6, ornate:7, pristine:8, magnificent:9, flawless:10 };
+function ocStationTier(name){ const m = (name||'').match(/^([A-Za-z]+)/); return (m && OC_STATION_TIER[m[1].toLowerCase()]) || 0; }
+function ocStationLabel(name){ if (!name) return ''; const t = ocStationTier(name); return t ? `T${t} ${name}` : name; }
 function ocCraftCard(cr, itemMap, now){
   const it = itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id];
   const name = it ? (it.name || ('Item '+cr.craftedItem[0].item_id)) : (cr.recipeName || ('Recipe #'+cr.recipeId));
@@ -3183,8 +3189,11 @@ function ocCraftCard(cr, itemMap, now){
   const left = Math.max(0, total - done);
   const active = cr.lockExpiration && new Date(cr.lockExpiration).getTime() > now;
   const cnt = cr.craftCount && cr.craftCount > 1 ? `${fmtCount(cr.craftCount)}× ` : '';
-  return `<div class="oc-card${active?' oc-card-active':''}" title="${escHtml((cnt+name))} · ${escHtml(cr.buildingName||'')}">
+  const stationLbl = ocStationLabel(cr.buildingName);
+  const station = stationLbl ? `<div class="oc-card-station" title="${escHtml(stationLbl)}"><i class="ti ti-building-factory-2"></i>${escHtml(stationLbl)}</div>` : '';
+  return `<div class="oc-card${active?' oc-card-active':''}" title="${escHtml((cnt+name))} · ${escHtml(stationLbl)}">
     <div class="oc-card-top"><span class="oc-card-name">${escHtml(name)}</span>${tier?ocTierBadge(tier,'','oc-card-tier'):''}</div>
+    ${station}
     <div class="oc-card-bar"><div class="oc-card-fill${active?' on':''}" style="width:${pct}%"></div></div>
     <div class="oc-card-stat"><span>${fmtCount(left)} left</span><span class="oc-card-pct">${pct}%</span></div>
     <div class="oc-card-owner">by ${escHtml(cr.ownerUsername||'?')}${active?' <span class="oc-active-tag">ACTIVE</span>':''}</div>
@@ -3212,7 +3221,12 @@ function ocClaimCardHtml(g){
     const open = openCraftProfOpen.has(claimId + ':' + p.sid);
     const tierBadges = Object.keys(p.tiers).map(Number).sort((a,b)=>a-b)
       .map(t => ocTierBadge(t, p.tiers[t]>1?('×'+p.tiers[t]):'', 'oc-tier')).join('');
-    const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=> ocTierOf(b)-ocTierOf(a) || Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress))).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
+    const cards = open ? `<div class="oc-cards">${p.cs.slice().sort((a,b)=>
+        (ocStationTier(b.buildingName)-ocStationTier(a.buildingName)) ||                 // higher-tier stations first
+        (a.buildingName||'').localeCompare(b.buildingName||'') ||                          // cluster identical stations together
+        (ocTierOf(b)-ocTierOf(a)) ||                                                       // then item tier
+        (Math.max(0,(b.totalActionsRequired-b.progress)) - Math.max(0,(a.totalActionsRequired-a.progress)))
+      ).map(cr => ocCraftCard(cr, openCraftAll.itemMap, now)).join('')}</div>` : '';
     return `<div class="oc-prof">
       <div class="oc-prof-hdr" onclick="ocToggleProf('${claimId}','${p.sid}')">
         <i class="ti ${ocSkillIcon(p.name)} oc-prof-ico"></i>
