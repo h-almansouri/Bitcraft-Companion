@@ -5111,7 +5111,7 @@ async function bcInitMap(){
 
   // Restore tracked resources/enemies (refetch their points)
   const savedRes = bcLoadTrackedRes();
-  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, count:0, pts:[] }; });
+  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, liveOptIn:t.liveOptIn, count:0, pts:[] }; });
   if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); bcRefreshAllTracked(); bcScheduleResourcePoll(); }
   // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
   const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
@@ -5634,7 +5634,7 @@ let bcTrackedRes = {};                 // "kind:id" -> {kind,id,name,color,count
 const bcResColors = ['#5fd0ff','#ff7b7b','#7CFF7B','#ffd166','#c77dff','#5ce1e6','#ff9f45','#f178b6'];
 let bcResColorIdx = 0;
 function bcResKey(kind,id){ return kind + ':' + id; }
-function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay })))); }
+function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, liveOptIn:t.liveOptIn })))); }
 function bcLoadTrackedRes(){ try { const v = localStorage.getItem('bc_map_tracked_res_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
 
 async function bcFetchResourcePts(kind, id){
@@ -5718,18 +5718,51 @@ function bcRenderTrackedResList(){
   el.style.display = '';
   el.innerHTML = `<div class="bc-trk-hdr">Tracked (${ts.length})</div>` + ts.map(t => {
     const key = bcResKey(t.kind, t.id);
+    const live = !!t.relay;
     const ct = typeof t.count === 'number'
-      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}">${t.count===0?'none found':t.count.toLocaleString()}</span>`
+      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}${live?' · live':''}">${t.count===0?'none found':t.count.toLocaleString()}</span>`
+      : '';
+    // Live toggle (resources only — enemies are always live). On = stream spawns/harvests from the relay
+    // in real time; off = the 60s aggregate poll.
+    const liveBtn = (t.kind === 'resource' && bcUseRelay)
+      ? `<i class="ti ti-broadcast bc-trk-live" title="${live ? 'Updating live via relay — click to use the 60s poll' : 'Update live via relay instead of the 60s poll'}" style="cursor:pointer;font-size:14px;flex-shrink:0;margin-left:2px;color:${live ? 'var(--teal-light)' : 'var(--text3)'}" onclick="bcToggleResLive('${key}')"></i>`
       : '';
     return `<div class="bc-trk">
       <span class="bc-trk-nm" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
       ${t.tier>0?`<span class="bc-trk-t">T${t.tier}</span>`:''}
       ${t.tag?`<span class="bc-trk-tag">${escHtml(t.tag)}</span>`:''}
       ${ct}
+      ${liveBtn}
       <input type="color" class="bc-trk-col" value="${t.color}" oninput="bcSetResColorLive('${key}', this.value)" onchange="bcSetResColor('${key}', this.value)" title="Change color">
       <i class="ti ti-x bc-trk-x" onclick="bcUntrackRes('${key}')" title="Untrack"></i>
     </div>`;
   }).join('');
+}
+// Above this many live nodes, streaming a resource type via the relay is a firehose (e.g. Sticks ~125k)
+// — warn before opting in. Uncharted Shipment (~28k) streams fine, so the bar is set generously.
+const BC_LIVE_MAX = 50000;
+// Opt a tracked resource into (or out of) live relay streaming instead of the 60s aggregate poll.
+function bcToggleResLive(key){
+  const t = bcTrackedRes[key]; if (!t || t.kind !== 'resource') return;
+  if (!bcUseRelay){ alert('Live map streaming (prism-relay) is currently unavailable.'); return; }
+  if (!t.relay){                 // → go live
+    if (typeof t.count === 'number' && t.count > BC_LIVE_MAX &&
+        !confirm(`${t.name} has ~${t.count.toLocaleString()} nodes right now. Streaming that many live can make the map sluggish. Go live anyway?`)) return;
+    t.relay = true; t.liveOptIn = true;
+    bcSaveTrackedRes();
+    bcRelaySync();               // subscribe on the relay; its cache drives the points
+    bcRenderTrackedResList();
+  } else {                       // → back to the 60s poll
+    t.relay = false; t.liveOptIn = false;
+    bcSaveTrackedRes();
+    bcRelaySync();               // drop that subscription (disconnects the relay if nothing live is left)
+    bcRenderTrackedResList();
+    bcFetchResourcePts(t.kind, t.id).then(pts => {   // repaint from the aggregate right away
+      const cur = bcTrackedRes[key];
+      if (cur && !cur.relay){ cur.pts = pts; cur.count = pts.length; bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus(); }
+    }).catch(()=>{});
+    bcScheduleResourcePoll();
+  }
 }
 async function bcRefreshAllTracked(){
   await Promise.all(Object.keys(bcTrackedRes).map(async key => {
@@ -5742,7 +5775,7 @@ async function bcRefreshAllTracked(){
   // Any resource bcmap-api returns nothing for → back it with the live relay (Uncharted Shipment etc.).
   // Also migrates resources tracked before relay-backing existed.
   let flagged = false;
-  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0){ t.relay = true; flagged = true; } } }
+  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0 && t.liveOptIn !== false){ t.relay = true; flagged = true; } } }
   if (flagged){ bcSaveTrackedRes(); bcRelaySync(); }
   bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
 }
