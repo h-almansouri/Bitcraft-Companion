@@ -2263,6 +2263,7 @@ let jsnMarket = {};              // "type:id" -> { buyOrders:[], avg7d:number|nu
 let jsnRegionFilter = (() => { try { return localStorage.getItem('bc_jsn_region') || ''; } catch(e){ return ''; } })();
 let jsnInvOpen = false;          // inventory-selector panel expanded?
 let jsnTrackedInvs = null;       // Set of invData.inventories indices included (null = not yet initialised)
+let jsnRunId = 0;                // bumped each valuation; a run bails once superseded (prevents races)
 function _loadJsnTrackedNames(){ try { const v = localStorage.getItem('bc_jsn_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 function _saveJsnTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (jsnTrackedInvs && jsnTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_jsn_tracked', JSON.stringify(names)); }
 
@@ -2308,10 +2309,8 @@ function jsnInvSelectorHtml(){
 }
 function jsnRenderSelector(){ const el = document.getElementById('jsn-inv-selector'); if (el) el.innerHTML = jsnInvSelectorHtml(); }
 function toggleJsnInvPanel(){ jsnInvOpen = !jsnInvOpen; const b=document.querySelector('#jsn-inv-wrap .planner-inv-body'); const c=document.getElementById('jsn-inv-chevron'); if(b)b.style.display=jsnInvOpen?'':'none'; if(c)c.className='ti ti-chevron-'+(jsnInvOpen?'down':'right'); }
-function toggleJsnInvLoc(idx){ if(!jsnTrackedInvs)jsnTrackedInvs=new Set(); if(jsnTrackedInvs.has(idx))jsnTrackedInvs.delete(idx); else jsnTrackedInvs.add(idx); _saveJsnTrackedNames(); jsnRenderSelector(); jsnRevalue(); }
-function toggleAllJsnInvs(all){ if(!invData)return; jsnTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveJsnTrackedNames(); jsnRenderSelector(); jsnRevalue(); }
-// Re-aggregate + re-render after a selection change; fetch market data for any newly-included items.
-async function jsnRevalue(){ jsnRenderResults(); await jsnLoadMarket(jsnAggregate()); const pe=document.getElementById('jsn-progress'); if(pe)pe.textContent=''; jsnRenderResults(); }
+function toggleJsnInvLoc(idx){ if(!jsnTrackedInvs)jsnTrackedInvs=new Set(); if(jsnTrackedInvs.has(idx))jsnTrackedInvs.delete(idx); else jsnTrackedInvs.add(idx); _saveJsnTrackedNames(); jsnRenderSelector(); jsnValue(); }
+function toggleAllJsnInvs(all){ if(!invData)return; jsnTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveJsnTrackedNames(); jsnRenderSelector(); jsnValue(); }
 
 function jsnBuyPrice(o){ return +(o.price || o.priceThreshold || 0); }
 // Value of selling `qty` into existing buy orders (highest price first), optionally limited to one region.
@@ -2324,24 +2323,33 @@ function jsnImmediate(buyOrders, qty, regionId){
   return { value, sold, top: orders.length ? jsnBuyPrice(orders[0]) : 0 };
 }
 
-// Fetch order book (buy orders) + 7d avg for each item not yet cached, with a small concurrency pool.
-async function jsnLoadMarket(items){
-  const pending = items.filter(it => !jsnMarket[it.key]);
+// Render immediately from cache, then fetch order book (buy orders) + 7d avg for any items not yet
+// cached (small concurrency pool), and re-render. Run-token guarded: if the selection changes (or a
+// refresh fires) mid-load, a newer jsnValue() supersedes this one — the stale run stops touching the
+// progress readout and skips its final render, so concurrent edits during the initial load can't clash.
+async function jsnValue(){
+  const myRun = ++jsnRunId;
+  jsnRenderResults();                                   // instant paint with whatever's already cached
+  const pending = jsnAggregate().filter(it => !jsnMarket[it.key]);
   let idx = 0, done = 0;
-  const setProg = () => { const e = document.getElementById('jsn-progress'); if (e) e.textContent = pending.length ? `Valuing items… ${done}/${pending.length}` : ''; };
+  const setProg = () => { if (myRun !== jsnRunId) return; const e = document.getElementById('jsn-progress'); if (e) e.textContent = pending.length ? `Valuing items… ${done}/${pending.length}` : ''; };
   setProg();
   async function worker(){
     while (idx < pending.length){
+      if (myRun !== jsnRunId) return;                   // superseded — stop fetching
       const it = pending[idx++];
       const type = it.itemType === 1 ? 'cargo' : 'item';
       let buyOrders = [], avg7d = null;
       try { const d = await fetchWithCache(type, it.id, 12000); buyOrders = d.buyOrders || []; } catch(e){}
       try { avg7d = await fetchShoppingAvg7d(it.id, it.itemType === 1); } catch(e){}
-      jsnMarket[it.key] = { buyOrders, avg7d };
+      jsnMarket[it.key] = { buyOrders, avg7d };          // keep the fetched result even if superseded
       done++; setProg();
     }
   }
   await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker));
+  if (myRun !== jsnRunId) return;                        // a newer run owns the UI now
+  const pe = document.getElementById('jsn-progress'); if (pe) pe.textContent = '';
+  jsnRenderResults();
 }
 
 function jsnSetRegion(v){ jsnRegionFilter = v || ''; try { safeSetItem('bc_jsn_region', jsnRegionFilter); } catch(e){} jsnRenderResults(); }
@@ -2444,9 +2452,7 @@ async function renderJsnTab(silent){
   if (savedNames === null){ if (jsnTrackedInvs === null) jsnTrackedInvs = new Set((invData.inventories||[]).map((_,i)=>i)); }
   else jsnTrackedInvs = _resolveTrackedByName(invData.inventories||[], savedNames);
   jsnRenderSelector();
-  await jsnLoadMarket(jsnAggregate());
-  const pe = document.getElementById('jsn-progress'); if (pe) pe.textContent = '';
-  jsnRenderResults();
+  await jsnValue();
 }
 function jsnRefresh(){ jsnMarket = {}; invData = null; renderJsnTab(); }
 
