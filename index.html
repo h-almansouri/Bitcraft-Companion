@@ -2299,6 +2299,9 @@ async function renderOrdersTab(silent){
 // Uses the shared merged inventory (invData, same as Planner/Tools) with a per-location selector.
 let jsnMarket = {};              // "type:id" -> { buyOrders:[], avg7d:number|null }
 let jsnRegionFilter = (() => { try { return localStorage.getItem('bc_jsn_region') || ''; } catch(e){ return ''; } })();
+let jsnClaimFilter = (() => { try { const v = JSON.parse(localStorage.getItem('bc_jsn_claims') || '[]'); return Array.isArray(v) ? v : []; } catch(e){ return []; } })();  // [{entityId,name,regionId}]
+let jsnClaimTimer = null;
+let jsnExpanded = new Set();     // "Sellable now" item keys whose buy-order locations are expanded
 let jsnInvOpen = false;          // inventory-selector panel expanded?
 let jsnTrackedInvs = null;       // Set of invData.inventories indices included (null = not yet initialised)
 let jsnRunId = 0;                // bumped each valuation; a run bails once superseded (prevents races)
@@ -2351,15 +2354,49 @@ function toggleJsnInvLoc(idx){ if(!jsnTrackedInvs)jsnTrackedInvs=new Set(); if(j
 function toggleAllJsnInvs(all){ if(!invData)return; jsnTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveJsnTrackedNames(); jsnRenderSelector(); jsnValue(); }
 
 function jsnBuyPrice(o){ return +(o.price || o.priceThreshold || 0); }
-// Value of selling `qty` into existing buy orders (highest price first), optionally limited to one region.
-function jsnImmediate(buyOrders, qty, regionId){
-  let orders = (buyOrders||[]).filter(o => +o.quantity > 0 && jsnBuyPrice(o) > 0);
-  if (regionId) orders = orders.filter(o => String(o.regionId) === String(regionId));
-  orders.sort((a,b) => jsnBuyPrice(b) - jsnBuyPrice(a));
+// Restrict buy orders to the selected region AND selected claims ([] = all).
+function jsnOrderFilter(orders){
+  const rid = jsnRegionFilter || null;
+  const claimIds = jsnClaimFilter.length ? new Set(jsnClaimFilter.map(c => String(c.entityId))) : null;
+  if (!rid && !claimIds) return orders || [];
+  return (orders||[]).filter(o => (!rid || String(o.regionId) === String(rid)) && (!claimIds || claimIds.has(String(o.claimEntityId))));
+}
+// Live buy orders for an item, filtered + sorted highest-price-first (the order they'd be filled).
+function jsnSellableOrders(buyOrders){
+  return jsnOrderFilter(buyOrders).filter(o => +o.quantity > 0 && jsnBuyPrice(o) > 0).sort((a,b) => jsnBuyPrice(b) - jsnBuyPrice(a));
+}
+// Value of selling `qty` into the (filtered) buy orders, walking highest price first.
+function jsnImmediate(buyOrders, qty){
+  const orders = jsnSellableOrders(buyOrders);
   let remaining = qty, value = 0, sold = 0;
   for (const o of orders){ if (remaining <= 0) break; const take = Math.min(remaining, +o.quantity); value += take * jsnBuyPrice(o); sold += take; remaining -= take; }
   return { value, sold, top: orders.length ? jsnBuyPrice(orders[0]) : 0 };
 }
+function jsnToggleExpand(key){ if (jsnExpanded.has(key)) jsnExpanded.delete(key); else jsnExpanded.add(key); jsnRenderResults(); }
+// ── Claim filter (mirrors the Shopping List; restricts "Sellable now" buy orders to chosen claims) ──
+function saveJsnClaims(){ safeSetItem('bc_jsn_claims', JSON.stringify(jsnClaimFilter)); }
+function jsnClaimSearchType(q){
+  clearTimeout(jsnClaimTimer); q = (q||'').trim();
+  const dd = document.getElementById('jsn-claim-results'); if (!dd) return;
+  if (q.length < 2){ dd.style.display = 'none'; return; }
+  jsnClaimTimer = setTimeout(async () => {
+    try {
+      const d = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`);
+      const claims = d.claims || [];
+      dd.innerHTML = claims.slice(0, 8).map(c => {
+        const on = jsnClaimFilter.some(x => String(x.entityId) === String(c.entityId));
+        return `<div class="search-result-item" onclick='jsnAddClaim(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionId:c.regionId}))})'>${escHtml(c.name||'Claim')}${on?' <span style="color:var(--teal-light)">· added</span>':''}<small>${escHtml(c.regionName||('R'+c.regionId))}</small></div>`;
+      }).join('') || '<div class="search-result-item">No claims found</div>';
+      dd.style.display = 'block';
+    } catch(e){ dd.style.display = 'none'; }
+  }, 350);
+}
+function jsnAddClaim(raw){
+  const c = JSON.parse(raw);
+  if (!jsnClaimFilter.some(x => String(x.entityId) === String(c.entityId))) jsnClaimFilter.push(c);
+  saveJsnClaims(); jsnRenderResults();
+}
+function jsnRemoveClaim(id){ id = String(id); jsnClaimFilter = jsnClaimFilter.filter(c => String(c.entityId) !== id); saveJsnClaims(); jsnRenderResults(); }
 
 // Render immediately from cache, then fetch order book (buy orders) + 7d avg for any items not yet
 // cached (small concurrency pool), and re-render. Run-token guarded: if the selection changes (or a
@@ -2393,6 +2430,51 @@ async function jsnValue(){
 function jsnSetRegion(v){ jsnRegionFilter = v || ''; try { safeSetItem('bc_jsn_region', jsnRegionFilter); } catch(e){} jsnRenderResults(); }
 function jsnTierBadge(meta){ return (meta && meta.tier > 0) ? `<span class="badge badge-tier" style="font-size:10px;padding:1px 5px">T${meta.tier}</span>` : ''; }
 
+// The region + claim filter rows for "Sellable now". clone=true renders an inert, invisible copy (no ids/
+// handlers) that the 7d card uses purely to match height so the two cards' tables line up.
+function jsnFilterBlock(clone){
+  const selStyle = 'background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:3px 6px;font-size:12px';
+  const rowStyle = 'padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem;flex-wrap:wrap';
+  const regionContent = `<span style="font-size:11px;color:var(--text3)">Buy orders in</span>`
+    + `<select ${clone?'':'onchange="jsnSetRegion(this.value)"'} style="${selStyle}">${regionOptionsHtml(jsnRegionFilter)}</select>`
+    + `<span style="flex:1"></span>`
+    + `<span style="font-size:10px;color:var(--text3)" title="Values in parentheses use the 7-day average price">( ) = 7d avg</span>`;
+  const chips = jsnClaimFilter.length
+    ? jsnClaimFilter.map(c => `<span class="shopping-chip">${escHtml(c.name)}<i class="ti ti-x" ${clone?'':`title="Remove" onclick="jsnRemoveClaim('${c.entityId}')"`}></i></span>`).join('')
+    : '<span style="font-size:11px;color:var(--text3)">All claims</span>';
+  const claimContent = `<span style="font-size:11px;color:var(--text3)"><i class="ti ti-building-community"></i> Claims</span>${chips}`
+    + `<div class="${clone?'':'search-wrap jsn-claim-search'}" style="position:relative;width:150px">`
+    + `<input type="text" ${clone?'':'id="jsn-claim-inp"'} placeholder="+ add claim…" autocomplete="off" style="width:100%;padding:5px 9px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;font-size:12px;outline:none" ${clone?'':'oninput="jsnClaimSearchType(this.value)"'}>`
+    + (clone ? '' : '<div id="jsn-claim-results" class="search-results" style="display:none"></div>')
+    + `</div>`;
+  const row = content => clone
+    ? `<div style="${rowStyle}"><span style="visibility:hidden;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;width:100%">${content}</span></div>`
+    : `<div style="${rowStyle}">${content}</div>`;
+  return row(regionContent) + row(claimContent);
+}
+// Expanded sub-row: where the buy orders for one item are (claim, region, qty being bought, price).
+function jsnExpandedRowHtml(a){
+  const m = jsnMarket[a.key]; if (!m) return '';
+  const orders = jsnSellableOrders(m.buyOrders);
+  if (!orders.length) return `<tr><td colspan="4" style="padding:.45rem .9rem;background:var(--bg2);color:var(--text3);font-size:12px">No buy orders${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</td></tr>`;
+  const rows = orders.map(o => `<tr style="border-top:1px solid var(--border)">
+    <td style="padding:.3rem .9rem;font-size:12px">${escHtml(o.claimName || o.settlementName || '—')}</td>
+    <td style="padding:.3rem .5rem;font-size:11px;color:var(--text3);white-space:nowrap">${escHtml(o.regionName || ('R'+o.regionId))} (R${o.regionId})</td>
+    <td style="padding:.3rem .5rem;text-align:right;color:var(--text2);white-space:nowrap">×${fmtCount(+o.quantity)}</td>
+    <td style="padding:.3rem .9rem;text-align:right;font-weight:600;color:var(--green-light);white-space:nowrap">${fmtNum(jsnBuyPrice(o))} ⬡</td>
+  </tr>`).join('');
+  return `<tr><td colspan="4" style="padding:0;background:var(--bg2)">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
+        <th style="padding:.3rem .9rem;text-align:left;font-weight:600">Claim</th>
+        <th style="padding:.3rem .5rem;text-align:left;font-weight:600">Region</th>
+        <th style="padding:.3rem .5rem;text-align:right;font-weight:600">Buying</th>
+        <th style="padding:.3rem .9rem;text-align:right;font-weight:600">Price</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table>
+  </td></tr>`;
+}
+
 function jsnRenderResults(){
   const host = document.getElementById('jsn-results'); if (!host) return;
   const agg = jsnAggregate();
@@ -2400,7 +2482,7 @@ function jsnRenderResults(){
 
   // Section 1 — sellable now (fill buy orders, region-filtered)
   const sellNow = [];
-  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m) return; const r = jsnImmediate(m.buyOrders, a.qty, jsnRegionFilter); if (r.value > 0) sellNow.push({ a, value:r.value, sold:r.sold, unit: r.sold ? r.value / r.sold : 0, avg7d: m.avg7d }); });
+  agg.forEach(a => { const m = jsnMarket[a.key]; if (!m) return; const r = jsnImmediate(m.buyOrders, a.qty); if (r.value > 0) sellNow.push({ a, value:r.value, sold:r.sold, unit: r.sold ? r.value / r.sold : 0, avg7d: m.avg7d }); });
   sellNow.sort((x,y) => y.value - x.value);
   const sellTotal = sellNow.reduce((s,x) => s + x.value, 0);
 
@@ -2420,12 +2502,16 @@ function jsnRenderResults(){
 
   // Parenthetical 7d-average reference: the same sold quantity valued at the item's 7d avg price.
   const avgRef = (val) => `<span style="color:var(--text3);font-size:11px;font-weight:400"> (${fmtNum(Math.round(val))})</span>`;
-  const sellRows = sellNow.map(x => `<tr style="border-top:1px solid var(--border)">
-    <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
+  const sellRows = sellNow.map(x => {
+    const open = jsnExpanded.has(x.a.key);
+    const row = `<tr style="border-top:1px solid var(--border);cursor:pointer${open?';background:var(--bg3)':''}" onclick="jsnToggleExpand('${x.a.key}')">
+    <td style="padding:.4rem .6rem"><i class="ti ti-chevron-${open?'down':'right'}" style="font-size:11px;color:var(--text3);margin-right:.25rem"></i>${itemCell(x.a)}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtNum(Math.round(x.unit))}${x.avg7d > 0 ? avgRef(x.avg7d) : ''}</td>
     <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}${x.avg7d > 0 ? avgRef(x.avg7d * x.sold) : ''}</td>
-  </tr>`).join('');
+  </tr>`;
+    return row + (open ? jsnExpandedRowHtml(x.a) : '');
+  }).join('');
   const avgRows = avgVal.map(x => `<tr style="border-top:1px solid var(--border)">
     <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.a.qty)}</td>
@@ -2433,18 +2519,10 @@ function jsnRenderResults(){
     <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}</td>
   </tr>`).join('');
 
-  // Row under each header. The 7d card gets an invisible clone of the region row so both cards line up
-  // and match height (empty space where "Sellable now" has its region filter).
-  const selectStyle = 'background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:3px 6px;font-size:12px';
-  const regionRow = `<div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem">
-      <span style="font-size:11px;color:var(--text3)">Buy orders in</span>
-      <select onchange="jsnSetRegion(this.value)" style="${selectStyle}">${regionOptionsHtml(jsnRegionFilter)}</select>
-      <span style="flex:1"></span>
-      <span style="font-size:10px;color:var(--text3)" title="Values in parentheses use the 7-day average price">( ) = 7d avg</span>
-    </div>`;
-  const spacerRow = `<div style="padding:.4rem .75rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.4rem" aria-hidden="true">
-      <span style="visibility:hidden;display:inline-flex;align-items:center;gap:.4rem"><span style="font-size:11px">Buy orders in</span><select style="${selectStyle}"><option>—</option></select></span>
-    </div>`;
+  // Region + claim filters for "Sellable now". The 7d card renders an invisible clone (clone=true) so
+  // both cards stay the same height (empty space where the filters sit) and their tables line up.
+  const sellFilter = jsnFilterBlock(false);
+  const avgFilterSpacer = jsnFilterBlock(true);
 
   const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
@@ -2452,8 +2530,8 @@ function jsnRenderResults(){
       <span style="font-size:11px;color:var(--text3)">${sellNow.length} item${sellNow.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--green-light)">${fmtCoin(Math.round(sellTotal))}</span>
     </div>
-    ${regionRow}
-    ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${jsnRegionFilter?' in this region':''}.</span></div>`}
+    ${sellFilter}
+    ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</span></div>`}
   </div>`;
   const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
@@ -2461,7 +2539,7 @@ function jsnRenderResults(){
       <span style="font-size:11px;color:var(--text3)">${avgVal.length} item${avgVal.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--purple-light)">${fmtCoin(Math.round(avgTotal))}</span>
     </div>
-    ${spacerRow}
+    ${avgFilterSpacer}
     ${avgVal.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Qty')}<tbody>${avgRows}</tbody></table></div>` : '<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No items with a 7d average price.</span></div>'}
   </div>`;
 
@@ -2481,6 +2559,7 @@ async function renderJsnTab(silent){
       <div id="jsn-inv-selector"></div>
       <div id="jsn-results"><div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading inventory…</span></div></div>`;
     updateLiveBtns();
+    if (!window.__jsnClaimBound){ window.__jsnClaimBound = true; document.addEventListener('click', e => { if (!e.target.closest('.jsn-claim-search')){ const dd = document.getElementById('jsn-claim-results'); if (dd) dd.style.display = 'none'; } }); }
     if (!marketRegions.length){ apiFetch('/api/regions').then(d => { const rs = Array.isArray(d)?d:(d.regions||[]); if (rs.length){ marketRegions = rs; jsnRenderResults(); } }).catch(()=>{}); }
   }
   if (silent) invData = null;                          // live refresh → pull fresh quantities
