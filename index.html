@@ -362,6 +362,11 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .inv-loc-chip-count{font-size:11px;color:var(--teal-light)}
 /* Expanded chip content panel */
 .inv-chip-content{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:.6rem;margin-bottom:.5rem}
+.inv-locb-hdr{display:flex;align-items:center;gap:.45rem;cursor:pointer;user-select:none;padding:.1rem .1rem .4rem;border-bottom:1px solid var(--border);margin-bottom:.5rem}
+.inv-locb-hdr:hover .inv-locb-name{color:var(--teal-light)}
+.inv-locb-name{font-size:12.5px;font-weight:600;color:var(--text)}
+.inv-locb-sub{font-size:11px;color:var(--text3)}
+.inv-locb-count{font-size:11px;color:var(--teal-light);flex-shrink:0}
 /* Flat / grid view */
 .inv-items-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.5rem}
 .inv-item-card{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;display:flex;align-items:center;gap:.6rem}
@@ -862,6 +867,7 @@ let invViewMode = 'grouped'; // grouped | flat
 let invSearch = '';
 let invSelectedChip   = {};  // sectionKey -> locIndex (-1 = none)
 let invSectionCollapsed = {}; // sectionKey -> bool
+let invLocCollapsed   = {};  // per-location-block key -> bool (collapse one inventory's items)
 let craftTabActive = 'active';
 let countdownInterval = null;
 let lastTaskData = null;   // cached task data for live refresh re-renders
@@ -2053,6 +2059,20 @@ function toggleInvSection(key) {
   if (body) body.style.display = invSectionCollapsed[key] ? 'none' : '';
   if (chev) chev.style.transform = invSectionCollapsed[key] ? 'rotate(-90deg)' : '';
 }
+// Stable, id-safe key for one inventory location block (survives search-driven re-renders so its
+// collapsed state sticks even as the query changes which locations are shown).
+function _invLocId(secKey, loc) {
+  const raw = secKey + '' + (loc.name || '') + '' + (loc.claimName || '');
+  try { return btoa(unescape(encodeURIComponent(raw))).replace(/[+/=]/g, m => ({ '+': '-', '/': '_', '=': '' }[m])); }
+  catch (e) { return secKey + (loc.name || ''); }
+}
+function toggleInvLocBlock(k) {
+  invLocCollapsed[k] = !invLocCollapsed[k];
+  const body = document.getElementById('inv-locb-' + k);
+  const chev = document.getElementById('inv-locc-' + k);
+  if (body) body.style.display = invLocCollapsed[k] ? 'none' : '';
+  if (chev) chev.style.transform = invLocCollapsed[k] ? 'rotate(-90deg)' : '';
+}
 function selectInvChip(key, idx) {
   invSelectedChip[key] = (invSelectedChip[key] === idx) ? -1 : idx;
   fillPlayerInvCached(key.split('|')[0]); // re-render just that player's section
@@ -2110,7 +2130,24 @@ function inventoryContentHtml(data, q, pfx) {
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
     const chips = sorted.map((loc, i) => { const isBank = (loc.locationType==='bank'||loc.locationType==='storage'); const sub = isBank ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     const expandedLocs = q ? sorted : (selIdx>=0 ? [sorted[selIdx]] : []);
-    const content = expandedLocs.length ? `<div class="inv-chip-content">${expandedLocs.map(l=>renderItemGrid(l.slots)).join('')}</div>` : '';
+    // Each expanded location renders as its own labelled, separately-bordered, collapsible block so items
+    // from different inventories (e.g. two houses) never blend together — especially during a search.
+    const locBlock = (loc) => {
+      const isBank = (loc.locationType==='bank'||loc.locationType==='storage');
+      const sub = isBank ? `R${loc.regionId||'?'} · ${loc.claimName||''}` : (loc.claimName && loc.locationType==='housing' ? loc.claimName : '');
+      const lk = _invLocId(secKey, loc);
+      const col = !!invLocCollapsed[lk];
+      return `<div class="inv-chip-content">
+        <div class="inv-locb-hdr" onclick="toggleInvLocBlock('${lk}')">
+          <i class="ti ti-chevron-down" id="inv-locc-${lk}" style="font-size:12px;color:var(--text3);flex-shrink:0;transition:transform .2s;${col?'transform:rotate(-90deg)':''}"></i>
+          <span class="inv-locb-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-locb-sub">${escHtml(sub)}</span>`:''}
+          <span style="flex:1"></span>
+          <span class="inv-locb-count">${loc.slots.length} item${loc.slots.length!==1?'s':''}</span>
+        </div>
+        <div id="inv-locb-${lk}"${col?' style="display:none"':''}>${renderItemGrid(loc.slots)}</div>
+      </div>`;
+    };
+    const content = expandedLocs.length ? expandedLocs.map(locBlock).join('') : '';
     return `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${secKey}')"><span class="inv-group-name"><i class="ti ${icon}"></i>${title}</span><span class="inv-group-meta"></span><i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i></div><div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="inv-chips-row">${chips.join('')}</div>${content}</div></div>`;
   }
   return renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage');
