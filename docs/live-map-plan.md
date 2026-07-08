@@ -52,6 +52,12 @@ reconnect (no game credentials).
 - **Resources → keep the aggregate REST poll** (or a static dataset). Do **not** stream `resource_location`
   live (125k+/type). Optionally overlay `growth_timers` (small, sparse) to show which nodes are respawning
   and when — a light enhancement on top of the aggregate layer.
+  - **Exception (shipped):** `bcmap-api`'s static tiles omit transient/dynamic cargo — e.g. **Uncharted
+    Shipment** (`resourceId 278317122`) returns 404 in every region on `bcmap-api` but has ~28k live rows in
+    `resource_location`. So a tracked resource whose REST poll returns **0 points** is flagged `t.relay=true`
+    and streamed from `resource_location` per type × region, exactly like enemies. This only ever fires for
+    resources bcmap-api lacks (rare cargo = few rows), so the 125k firehose types never hit the relay.
+    Persisted via the `relay` flag in `bc_map_tracked_res_v1`.
 - **Players →** stay on the bitjita WS for now.
 
 ## How subscription works (from `relay-service.ts`)

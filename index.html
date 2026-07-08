@@ -5072,7 +5072,7 @@ async function bcInitMap(){
 
   // Restore tracked resources/enemies (refetch their points)
   const savedRes = bcLoadTrackedRes();
-  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, count:0, pts:[] }; });
+  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, count:0, pts:[] }; });
   if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); bcRefreshAllTracked(); bcScheduleResourcePoll(); }
   // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
   const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
@@ -5595,7 +5595,7 @@ let bcTrackedRes = {};                 // "kind:id" -> {kind,id,name,color,count
 const bcResColors = ['#5fd0ff','#ff7b7b','#7CFF7B','#ffd166','#c77dff','#5ce1e6','#ff9f45','#f178b6'];
 let bcResColorIdx = 0;
 function bcResKey(kind,id){ return kind + ':' + id; }
-function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color })))); }
+function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay })))); }
 function bcLoadTrackedRes(){ try { const v = localStorage.getItem('bc_map_tracked_res_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
 
 async function bcFetchResourcePts(kind, id){
@@ -5643,14 +5643,18 @@ async function bcToggleMapItem(kind, id){
   const pts = await bcFetchResourcePts(kind, id);
   const t = bcTrackedRes[key]; if (!t) return; // untracked while loading
   t.pts = pts; t.count = pts.length;
+  // bcmap-api's static tiles omit transient/dynamic nodes (e.g. Uncharted Shipment cargo). If it has
+  // none, fall back to the live prism-relay resource_location stream, which does carry them.
+  if (kind === 'resource' && bcUseRelay && pts.length === 0){ t.relay = true; bcSaveTrackedRes(); bcRelaySync(); }
   bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
   bcScheduleResourcePoll();
 }
 function bcUntrackRes(key){
-  const wasEnemy = bcTrackedRes[key] && bcTrackedRes[key].kind === 'enemy';
+  const trk = bcTrackedRes[key];
+  const wasRelay = trk && (trk.kind === 'enemy' || trk.relay);   // enemies + relay-backed resources stream live
   delete bcTrackedRes[key];
   bcSaveTrackedRes();
-  if (wasEnemy && bcUseRelay) bcRelaySync();     // drop that type's subscription (disconnects if none left)
+  if (wasRelay && bcUseRelay) bcRelaySync();      // drop that type's subscription (disconnects if none left)
   bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList(); bcUpdateResStatus();
   if (!Object.keys(bcTrackedRes).length) bcStopResourcePoll();
 }
@@ -5691,10 +5695,16 @@ function bcRenderTrackedResList(){
 async function bcRefreshAllTracked(){
   await Promise.all(Object.keys(bcTrackedRes).map(async key => {
     const t = bcTrackedRes[key]; if (!t) return;
-    if (t.kind === 'enemy' && bcRelayActive()) return;    // enemies are live via the relay — don't overwrite
+    if (t.kind === 'enemy' && bcRelayActive()) return;              // enemies are live via the relay — don't overwrite
+    if (t.kind === 'resource' && t.relay && bcRelayActive()) return; // relay-backed resources too
     const pts = await bcFetchResourcePts(t.kind, t.id);
     if (bcTrackedRes[key]){ bcTrackedRes[key].pts = pts; bcTrackedRes[key].count = pts.length; }
   }));
+  // Any resource bcmap-api returns nothing for → back it with the live relay (Uncharted Shipment etc.).
+  // Also migrates resources tracked before relay-backing existed.
+  let flagged = false;
+  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0){ t.relay = true; flagged = true; } } }
+  if (flagged){ bcSaveTrackedRes(); bcRelaySync(); }
   bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
 }
 function bcScheduleResourcePoll(){
@@ -5714,9 +5724,11 @@ function bcStopResourcePoll(){ if (bcResourcePollTimer){ clearTimeout(bcResource
 
 // ── Live enemy positions via prism-relay (SpacetimeDB) ──────────────────────────────────────────────
 // Animals move constantly and carry per-entity IDs, so we stream them live (bccodex-style) from the
-// community relay instead of the 60s aggregate poll. RESOURCES stay on the poll — resource_location is a
-// 125k+/type firehose, and the aggregate GeoJSON is far cheaper for static nodes. If the relay can't
-// connect, enemies transparently fall back to the REST poll.  See docs/live-map-plan.md.
+// community relay instead of the 60s aggregate poll. RESOURCES mostly stay on the poll — resource_location
+// is a 125k+/type firehose and the aggregate GeoJSON is far cheaper for static nodes — EXCEPT resources
+// bcmap-api has no data for (transient/dynamic cargo like Uncharted Shipment): those are marked t.relay and
+// streamed from resource_location too (rare types = few rows, no firehose). If the relay can't connect,
+// enemies transparently fall back to the REST poll.  See docs/live-map-plan.md.
 let bcUseRelay = (() => { try { return localStorage.getItem('bc_use_relay') !== '0'; } catch(e){ return true; } })();
 let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false;
 let bcRelaySubs = {};              // enemyType -> SubscriptionHandle
@@ -5724,6 +5736,8 @@ let bcRelaySubRegion = null;       // region the current subs were built for (''
 let bcRelayRedrawT = null;
 const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-relay';
 function bcRelayEnemyTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'enemy'); }
+// Resources bcmap-api has no data for, streamed live from resource_location instead (e.g. Uncharted Shipment).
+function bcRelayResourceTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'resource' && t.relay); }
 function bcRelayActive(){ return bcUseRelay && bcRelayReady; }
 async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${API}/mapassets/prism-relay.js`); return bcRelayLib; }
 // Rebuild each tracked enemy's points from the SDK cache (bucketed by enemyType). Throttled — animals
@@ -5731,11 +5745,17 @@ async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${A
 function bcRelayScheduleRedraw(){ if (bcRelayRedrawT) return; bcRelayRedrawT = setTimeout(() => { bcRelayRedrawT = null; bcRelayRebuild(); }, 200); }
 function bcRelayRebuild(){
   if (!bcRelayConn || !bcRelayReady) return;
-  const byType = {};
-  bcRelayEnemyTypes().forEach(t => { t.pts = []; byType[+t.id] = t; });
-  try { for (const r of bcRelayConn.db.enemy_location.iter()){ const t = byType[r.enemyType]; if (t) t.pts.push([r.x/1000, r.z/1000]); } }  // milli-hex -> map space
+  const byEnemy = {}, byRes = {};
+  bcRelayEnemyTypes().forEach(t => { t.pts = []; byEnemy[+t.id] = t; });
+  const resTypes = bcRelayResourceTypes();
+  resTypes.forEach(t => { t.pts = []; byRes[+t.id] = t; });
+  try {
+    for (const r of bcRelayConn.db.enemy_location.iter()){ const t = byEnemy[r.enemyType]; if (t) t.pts.push([r.x/1000, r.z/1000]); }  // milli-hex -> map space
+    if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } }  // plain Small-Hex
+  }
   catch(e){ return; }
   bcRelayEnemyTypes().forEach(t => t.count = t.pts.length);
+  resTypes.forEach(t => t.count = t.pts.length);
   if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
@@ -5745,7 +5765,7 @@ function bcRelaySync(){
   // Only stream while the Map tab is open and showing enemies — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
-  const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcGrowthOn);
+  const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcRelayResourceTypes().length > 0 || bcGrowthOn);
   if (!shouldStream){ bcRelayDisconnect(); bcGrowthApply(); return; }   // also hides the overlay layer + stops its tick
   if (!bcRelayConn){ bcRelayConnect(); return; }               // onConnect re-invokes bcRelaySync
   if (!bcRelayReady) return;
@@ -5755,15 +5775,25 @@ function bcRelaySync(){
     Object.values(bcRelaySubs).forEach(s => { try { s.unsubscribe(); } catch(e){} });
     bcRelaySubs = {}; bcRelaySubRegion = regionKey;
   }
-  const want = {}; bcRelayEnemyTypes().forEach(t => want[+t.id] = true);
+  // Keyed by kind so an enemyType and a resourceId that share a number don't collide.
+  const want = {};
+  bcRelayEnemyTypes().forEach(t => want['e'+(+t.id)] = { kind:'enemy', id:+t.id });
+  bcRelayResourceTypes().forEach(t => want['r'+(+t.id)] = { kind:'resource', id:+t.id });
   for (const k in bcRelaySubs){ if (!want[k]){ try { bcRelaySubs[k].unsubscribe(); } catch(e){} delete bcRelaySubs[k]; } }
-  for (const typeId in want){
-    if (bcRelaySubs[typeId]) continue;
-    const id = +typeId;
-    const q = bcMapRegion
-      ? [ tables.enemy_location.where(r => r.enemyType.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
-      : [ tables.enemy_location.where(r => r.enemyType.eq(id)) ];   // all regions (heavier)
-    bcRelaySubs[typeId] = bcRelayConn.subscriptionBuilder().onApplied(() => bcRelayScheduleRedraw()).onError(() => {}).subscribe(q);
+  for (const k in want){
+    if (bcRelaySubs[k]) continue;
+    const id = want[k].id;
+    let q;
+    if (want[k].kind === 'enemy'){
+      q = bcMapRegion
+        ? [ tables.enemy_location.where(r => r.enemyType.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
+        : [ tables.enemy_location.where(r => r.enemyType.eq(id)) ];        // all regions (heavier)
+    } else {
+      q = bcMapRegion
+        ? [ tables.resource_location.where(r => r.resourceId.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
+        : [ tables.resource_location.where(r => r.resourceId.eq(id)) ];    // all regions (heavier)
+    }
+    bcRelaySubs[k] = bcRelayConn.subscriptionBuilder().onApplied(() => bcRelayScheduleRedraw()).onError(() => {}).subscribe(q);
   }
   // growth_timers respawn overlay (region-scoped; only ~tens of rows)
   if (bcGrowthOn){
@@ -5792,6 +5822,9 @@ async function bcRelayConnect(){
         conn.db.enemy_location.onInsert(() => bcRelayScheduleRedraw());
         conn.db.enemy_location.onUpdate(() => bcRelayScheduleRedraw());
         conn.db.enemy_location.onDelete(() => bcRelayScheduleRedraw());
+        conn.db.resource_location.onInsert(() => bcRelayScheduleRedraw());
+        conn.db.resource_location.onUpdate(() => bcRelayScheduleRedraw());
+        conn.db.resource_location.onDelete(() => bcRelayScheduleRedraw());
         conn.db.growth_timers.onInsert(() => bcGrowthScheduleRebuild());
         conn.db.growth_timers.onUpdate(() => bcGrowthScheduleRebuild());
         conn.db.growth_timers.onDelete(() => bcGrowthScheduleRebuild());
