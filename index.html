@@ -5675,10 +5675,14 @@ function bcRenderTrackedResList(){
   el.style.display = '';
   el.innerHTML = `<div class="bc-trk-hdr">Tracked (${ts.length})</div>` + ts.map(t => {
     const key = bcResKey(t.kind, t.id);
+    const ct = typeof t.count === 'number'
+      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}">${t.count===0?'none found':t.count.toLocaleString()}</span>`
+      : '';
     return `<div class="bc-trk">
       <span class="bc-trk-nm" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
       ${t.tier>0?`<span class="bc-trk-t">T${t.tier}</span>`:''}
       ${t.tag?`<span class="bc-trk-tag">${escHtml(t.tag)}</span>`:''}
+      ${ct}
       <input type="color" class="bc-trk-col" value="${t.color}" oninput="bcSetResColorLive('${key}', this.value)" onchange="bcSetResColor('${key}', this.value)" title="Change color">
       <i class="ti ti-x bc-trk-x" onclick="bcUntrackRes('${key}')" title="Untrack"></i>
     </div>`;
