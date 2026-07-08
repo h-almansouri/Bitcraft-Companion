@@ -4890,10 +4890,27 @@ async function bcMapPip(){
   const noNativeDrag = (e) => e.preventDefault();   // stop native image/text drag from hijacking the pan
   pip.document.addEventListener('dragstart', noNativeDrag, true);
 
+  // When the PiP window is resized, Leaflet's cached pixel size is stale — so panTo/follow would centre
+  // the player against the OLD (big-window) dimensions. Refresh the size and re-centre on whoever we follow.
+  const pipRaf = pip.requestAnimationFrame ? pip.requestAnimationFrame.bind(pip) : requestAnimationFrame;
+  let pipResizePending = false;
+  const onPipResize = () => {
+    if (pipResizePending) return;
+    pipResizePending = true;
+    pipRaf(() => {
+      pipResizePending = false;
+      try { bcMap.invalidateSize(); } catch(e){}
+      const f = Object.values(bcTracked).find(t => t.follow && t.last);
+      if (f){ try { bcMap.panTo(f.last, { animate:false }); } catch(e){} }
+    });
+  };
+  pip.addEventListener('resize', onPipResize);
+
   const btn = document.getElementById('bc-pip-btn'); if (btn) btn.innerHTML = '<i class="ti ti-picture-in-picture-off"></i> Close pop-out';
-  setTimeout(() => { try { bcMap.invalidateSize(); } catch(e){} }, 60);
+  setTimeout(() => { try { bcMap.invalidateSize(); } catch(e){} onPipResize(); }, 60);
   pip.addEventListener('pagehide', () => {
     bcPipUnpatchDrag();
+    try { pip.removeEventListener('resize', onPipResize); } catch(e){}
     try { pip.document.removeEventListener('dragstart', noNativeDrag, true); } catch(e){}
     if (ctrl.parentNode) ctrl.remove();
     const ph2 = document.getElementById('bc-pip-ph');
