@@ -5104,6 +5104,40 @@ async function bcRefreshEvents(){
   return feats.length;
 }
 
+// ----- Uncharted POIs: Volcanic Geysers, Hermit Crab Dens, Shipwrecks -----
+// World-generated buildings bitjita publishes in one export (uncharted.geojson), split by iconName —
+// same pipeline as events.geojson. bcmap-api/relay don't carry these; this is the only feed.
+let bcGeysersLayer = null, bcHermitLayer = null, bcShipwreckLayer = null, bcUnchartedIcons = {};
+function bcUnchartedIcon(kind){
+  if (bcUnchartedIcons[kind]) return bcUnchartedIcons[kind];
+  const svgs = {
+    'volcanic-geyser': "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23fb7185' stroke-width='1.5'/><path d='M6.5 18 L12 7 L17.5 18 Z' fill='%23f97316' stroke='%23fecaca' stroke-width='0.8'/><circle cx='12' cy='8.5' r='1.5' fill='%23fde68a'/></svg>",
+    'hermit-crab':     "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23fdba74' stroke-width='1.5'/><circle cx='12' cy='12' r='5.5' fill='none' stroke='%23fb923c' stroke-width='1.5'/><circle cx='12' cy='12' r='2.4' fill='%23fb923c'/></svg>",
+    'shipwreck':       "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%2394a3b8' stroke-width='1.5'/><path d='M6 13 L18 13 L15.5 18 L8.5 18 Z' fill='%2394a3b8' stroke='%23e2e8f0' stroke-width='0.7'/><path d='M12 5 L12 13' stroke='%23e2e8f0' stroke-width='1.2'/><path d='M12 6 L16 11 L12 11 Z' fill='%23cbd5e1'/></svg>",
+  };
+  const svg = svgs[kind] || svgs['volcanic-geyser'];
+  return (bcUnchartedIcons[kind] = L.icon({ iconUrl: svg, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-13] }));
+}
+async function bcRefreshUncharted(){
+  if (!bcGeysersLayer) return { geyser:0, hermit:0, shipwreck:0 };
+  const layers = { 'volcanic-geyser': bcGeysersLayer, 'hermit-crab': bcHermitLayer, 'shipwreck': bcShipwreckLayer };
+  Object.values(layers).forEach(l => l.clearLayers());
+  const feats = await bcLoadGeo('uncharted.geojson');
+  const counts = { 'volcanic-geyser':0, 'hermit-crab':0, 'shipwreck':0 };
+  feats.forEach(f => {
+    const ll = bcFeatLatLng(f); if (!ll) return;
+    const p = f.properties || {};
+    const kind = p.iconName || 'volcanic-geyser';
+    const layer = layers[kind]; if (!layer) return;
+    counts[kind] = (counts[kind] || 0) + 1;
+    const nm = (p.name || p.popupText || kind).replace(/\s*\(N:.*$/, '');   // strip the coords already in the name
+    const m = L.marker(ll, { icon: bcUnchartedIcon(kind), title: nm });
+    m.bindPopup(`<b>${escHtml(nm)}</b> <span style="color:var(--text3)">· Uncharted</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
+    m.addTo(layer);
+  });
+  return { geyser:counts['volcanic-geyser'], hermit:counts['hermit-crab'], shipwreck:counts['shipwreck'] };
+}
+
 function renderMap(){
   const host = document.getElementById('map-content');
   if (!host) return;
@@ -5367,8 +5401,11 @@ async function bcInitMap(){
   // Hexite Vault world events — own live layer (refreshed on a timer; default on so they're visible)
   bcEventsLayer = L.layerGroup();
   const eventsCount = await bcRefreshEvents();
+  // Uncharted POIs (geysers / hermit crab dens / shipwrecks) — three layers from uncharted.geojson
+  bcGeysersLayer = L.layerGroup(); bcHermitLayer = L.layerGroup(); bcShipwreckLayer = L.layerGroup();
+  const uncharted = await bcRefreshUncharted();
   if (bcEventsTimer) clearInterval(bcEventsTimer);
-  bcEventsTimer = setInterval(() => { if (currentTab === 'map' && !document.hidden) bcRefreshEvents(); }, 120000);
+  bcEventsTimer = setInterval(() => { if (currentTab === 'map' && !document.hidden){ bcRefreshEvents(); bcRefreshUncharted(); } }, 120000);
   // (added to the map by bcApplyLayerState)
 
   // ----- Roads (tiled overlay) -----
@@ -5379,7 +5416,7 @@ async function bcInitMap(){
 
   // ----- Custom layer control (Claims/Caves expand to per-tier toggles) -----
   bcLoadLayers();
-  bcLayerReg = { roads:roadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer, events:bcEventsLayer };
+  bcLayerReg = { roads:roadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer, events:bcEventsLayer, geysers:bcGeysersLayer, hermitdens:bcHermitLayer, shipwrecks:bcShipwreckLayer };
   Object.keys(claimTierLayers).forEach(t => bcLayerReg['claimT'+t] = claimTierLayers[t]);
   Object.keys(caveTierLayers).forEach(t => bcLayerReg['caveT'+t] = caveTierLayers[t]);
   const lc = L.control({ position:'topright' });
@@ -5408,7 +5445,10 @@ async function bcInitMap(){
       flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
       flat('ruined',`Ruined Cities (${ruined.count})`,dot('#c8c8c8')) +
       flat('wonders',`Wonders (${wonders.count})`,dot('#63c45a')) +
-      flat('events',`Hexite Vaults (${eventsCount})`,dot('#5eead4'));
+      flat('events',`Hexite Vaults (${eventsCount})`,dot('#5eead4')) +
+      flat('geysers',`Volcanic Geysers (${uncharted.geyser})`,dot('#fb7185')) +
+      flat('hermitdens',`Hermit Crab Dens (${uncharted.hermit})`,dot('#fb923c')) +
+      flat('shipwrecks',`Shipwrecks (${uncharted.shipwreck})`,dot('#94a3b8'));
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
     return div;
@@ -5609,6 +5649,7 @@ document.addEventListener('visibilitychange', () => {
   }
   if (Object.keys(bcTrackedRes).length) bcRefreshAllTracked().catch(()=>{});
   if (bcEventsLayer) bcRefreshEvents().catch(()=>{}); // keep Hexite Vault timers/positions current
+  if (bcGeysersLayer) bcRefreshUncharted().catch(()=>{}); // keep Uncharted POIs current
 });
 function bcWsSubscribe(){
   if (!bcPlayerSocket || bcPlayerSocket.readyState !== 1) return;
