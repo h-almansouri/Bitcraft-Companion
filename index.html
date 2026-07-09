@@ -5074,7 +5074,7 @@ function bcFeatLatLng(f){
 let bcEventsLayer = null, bcVaultIcon = null, bcEventsTimer = null;
 function bcGetVaultIcon(){
   if (bcVaultIcon) return bcVaultIcon;
-  bcVaultIcon = L.icon({ iconUrl:`${API}/mapassets/vault-event.webp`, iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14] });  // bitcraftmap's vault icon
+  bcVaultIcon = L.icon({ iconUrl:`${API}/mapassets/vault-event.webp`, iconSize:[38,38], iconAnchor:[19,19], popupAnchor:[0,-19] });  // bitcraftmap's vault icon
   return bcVaultIcon;
 }
 function bcFmtDur(ms){ const s=Math.max(0,Math.floor(ms/1000)); const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0?`${h}h ${m}m`:`${m}m`; }
@@ -5111,7 +5111,7 @@ function bcUnchartedIcon(kind){
   if (bcUnchartedIcons[kind]) return bcUnchartedIcons[kind];
   const files = { 'volcanic-geyser':'volcanic-geyser.webp', 'hermit-crab':'hermit-crab.webp', 'shipwreck':'shipwreck.webp' };
   const file = files[kind] || files['volcanic-geyser'];   // bitcraftmap's own icons (self-hosted)
-  return (bcUnchartedIcons[kind] = L.icon({ iconUrl:`${API}/mapassets/${file}`, iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14] }));
+  return (bcUnchartedIcons[kind] = L.icon({ iconUrl:`${API}/mapassets/${file}`, iconSize:[38,38], iconAnchor:[19,19], popupAnchor:[0,-19] }));
 }
 async function bcRefreshUncharted(){
   if (!bcGeysersLayer) return { geyser:0, hermit:0, shipwreck:0 };
