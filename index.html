@@ -5354,8 +5354,8 @@ async function bcInitMap(){
     // Waystone claims also get a distinct marker on the independent Waystones layer.
     if (p.has_waystone){
       bcWaystoneCount++;
-      const wm = L.marker(ll, { icon: bcWaystoneIcon(), title: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
-      wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--purple-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+      const wm = L.marker(ll, { icon: claimIcon(p.tier), title: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
+      wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--teal-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
       bcCullClaims.push({ m: wm, ll, group: bcWaystoneLayer });
     }
   });
@@ -5458,7 +5458,7 @@ async function bcInitMap(){
     div.innerHTML =
       flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
       group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad',
-        `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#a78bfa')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
+        `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#9aa3ad')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
       group('cave','Caves',caveFeats.length,caveTierLayers,caveTierCount,'#b07cc6') +
       flat('dungeons',`Dungeons (${dungeons.count})`,dot('#e0556e')) +
       flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
@@ -5525,13 +5525,8 @@ let bcLayerReg = {};
 let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to their group only while in view
 // Waystones: a filter layer (under Claims) showing only claims that have a waystone — find teleport points
 // without enabling every claim tier. Independent toggle (persisted), so you can turn all tiers off and keep it.
-let bcWaystoneLayer = null, bcWaystoneCount = 0, _bcWaystoneIcon = null;
+let bcWaystoneLayer = null, bcWaystoneCount = 0;
 let bcWaystonesOn = (() => { try { return localStorage.getItem('bc_map_waystones') === '1'; } catch(e){ return false; } })();
-function bcWaystoneIcon(){
-  if (_bcWaystoneIcon) return _bcWaystoneIcon;
-  const svg = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23a78bfa' stroke-width='1.6'/><path d='M12 4 L17 12 L12 20 L7 12 Z' fill='%237c3aed' stroke='%23c4b5fd' stroke-width='0.9'/><circle cx='12' cy='12' r='2.2' fill='%23ede9fe'/></svg>";
-  return (_bcWaystoneIcon = L.icon({ iconUrl: svg, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-13] }));
-}
 function bcToggleWaystones(on){
   bcWaystonesOn = !!on; safeSetItem('bc_map_waystones', bcWaystonesOn ? '1' : '0');
   if (!bcWaystoneLayer || !bcMap) return;
