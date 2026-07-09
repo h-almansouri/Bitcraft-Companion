@@ -5074,8 +5074,7 @@ function bcFeatLatLng(f){
 let bcEventsLayer = null, bcVaultIcon = null, bcEventsTimer = null;
 function bcGetVaultIcon(){
   if (bcVaultIcon) return bcVaultIcon;
-  const svg = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2.5' y='3.5' width='19' height='17' rx='3' fill='%23161d29' stroke='%235eead4' stroke-width='1.7'/><path d='M12 6.2l4.8 2.8v5.6L12 17.4 7.2 14.6V9z' fill='%230d9488' stroke='%235eead4' stroke-width='1'/><circle cx='12' cy='12' r='2.1' fill='%23fbbf24'/></svg>";
-  bcVaultIcon = L.icon({ iconUrl: svg, iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14] });
+  bcVaultIcon = L.icon({ iconUrl:`${API}/mapassets/vault-event.webp`, iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14] });  // bitcraftmap's vault icon
   return bcVaultIcon;
 }
 function bcFmtDur(ms){ const s=Math.max(0,Math.floor(ms/1000)); const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0?`${h}h ${m}m`:`${m}m`; }
@@ -5110,13 +5109,9 @@ async function bcRefreshEvents(){
 let bcGeysersLayer = null, bcHermitLayer = null, bcShipwreckLayer = null, bcUnchartedIcons = {};
 function bcUnchartedIcon(kind){
   if (bcUnchartedIcons[kind]) return bcUnchartedIcons[kind];
-  const svgs = {
-    'volcanic-geyser': "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23fb7185' stroke-width='1.5'/><path d='M6.5 18 L12 7 L17.5 18 Z' fill='%23f97316' stroke='%23fecaca' stroke-width='0.8'/><circle cx='12' cy='8.5' r='1.5' fill='%23fde68a'/></svg>",
-    'hermit-crab':     "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23fdba74' stroke-width='1.5'/><circle cx='12' cy='12' r='5.5' fill='none' stroke='%23fb923c' stroke-width='1.5'/><circle cx='12' cy='12' r='2.4' fill='%23fb923c'/></svg>",
-    'shipwreck':       "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%2394a3b8' stroke-width='1.5'/><path d='M6 13 L18 13 L15.5 18 L8.5 18 Z' fill='%2394a3b8' stroke='%23e2e8f0' stroke-width='0.7'/><path d='M12 5 L12 13' stroke='%23e2e8f0' stroke-width='1.2'/><path d='M12 6 L16 11 L12 11 Z' fill='%23cbd5e1'/></svg>",
-  };
-  const svg = svgs[kind] || svgs['volcanic-geyser'];
-  return (bcUnchartedIcons[kind] = L.icon({ iconUrl: svg, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-13] }));
+  const files = { 'volcanic-geyser':'volcanic-geyser.webp', 'hermit-crab':'hermit-crab.webp', 'shipwreck':'shipwreck.webp' };
+  const file = files[kind] || files['volcanic-geyser'];   // bitcraftmap's own icons (self-hosted)
+  return (bcUnchartedIcons[kind] = L.icon({ iconUrl:`${API}/mapassets/${file}`, iconSize:[28,28], iconAnchor:[14,14], popupAnchor:[0,-14] }));
 }
 async function bcRefreshUncharted(){
   if (!bcGeysersLayer) return { geyser:0, hermit:0, shipwreck:0 };
@@ -5437,6 +5432,20 @@ async function bcInitMap(){
         </div>
       </div>`;
     };
+    // A collapsible group of individually-named layers (vs the tier groups above).
+    const namedGroup = (gid, label, color, children) => {
+      const total = children.reduce((s,c)=>s+c.count,0);
+      return `<div class="bc-lgroup">
+        <div class="bc-lghdr">
+          <input type="checkbox" id="bc-lgm-${gid}" checked onchange="bcToggleNamedGroup('${gid}',this.checked)">
+          ${dot(color)}<span class="bc-lgname" onclick="bcExpandLayerGroup('${gid}')">${label} (${total})</span>
+          <i class="ti ti-chevron-down bc-lgchev" id="bc-lgchev-${gid}" onclick="bcExpandLayerGroup('${gid}')"></i>
+        </div>
+        <div class="bc-lgbody" id="bc-lg-${gid}" style="display:none">
+          ${children.map(c=>`<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="${c.k}" checked onchange="bcToggleLayer('${c.k}',this.checked);bcSyncNamedMaster('${gid}')">${dot(c.color)}<span>${c.label}</span> <span class="bc-lcount">(${c.count})</span></label>`).join('')}
+        </div>
+      </div>`;
+    };
     div.innerHTML =
       flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
       group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad') +
@@ -5445,10 +5454,12 @@ async function bcInitMap(){
       flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
       flat('ruined',`Ruined Cities (${ruined.count})`,dot('#c8c8c8')) +
       flat('wonders',`Wonders (${wonders.count})`,dot('#63c45a')) +
-      flat('events',`Hexite Vaults (${eventsCount})`,dot('#5eead4')) +
-      flat('geysers',`Volcanic Geysers (${uncharted.geyser})`,dot('#fb7185')) +
-      flat('hermitdens',`Hermit Crab Dens (${uncharted.hermit})`,dot('#fb923c')) +
-      flat('shipwrecks',`Shipwrecks (${uncharted.shipwreck})`,dot('#94a3b8'));
+      namedGroup('uncharted','Uncharted','#7dd3fc',[
+        {k:'events',     label:'Hexite Vaults',    count:eventsCount,       color:'#5eead4'},
+        {k:'geysers',    label:'Volcanic Geysers', count:uncharted.geyser,  color:'#fb7185'},
+        {k:'hermitdens', label:'Hermit Crab Dens', count:uncharted.hermit,  color:'#fb923c'},
+        {k:'shipwrecks', label:'Shipwrecks',       count:uncharted.shipwreck,color:'#94a3b8'},
+      ]);
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
     return div;
@@ -5530,6 +5541,7 @@ function bcApplyLayerState(){
     const cb = document.querySelector(`input[data-lk="${k}"]`); if (cb) cb.checked = on;
   });
   ['claim','cave'].forEach(p => bcSyncMaster(p));
+  Object.keys(bcNamedGroups).forEach(g => bcSyncNamedMaster(g));
   bcCullMarkers();
 }
 // Viewport + zoom culling for the two dense marker sets (claims ~1.9k, caves ~3k). Only markers inside the
@@ -5561,6 +5573,10 @@ function bcSyncMaster(prefix){
   const any = Object.keys(bcLayerReg).filter(k => k.startsWith(prefix+'T')).some(k => { const cb = document.querySelector(`input[data-lk="${k}"]`); return cb && cb.checked; });
   const m = document.getElementById('bc-lgm-'+prefix); if (m) m.checked = any;
 }
+// Collapsible groups of individually-named layers (e.g. Uncharted = vaults + geysers + dens + shipwrecks).
+const bcNamedGroups = { uncharted: ['events','geysers','hermitdens','shipwrecks'] };
+function bcToggleNamedGroup(gid, on){ (bcNamedGroups[gid]||[]).forEach(k => { bcToggleLayer(k, on); const cb = document.querySelector(`input[data-lk="${k}"]`); if (cb) cb.checked = on; }); }
+function bcSyncNamedMaster(gid){ const any = (bcNamedGroups[gid]||[]).some(k => { const cb = document.querySelector(`input[data-lk="${k}"]`); return cb && cb.checked; }); const m = document.getElementById('bc-lgm-'+gid); if (m) m.checked = any; }
 
 // ===== Phase 2: live player tracking (wss://live.bitjita.com) =====
 // Initial position comes from /api/players/{id} (locationX/locationZ, already in map space);
