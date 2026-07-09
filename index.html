@@ -5368,7 +5368,10 @@ async function bcInitMap(){
   const oreIconCache = {};
   const oreIcon = (tier) => {
     const t = Math.min(Math.max(tier||1, 1), 10);
-    if (!oreIconCache[t]) oreIconCache[t] = L.icon({ iconUrl:`${API}/mapassets/ore_t${t}.webp`, iconSize:[20,20], iconAnchor:[10,10], popupAnchor:[0,-10] });
+    if (!oreIconCache[t]) {
+      const sz = Math.round(24 + t * 1.7);   // grow with tier (T1≈26 … T10≈41) so rarer high-tier caves stand out
+      oreIconCache[t] = L.icon({ iconUrl:`${API}/mapassets/ore_t${t}.webp`, iconSize:[sz,sz], iconAnchor:[sz/2,sz/2], popupAnchor:[0,-sz/2] });
+    }
     return oreIconCache[t];
   };
   caveFeats.forEach(f => {
