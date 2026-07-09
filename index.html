@@ -5337,6 +5337,7 @@ async function bcInitMap(){
     return claimIconCache[t];
   };
   const claimTierLayers = {}, claimTierCount = {}, allClaimMarkers = [];
+  bcWaystoneLayer = L.layerGroup(); bcWaystoneCount = 0;
   const claimsFeats = await bcLoadGeo('claims.geojson');
   claimsFeats.forEach(f => {
     const ll = bcFeatLatLng(f); if (!ll) return;
@@ -5350,6 +5351,13 @@ async function bcInitMap(){
     m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
     allClaimMarkers.push(m);
     bcCullClaims.push({ m, ll, group: claimTierLayers[tier] });   // added to its group on demand by bcCullMarkers
+    // Waystone claims also get a distinct marker on the independent Waystones layer.
+    if (p.has_waystone){
+      bcWaystoneCount++;
+      const wm = L.marker(ll, { icon: bcWaystoneIcon(), title: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
+      wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--purple-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+      bcCullClaims.push({ m: wm, ll, group: bcWaystoneLayer });
+    }
   });
   // Layers are placed on the map by bcApplyLayerState() (respecting saved toggles), not here.
   const claimSearchLayer = L.featureGroup(allClaimMarkers); // search data source
@@ -5419,7 +5427,7 @@ async function bcInitMap(){
     const div = L.DomUtil.create('div','bc-layerctrl');
     const dot = c => `<span class="bc-lsw" style="background:${c}"></span>`;
     const flat = (k,label,sw) => `<label class="bc-lrow"><input type="checkbox" data-lk="${k}" checked onchange="bcToggleLayer('${k}',this.checked)">${sw}<span>${label}</span></label>`;
-    const group = (prefix,label,total,tierMap,counts,color) => {
+    const group = (prefix,label,total,tierMap,counts,color,extraRows='') => {
       const tiers = Object.keys(tierMap).map(Number).sort((a,b)=>a-b);
       return `<div class="bc-lgroup">
         <div class="bc-lghdr">
@@ -5429,6 +5437,7 @@ async function bcInitMap(){
         </div>
         <div class="bc-lgbody" id="bc-lg-${prefix}" style="display:none">
           ${tiers.map(t=>`<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="${prefix}T${t}" checked onchange="bcToggleLayer('${prefix}T${t}',this.checked);bcSyncMaster('${prefix}')">T${t} <span class="bc-lcount">(${counts[t]})</span></label>`).join('')}
+          ${extraRows}
         </div>
       </div>`;
     };
@@ -5448,7 +5457,8 @@ async function bcInitMap(){
     };
     div.innerHTML =
       flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
-      group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad') +
+      group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad',
+        `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#a78bfa')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
       group('cave','Caves',caveFeats.length,caveTierLayers,caveTierCount,'#b07cc6') +
       flat('dungeons',`Dungeons (${dungeons.count})`,dot('#e0556e')) +
       flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
@@ -5479,7 +5489,8 @@ async function bcInitMap(){
   // leaflet-search adds its source layer (all claim markers) to the map — remove it so the
   // per-tier toggles fully control claim visibility. Then apply saved toggle state (adds ON layers).
   if (bcMap.hasLayer(claimSearchLayer)) bcMap.removeLayer(claimSearchLayer);
-  bcApplyLayerState();
+  if (bcWaystonesOn && bcWaystoneLayer && !bcMap.hasLayer(bcWaystoneLayer)) bcWaystoneLayer.addTo(bcMap);
+  bcApplyLayerState();   // its bcCullMarkers() populates in-view markers, incl. waystones if the layer is on
 
   // ----- Resource canvas overlay + sidebar wiring -----
   bcResourceLayer = new (bcPointLayerClass())({ radius:3 }).addTo(bcMap);
@@ -5512,6 +5523,22 @@ async function bcInitMap(){
 // ===== Map layer control (expandable Claims/Caves by tier) =====
 let bcLayerReg = {};
 let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to their group only while in view
+// Waystones: a filter layer (under Claims) showing only claims that have a waystone — find teleport points
+// without enabling every claim tier. Independent toggle (persisted), so you can turn all tiers off and keep it.
+let bcWaystoneLayer = null, bcWaystoneCount = 0, _bcWaystoneIcon = null;
+let bcWaystonesOn = (() => { try { return localStorage.getItem('bc_map_waystones') === '1'; } catch(e){ return false; } })();
+function bcWaystoneIcon(){
+  if (_bcWaystoneIcon) return _bcWaystoneIcon;
+  const svg = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23161d29' stroke='%23a78bfa' stroke-width='1.6'/><path d='M12 4 L17 12 L12 20 L7 12 Z' fill='%237c3aed' stroke='%23c4b5fd' stroke-width='0.9'/><circle cx='12' cy='12' r='2.2' fill='%23ede9fe'/></svg>";
+  return (_bcWaystoneIcon = L.icon({ iconUrl: svg, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-13] }));
+}
+function bcToggleWaystones(on){
+  bcWaystonesOn = !!on; safeSetItem('bc_map_waystones', bcWaystonesOn ? '1' : '0');
+  if (!bcWaystoneLayer || !bcMap) return;
+  if (bcWaystonesOn){ if (!bcMap.hasLayer(bcWaystoneLayer)) bcWaystoneLayer.addTo(bcMap); }
+  else bcMap.removeLayer(bcWaystoneLayer);
+  bcCullMarkers();
+}
 let bcLayersOff = new Set();   // layer keys currently toggled OFF (default = all on); persisted
 function bcLoadLayers(){ try { const v = localStorage.getItem('bc_map_layers_v1'); if (v) bcLayersOff = new Set(JSON.parse(v)); } catch(e){} }
 function bcSaveLayers(){ safeSetItem('bc_map_layers_v1', JSON.stringify([...bcLayersOff])); }
