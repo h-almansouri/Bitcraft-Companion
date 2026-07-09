@@ -801,7 +801,7 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
     <div class="nav-item" data-tab="crafting" onclick="switchTab('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
     <div class="nav-item" data-tab="tasks" onclick="switchTab('tasks')"><i class="ti ti-checklist"></i> Tasks</div>
     <div class="nav-item" data-tab="orders" onclick="switchTab('orders')"><i class="ti ti-receipt-2"></i> Orders</div>
-    <div class="nav-item" data-tab="jsn" onclick="switchTab('jsn')"><i class="ti ti-wallet"></i> Jsn</div>
+    <div class="nav-item" data-tab="jsn" onclick="switchTab('jsn')"><i class="ti ti-wallet"></i> Networth</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
     <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts <span class="nav-wip">WIP</span></div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
@@ -1082,10 +1082,18 @@ function _loadTasksTrackedNames() {
   try { const v = localStorage.getItem('bc_tasks_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
 }
 
-async function apiFetch(path) {
-  const r = await fetch(API + path);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+async function apiFetch(path, timeoutMs = 30000) {
+  // Time-boxed so a stalled request can't hang a caller forever (e.g. the Networth/Planner inventory
+  // load Promise.all sitting on "Loading inventory…"). On timeout the fetch aborts and this throws.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(API + path, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -1316,7 +1324,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Jsn — Inventory Value',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
 function switchTab(tab) {
   stopLiveRefresh();
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
@@ -2565,7 +2573,9 @@ async function renderJsnTab(silent){
     if (!marketRegions.length){ apiFetch('/api/regions').then(d => { const rs = Array.isArray(d)?d:(d.regions||[]); if (rs.length){ marketRegions = rs; jsnRenderResults(); } }).catch(()=>{}); }
   }
   if (silent) invData = null;                          // live refresh → pull fresh quantities
-  if (!invData) await loadPlannerInventory();          // shared merged inventory (Planner/Tools/Jsn)
+  try { if (!invData) await loadPlannerInventory(); }  // shared merged inventory (Planner/Tools/Jsn)
+  catch(e){ invData = null; const rz = document.getElementById('jsn-results'); if (rz) rz.innerHTML = `<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle" style="color:var(--amber-light)"></i><span>Couldn't load inventory. <a onclick="jsnRefresh()" style="color:var(--teal-light);cursor:pointer;text-decoration:underline">Retry</a></span></div>`; return; }
+  if (!invData || !(invData.inventories||[]).length){ const rz = document.getElementById('jsn-results'); if (rz) rz.innerHTML = `<div class="empty" style="padding:2rem"><i class="ti ti-mood-empty"></i><span>No inventory found for the tracked player(s). <a onclick="jsnRefresh()" style="color:var(--teal-light);cursor:pointer;text-decoration:underline">Refresh</a></span></div>`; return; }
   // (re)resolve the selection against the current invData; default to ALL locations for a fresh user.
   const savedNames = _loadJsnTrackedNames();
   if (savedNames === null){ if (jsnTrackedInvs === null) jsnTrackedInvs = new Set((invData.inventories||[]).map((_,i)=>i)); }
