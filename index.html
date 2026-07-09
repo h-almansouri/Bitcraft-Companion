@@ -5512,7 +5512,6 @@ async function bcInitMap(){
 // ===== Map layer control (expandable Claims/Caves by tier) =====
 let bcLayerReg = {};
 let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to their group only while in view
-const BC_CLAIM_GATE = -3.5, BC_CAVE_GATE = -2;  // hide these dense layers below this zoom (unreadable + slow)
 let bcLayersOff = new Set();   // layer keys currently toggled OFF (default = all on); persisted
 function bcLoadLayers(){ try { const v = localStorage.getItem('bc_map_layers_v1'); if (v) bcLayersOff = new Set(JSON.parse(v)); } catch(e){} }
 function bcSaveLayers(){ safeSetItem('bc_map_layers_v1', JSON.stringify([...bcLayersOff])); }
@@ -5544,25 +5543,24 @@ function bcApplyLayerState(){
   Object.keys(bcNamedGroups).forEach(g => bcSyncNamedMaster(g));
   bcCullMarkers();
 }
-// Viewport + zoom culling for the two dense marker sets (claims ~1.9k, caves ~3k). Only markers inside the
-// padded view and at/above their zoom gate are kept in the DOM, so pan/zoom repositions a few dozen markers
-// instead of ~5000. Runs on every moveend and after any layer toggle.
+// Viewport culling for the two dense marker sets (claims ~1.9k, caves ~3k): only markers inside the padded
+// view are kept in the DOM, so pan/zoom repositions a few dozen markers instead of ~5000. No zoom gate —
+// claims/caves stay visible at every zoom level (they just populate the whole view when zoomed out).
+// Runs on every moveend and after any layer toggle.
 function bcCullMarkers(){
   if (!bcMap) return;
-  const z = bcMap.getZoom();
   const b = bcMap.getBounds().pad(0.25);
-  const sync = (list, gate) => {
-    const gateOk = z >= gate;
+  const sync = (list) => {
     for (let i = 0; i < list.length; i++){
       const o = list[i], grp = o.group;
-      const show = gateOk && bcMap.hasLayer(grp) && b.contains(o.ll);
+      const show = bcMap.hasLayer(grp) && b.contains(o.ll);
       const has = grp.hasLayer(o.m);
       if (show && !has) grp.addLayer(o.m);
       else if (!show && has) grp.removeLayer(o.m);
     }
   };
-  sync(bcCullClaims, BC_CLAIM_GATE);
-  sync(bcCullCaves, BC_CAVE_GATE);
+  sync(bcCullClaims);
+  sync(bcCullCaves);
 }
 function bcExpandLayerGroup(gid){
   const b = document.getElementById('bc-lg-'+gid), c = document.getElementById('bc-lgchev-'+gid);
