@@ -190,8 +190,15 @@ main.planner-mode{max-width:none;padding:1rem}
 .task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
 /* tool crafting grid */
 .tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
-.tool-grid-row{display:grid;grid-template-columns:56px repeat(6,1fr);gap:6px;align-items:stretch}
-.tool-grid.ss .tool-grid-row{grid-template-columns:56px repeat(7,1fr)}
+.tool-grid-row{display:grid;grid-template-columns:56px repeat(var(--cols,6),1fr);gap:6px;align-items:stretch}
+.ss-hcell{position:relative}
+.ss-col-x{position:absolute;top:1px;right:1px;font-size:11px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity .1s}
+.ss-hcell:hover .ss-col-x{opacity:.65}
+.ss-col-x:hover{opacity:1!important;color:var(--red-light)}
+.ss-hidden-row{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin-top:.5rem;font-size:11px;color:var(--text3)}
+.ss-hchip{display:inline-flex;align-items:center;gap:.2rem;background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:2px 8px;color:var(--text2);cursor:pointer}
+.ss-hchip:hover{border-color:var(--teal);color:var(--text)}
+.ss-hall{color:var(--teal-light);cursor:pointer;margin-left:.2rem}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
 .tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
@@ -205,7 +212,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
 .tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
-@media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(6,1fr);gap:3px}.tool-grid.ss .tool-grid-row{grid-template-columns:36px repeat(7,1fr)}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
+@media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(var(--cols,6),1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
 /* reroll / upgrade calculator */
 .tool-calc{margin-top:1.5rem;border:1px solid var(--border2);border-radius:10px;background:var(--bg2);padding:1rem}
 .tool-calc-hdr{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem}
@@ -7284,56 +7291,21 @@ const TOOL_COLS = [
 // Second table: salvage scrap (tool-tier adjectives), Reforging Solvent + farming crop seeds (consumable
 // adjectives), by tier.
 const SCRAP_COLS = [
-  { label:'Tool',   name:t=>`${TOOL_ADJ[t-1]} Tool Scrap` },
-  { label:'Armor',  name:t=>`${TOOL_ADJ[t-1]} Armor Scrap` },
-  { label:'Weapon', name:t=>`${TOOL_ADJ[t-1]} Weapon Scrap` },
+  { key:'tool',   group:'scrap', label:'Tool',   title:'Tool Scrap',   name:t=>`${TOOL_ADJ[t-1]} Tool Scrap` },
+  { key:'armor',  group:'scrap', label:'Armor',  title:'Armor Scrap',  name:t=>`${TOOL_ADJ[t-1]} Armor Scrap` },
+  { key:'weapon', group:'scrap', label:'Weapon', title:'Weapon Scrap', name:t=>`${TOOL_ADJ[t-1]} Weapon Scrap` },
 ];
-const SOLVENT_COL = { label:'Solvent', full:'Reforging Solvent', name:t=>`${CONSUMABLE_ADJ[t-1]} Reforging Solvent` };
+const SOLVENT_COL = { key:'solvent', group:'solvent', label:'Solvent', title:'Reforging Solvent', name:t=>`${CONSUMABLE_ADJ[t-1]} Reforging Solvent` };
 const SEED_COLS = [
-  { label:'Ember',  full:'Embergrain', name:t=>`${CONSUMABLE_ADJ[t-1]} Embergrain Seeds` },
-  { label:'Star',   full:'Starbulb',   name:t=>`${CONSUMABLE_ADJ[t-1]} Starbulb Seeds` },
-  { label:'Wisp',   full:'Wispweave',  name:t=>`${CONSUMABLE_ADJ[t-1]} Wispweave Seeds` },
+  { key:'ember', group:'seed', label:'Ember', title:'Embergrain Seeds', name:t=>`${CONSUMABLE_ADJ[t-1]} Embergrain Seeds` },
+  { key:'star',  group:'seed', label:'Star',  title:'Starbulb Seeds',   name:t=>`${CONSUMABLE_ADJ[t-1]} Starbulb Seeds` },
+  { key:'wisp',  group:'seed', label:'Wisp',  title:'Wispweave Seeds',  name:t=>`${CONSUMABLE_ADJ[t-1]} Wispweave Seeds` },
 ];
-// Market pricing for tool materials: 7-day average traded price (a truer going rate than the single
-// lowest sell order). Cached in memory. 0 = no market data, undefined = unfetched.
-let toolPrice = {};        // lowercase item name -> avg7d hex (0 = no data, undefined = unfetched)
-let toolMarketIdx = null;  // lowercase name -> { id, itemType, hasSell }
-let toolPricingActive = false;
-async function ensureToolMarketIdx(){
-  if (toolMarketIdx) return;
-  toolMarketIdx = {};
-  try {
-    const d = await apiFetch('/api/market?hasOrders=true&hasSellOrders=true');
-    const items = (d.data && d.data.items) || d.items || [];
-    items.forEach(it => { const nm=(it.name||it.itemName||'').toLowerCase(); if (nm && !toolMarketIdx[nm]) toolMarketIdx[nm]={ id:it.id, itemType:it.itemType||0, hasSell:!!it.hasSellOrders }; });
-  } catch(e){}
-}
-async function fetchToolPrices(){
-  if (toolPricingActive) return;
-  toolPricingActive = true;
-  await ensureToolMarketIdx();
-  const names = new Set();
-  for (let t=1;t<=10;t++){
-    TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));   // only the tool-material prices (for the Upgrade cost column)
-  }
-  const queue = [...names].filter(nm => toolPrice[nm] === undefined);
-  const worker = async () => {
-    while (queue.length){
-      const nm = queue.shift();
-      const idx = toolMarketIdx[nm];
-      if (!idx){ toolPrice[nm] = 0; continue; }
-      try {
-        const d = await apiFetch(`/api/market/${idx.itemType===1?'cargo':'items'}/${idx.id}/price-history?limit=1`);
-        const ps = d && d.priceStats;
-        const v = ps ? (ps.avg7d != null ? ps.avg7d : (ps.avg30d != null ? ps.avg30d : ps.avg24h)) : null;
-        toolPrice[nm] = (v != null && v > 0) ? v : 0;
-      } catch(e){ toolPrice[nm] = 0; }
-    }
-  };
-  await Promise.all([worker(),worker(),worker(),worker()]);
-  toolPricingActive = false;
-  if (currentTab === 'tools') renderToolCrafting();
-}
+let toolSSHidden = (() => { try { const v = JSON.parse(localStorage.getItem('bc_tool_ss_hidden') || '[]'); return new Set(Array.isArray(v) ? v : []); } catch(e){ return new Set(); } })();
+function _saveToolSSHidden(){ safeSetItem('bc_tool_ss_hidden', JSON.stringify([...toolSSHidden])); }
+function toolSSHideCol(k){ toolSSHidden.add(k); _saveToolSSHidden(); renderToolCrafting(); }
+function toolSSRestoreCol(k){ toolSSHidden.delete(k); _saveToolSSHidden(); renderToolCrafting(); }
+function toolSSRestoreAll(){ toolSSHidden.clear(); _saveToolSSHidden(); renderToolCrafting(); }
 
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(names)); }
@@ -7398,7 +7370,6 @@ async function renderToolCrafting(){
     <div class="tool-hcell">Tier</div>
     ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
     <div class="tool-hcell">Tools</div>
-    <div class="tool-hcell">Upgrade cost</div>
   </div>`;
   const rows = [];
   for (let t=1; t<=10; t++){
@@ -7409,30 +7380,18 @@ async function renderToolCrafting(){
       return `<div class="tool-cell ${cls}" title="${escHtml(nm)} — need ${c.per} per tool">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
-    // market cost to upgrade one tier = sum of each material's 7-day avg price × qty needed.
-    // A material with no market data reads as 0, so flag the total as a partial underestimate.
-    const parts = TOOL_COLS.map(c => { const p = toolPrice[c.name(t).toLowerCase()]; return p===undefined ? undefined : p*c.per; });
-    const loading = parts.some(x => x===undefined);
-    const cost = loading ? null : parts.reduce((a,b)=>a+b,0);
-    const partial = !loading && TOOL_COLS.some(c => toolPrice[c.name(t).toLowerCase()] === 0);   // a mat isn't listed
-    const costInner = loading ? '<span class="dot-spin"></span>'
-      : (cost>0 ? `<span class="tool-have">${fmtCoin(Math.round(cost))}${partial?'<span style="color:var(--amber-light)" title="Some mats have no sell orders — underestimate">+</span>':''}</span>`
-                : '<span class="tool-have" style="color:var(--text3)">—</span>');
     rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
       <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
-      <div class="tool-cell tool-cost" title="7-day average market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
     </div>`);
   }
-  // Second grid (below the first): scrap + solvent + seed counts by tier, pooled from the selected inventories.
-  const ssCols = [...SCRAP_COLS, SOLVENT_COL, ...SEED_COLS];
-  const seedStart = SCRAP_COLS.length + 1;   // index of the first seed column (after scrap + solvent)
+  // Second grid (below the first): scrap + seed counts by tier, Solvent last. Columns are hideable/restorable.
+  const ssAll = [...SCRAP_COLS, ...SEED_COLS, SOLVENT_COL];
+  const ssCols = ssAll.filter(c => !toolSSHidden.has(c.key));
   const ssHeader = `<div class="tool-grid-row tool-grid-head">
     <div class="tool-hcell">Tier</div>
-    ${SCRAP_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.label)} Scrap">${c.label}</div>`).join('')}
-    <div class="tool-hcell" title="Reforging Solvent">${SOLVENT_COL.label}</div>
-    ${SEED_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.full)} Seeds">${c.label}</div>`).join('')}
+    ${ssCols.map(c=>`<div class="tool-hcell ss-hcell" title="${escHtml(c.title)} — click × to hide"><span>${c.label}</span><i class="ti ti-x ss-col-x" title="Hide ${escHtml(c.label)}" onclick="toolSSHideCol('${c.key}')"></i></div>`).join('')}
   </div>`;
   const ssRows = [];
   for (let t=1; t<=10; t++){
@@ -7440,7 +7399,7 @@ async function renderToolCrafting(){
     const cells = ssCols.map((c, i) => {
       const nm = c.name(t), h = have(nm);
       const cls = h===0 ? 'tool-zero' : 'tool-ok';
-      const sep = (i===SCRAP_COLS.length || i===seedStart) ? 'border-left-width:3px;border-left-color:var(--border2)' : '';   // dividers around Solvent
+      const sep = (i>0 && c.group !== ssCols[i-1].group) ? 'border-left-width:3px;border-left-color:var(--border2)' : '';   // divider at group boundaries
       return `<div class="tool-cell ${cls}" style="${sep}" title="${escHtml(nm)}">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     ssRows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
@@ -7448,17 +7407,18 @@ async function renderToolCrafting(){
       ${cells}
     </div>`);
   }
+  const hiddenRow = toolSSHidden.size
+    ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden: ${ssAll.filter(c=>toolSSHidden.has(c.key)).map(c=>`<span class="ss-hchip" onclick="toolSSRestoreCol('${c.key}')">${escHtml(c.label)} <i class="ti ti-plus" style="font-size:11px"></i></span>`).join('')} <span class="ss-hall" onclick="toolSSRestoreAll()">restore all</span></div>`
+    : '';
   const subtitle = (txt, mt) => `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin:${mt||'0'} 0 .45rem">${txt}</div>`;
   el.innerHTML = toolInvSelectorHtml()
     + subtitle('<i class="ti ti-tools" style="color:var(--text3)"></i> Tool materials', '1rem')
-    + `<div class="tool-grid" style="margin-top:0">${header}${rows.join('')}</div>`
-    + subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap · Solvent · Seed', '1.4rem')
-    + `<div class="tool-grid ss" style="margin-top:0">${ssHeader}${ssRows.join('')}</div>`
-    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate. <b>Scrap · Solvent · Seed</b> shows how many of each you're holding at that tier.</div>`;
+    + `<div class="tool-grid" style="margin-top:0;--cols:${TOOL_COLS.length + 1}">${header}${rows.join('')}</div>`
+    + subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap · Seed · Solvent', '1.4rem')
+    + `<div class="tool-grid ss" style="margin-top:0;--cols:${ssCols.length}">${ssHeader}${ssRows.join('')}</div>`
+    + hiddenRow
+    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Scrap · Seed · Solvent</b> shows how many of each you're holding at that tier — hover a column header and click the <b>×</b> to hide it.</div>`;
   updateLiveBtns();
-  // Kick off market pricing for any materials not yet priced.
-  const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
-  if (anyUnpriced && !toolPricingActive) fetchToolPrices();
 }
 
 function invAwareChip(qty, itemId, extraCls, plain) {
