@@ -2766,7 +2766,7 @@ function fillPlayerCraftCached(entityId) {
 // ── Live active-craft progress (progressive_action_state via the SSE /live proxy) ──
 // While viewing the Crafts tab (Active), subscribe to each in-progress craft's entityId and patch its
 // progress bar + counts as the game streams updates (~1/sec while someone works the station).
-let bcCraftES = null, bcCraftIdsKey = '';
+let bcCraftES = null, bcCraftIdsKey = '', bcCraftRate = {};   // cid -> {t0,p0,tLast,pLast} for the live ETA
 function bcActiveCraftIds(){
   const ids = [];
   Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => { const id = c.entityId || c.entity_id; if (id) ids.push(String(id)); }));
@@ -2786,7 +2786,7 @@ function startCraftLive(){
     bcCraftES.onerror = () => {};   // EventSource auto-reconnects
   } catch(e){}
 }
-function stopCraftLive(){ if (bcCraftES){ try { bcCraftES.close(); } catch(_){} bcCraftES = null; } bcCraftIdsKey = ''; }
+function stopCraftLive(){ if (bcCraftES){ try { bcCraftES.close(); } catch(_){} bcCraftES = null; } bcCraftIdsKey = ''; bcCraftRate = {}; }
 function onLiveCraftProgress(d){
   const cid = String(d.entity_id || d.entityId || ''); if (!cid) return;
   const prog = +d.progress; if (!isFinite(prog)) return;
@@ -2799,8 +2799,19 @@ function onLiveCraftProgress(d){
   const card = document.querySelector(`.craft-card[data-cid="${cid}"]`); if (!card) return;
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(prog / total * 100))) : null;
   const fill = card.querySelector('.craft-progress'); if (fill && pct != null) fill.style.width = pct + '%';
+  // Rough ETA from the observed work rate (actions/sec) over the live streaming window.
+  const now = Date.now();
+  const r = bcCraftRate[cid] || (bcCraftRate[cid] = {});
+  if (!r.t0 || prog < (r.pLast || 0) || (now - (r.tLast || 0)) > 20000){ r.t0 = now; r.p0 = prog; }   // (re)anchor on start / reset / long pause
+  r.tLast = now; r.pLast = prog;
+  const dtS = (now - r.t0) / 1000, dp = prog - r.p0;
+  let etaTxt = '';
+  if (total > 0 && prog < total && dtS >= 4 && dp > 0){
+    const secs = Math.round((total - prog) / (dp / dtS));
+    if (isFinite(secs) && secs > 0) etaTxt = `~${fmtTimeLeft(secs)} left`;
+  }
   const txt = card.querySelector('.craft-prog-text');
-  if (txt && total > 0) txt.innerHTML = `<span style="color:var(--text2);font-weight:500">${fmtNum(prog)}</span><span> / ${fmtNum(total)} actions</span><span style="margin-left:.3rem;color:var(--amber-light);font-weight:600">${pct}%</span>`;
+  if (txt && total > 0) txt.innerHTML = `<span style="color:var(--text2);font-weight:500">${fmtNum(prog)}</span><span> / ${fmtNum(total)} actions</span><span style="margin-left:.3rem;color:var(--amber-light);font-weight:600">${pct}%</span>${etaTxt ? `<span style="margin-left:.45rem;color:var(--teal-light);font-weight:500">${etaTxt}</span>` : ''}`;
 }
 function setCraftTab(t) {
   craftTabActive = t;
@@ -7296,6 +7307,7 @@ const SCRAP_COLS = [
   { key:'weapon', group:'scrap', label:'Weapon', title:'Weapon Scrap', name:t=>`${TOOL_ADJ[t-1]} Weapon Scrap` },
 ];
 const SOLVENT_COL = { key:'solvent', group:'solvent', label:'Solvent', title:'Reforging Solvent', name:t=>`${CONSUMABLE_ADJ[t-1]} Reforging Solvent` };
+const FISHOIL_COL = { key:'oil', group:'oil', label:'Oil', title:'Fish Oil', name:t=>`${CONSUMABLE_ADJ[t-1]} Fish Oil` };
 const SEED_COLS = [
   { key:'ember', group:'seed', label:'Ember', title:'Embergrain Seeds', name:t=>`${CONSUMABLE_ADJ[t-1]} Embergrain Seeds` },
   { key:'star',  group:'seed', label:'Star',  title:'Starbulb Seeds',   name:t=>`${CONSUMABLE_ADJ[t-1]} Starbulb Seeds` },
@@ -7387,7 +7399,7 @@ async function renderToolCrafting(){
     </div>`);
   }
   // Second grid (below the first): scrap + seed counts by tier, Solvent last. Columns are hideable/restorable.
-  const ssAll = [...SCRAP_COLS, ...SEED_COLS, SOLVENT_COL];
+  const ssAll = [...SCRAP_COLS, ...SEED_COLS, FISHOIL_COL, SOLVENT_COL];
   const ssCols = ssAll.filter(c => !toolSSHidden.has(c.key));
   const ssHeader = `<div class="tool-grid-row tool-grid-head">
     <div class="tool-hcell">Tier</div>
