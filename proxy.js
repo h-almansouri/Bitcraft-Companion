@@ -245,13 +245,16 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Live feed (SSE): stream realtime updates for the given players from bitjita's websocket.
+  // Live feed (SSE): stream realtime updates for the given players (and/or active crafts) from bitjita's ws.
   if (req.url.split('?')[0] === '/live') {
-    const ids = (new URL(req.url, 'http://x').searchParams.get('players') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+    const sp = new URL(req.url, 'http://x').searchParams;
+    const ids = (sp.get('players') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+    const craftIds = (sp.get('crafts') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 80);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(': connected\n\n');
-    const chans = liveChannelsFor(ids);
-    res._ids = new Set(ids); res._chans = chans;
+    // player state channels + live progress for active crafts (progressive_action_state, keyed by craft entityId)
+    const chans = [...liveChannelsFor(ids), ...craftIds.map(id => 'progressive_action_state:' + id)];
+    res._ids = new Set([...ids, ...craftIds]); res._chans = chans;
     liveClients.add(res);
     liveEnsure(); liveAddRefs(chans);
     const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
