@@ -2807,7 +2807,6 @@ async function renderCraftingTab(silent) {
   if (!silent || !document.getElementById('craft-toolbar')) {
     el.innerHTML = `
       <div id="craft-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
-        <button id="live-btn-crafting" class="btn live-btn" onclick="toggleTabLive('crafting')"><i class="ti ti-player-play"></i> Live</button>
         <button class="btn ctrl-btn" onclick="renderCraftingTab()"><i class="ti ti-refresh"></i> Refresh</button>
         <span style="flex:1"></span>
         <div class="craft-tabs" style="margin:0">
@@ -2824,9 +2823,12 @@ async function renderCraftingTab(silent) {
     catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
     fillPlayerCraftCached(p.entityId);
   }));
+  // Live by default: active-craft progress streams over the websocket (startCraftLive) and the full list
+  // auto-refreshes on the tab poll (startLiveRefresh — tab-scoped, stopped by stopLiveRefresh on leaving).
+  // The Refresh button forces an immediate reload. startLiveRefresh() clears the passive countdown timer,
+  // so run it FIRST (and only on the initial render, so silent polls don't reset the interval/timer).
+  if (!silent && currentTab === 'crafting') startLiveRefresh('crafting');   // guard: async render may finish after a tab switch
   if (craftTabActive === 'passive') startPassiveCraftTimer(); else { stopPassiveCraftTimer(); startCraftLive(); }
-  // Crafts auto-refresh is gated by the Live button (toggleTabLive) only — no always-on refresh here,
-  // so "Live off" means manual (Refresh button) and "Live on" polls at REFRESH_MS.crafting.
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
