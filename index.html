@@ -191,6 +191,7 @@ main.planner-mode{max-width:none;padding:1rem}
 /* tool crafting grid */
 .tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
 .tool-grid-row{display:grid;grid-template-columns:56px repeat(6,1fr);gap:6px;align-items:stretch}
+.tool-grid.ss .tool-grid-row{grid-template-columns:56px repeat(7,1fr)}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
 .tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
@@ -204,7 +205,7 @@ main.planner-mode{max-width:none;padding:1rem}
 .tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
 .tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
-@media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(6,1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
+@media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(6,1fr);gap:3px}.tool-grid.ss .tool-grid-row{grid-template-columns:36px repeat(7,1fr)}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
 /* reroll / upgrade calculator */
 .tool-calc{margin-top:1.5rem;border:1px solid var(--border2);border-radius:10px;background:var(--bg2);padding:1rem}
 .tool-calc-hdr{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem}
@@ -7280,12 +7281,14 @@ const TOOL_COLS = [
   { label:'Leather', per:2, name:t=>`${TOOL_ADJ[t-1]} Leather` },
   { label:'Rope',    per:2, name:t=>`${TOOL_ADJ[t-1]} Rope` },
 ];
-// Second table: salvage scrap (tool-tier adjectives) + farming crop seeds (consumable adjectives), by tier.
+// Second table: salvage scrap (tool-tier adjectives), Reforging Solvent + farming crop seeds (consumable
+// adjectives), by tier.
 const SCRAP_COLS = [
   { label:'Tool',   name:t=>`${TOOL_ADJ[t-1]} Tool Scrap` },
   { label:'Armor',  name:t=>`${TOOL_ADJ[t-1]} Armor Scrap` },
   { label:'Weapon', name:t=>`${TOOL_ADJ[t-1]} Weapon Scrap` },
 ];
+const SOLVENT_COL = { label:'Solvent', full:'Reforging Solvent', name:t=>`${CONSUMABLE_ADJ[t-1]} Reforging Solvent` };
 const SEED_COLS = [
   { label:'Ember',  full:'Embergrain', name:t=>`${CONSUMABLE_ADJ[t-1]} Embergrain Seeds` },
   { label:'Star',   full:'Starbulb',   name:t=>`${CONSUMABLE_ADJ[t-1]} Starbulb Seeds` },
@@ -7311,11 +7314,7 @@ async function fetchToolPrices(){
   await ensureToolMarketIdx();
   const names = new Set();
   for (let t=1;t<=10;t++){
-    TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));
-    names.add(toolScrapName(t).toLowerCase());     // Tool Scrap — reroll input
-    names.add(toolSolventName(t).toLowerCase());   // Reforging Solvent — reroll input (usually unlisted)
-    names.add((CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase());                              // solvent craft input
-    SEED_CROPS.forEach(k=>names.add((CONSUMABLE_ADJ[t-1]+' '+k+' Seeds').toLowerCase()));    // solvent craft input (cheapest)
+    TOOL_COLS.forEach(c=>names.add(c.name(t).toLowerCase()));   // only the tool-material prices (for the Upgrade cost column)
   }
   const queue = [...names].filter(nm => toolPrice[nm] === undefined);
   const worker = async () => {
@@ -7336,312 +7335,6 @@ async function fetchToolPrices(){
   if (currentTab === 'tools') renderToolCrafting();
 }
 
-// ── Rarity roll economics ──  Verified against craftingData.json; see docs/rarity-optimizer.md.
-// RARITY_NAMES (declared later) is 1-indexed: 1 Common .. 6 Mythic. cap(t)=min(t,6); rarity R needs tier>=R.
-const RARITY_UP_CHANCE = { 1:0.30, 2:0.15, 3:0.075, 4:0.0375, 5:0.01875 }; // chance to roll rarity r -> r+1
-// Reroll ("Recraft") cost keyed by the rarity you roll TOWARD: N Tool Scrap + K Reforging Solvent, at the tool's tier.
-const REROLL_SCRAP   = { 2:3, 3:5, 4:15, 5:30, 6:50 };
-const REROLL_SOLVENT = { 2:1, 3:1, 4:1, 5:1, 6:2 };
-const SALVAGE_YIELD  = { 1:1, 2:3, 3:15, 4:50, 5:150, 6:500 }; // scrap from salvaging a rarity-r tool
-let toolCalc = null; // { target, tier }
-function loadToolCalc(){ if (toolCalc) return; try { toolCalc = Object.assign({ target:3, tier:6 }, JSON.parse(localStorage.getItem('bc_tool_calc_v3')||'{}')); } catch(e){ toolCalc = { target:3, tier:6 }; } }
-function saveToolCalc(){ try { safeSetItem('bc_tool_calc_v3', JSON.stringify(toolCalc)); } catch(e){} }
-
-// Cost helpers (all hex, from live market). matCost = one tier's upgrade mats; cumCost = full build cost of a tier-t tool.
-function toolMatCost(t){ let s=0; for (const c of TOOL_COLS){ const p = toolPrice[c.name(t).toLowerCase()]; s += (p||0)*c.per; } return s; }
-function toolCumCost(t){ let s=0; for (let i=1;i<=t;i++) s += toolMatCost(i); return s; }
-// Tool Scrap uses the tool tier-adjective; Reforging Solvent uses the consumable tier-adjective (both verified).
-function toolScrapName(t){ return TOOL_ADJ[t-1]+' Tool Scrap'; }
-function toolSolventName(t){ return CONSUMABLE_ADJ[t-1]+' Reforging Solvent'; }
-// Cheapest hex per Tool Scrap at tier t: buy on the market, else craft+salvage a Common tool (yields 1 scrap).
-function toolScrapUnit(t){ const m = toolPrice[toolScrapName(t).toLowerCase()]; const salv = toolCumCost(t); return (m && m>0) ? Math.min(m, salv) : salv; }
-// Reforging Solvent isn't traded — cost it from its recipe: 10 tier-seeds + 2 tier-fish-oil + 75 hex
-// (the 75 covers the vendor-bought Reforging Stabilizer). Seeds may be any of three crops — use the cheapest.
-const SEED_CROPS = ['Embergrain','Starbulb','Wispweave'];
-function toolSeedPrice(t){ const adj=CONSUMABLE_ADJ[t-1]; const c=SEED_CROPS.map(k=>toolPrice[(adj+' '+k+' Seeds').toLowerCase()]).filter(v=>v!==undefined && v>0); return c.length?Math.min(...c):0; }
-function toolFishOilPrice(t){ return toolPrice[(CONSUMABLE_ADJ[t-1]+' Fish Oil').toLowerCase()] || 0; }
-function toolSolventCraftCost(t){ return 10*toolSeedPrice(t) + 2*toolFishOilPrice(t) + 75; }
-// Cheapest hex per Reforging Solvent at tier t: its craft cost (or a market listing if one somehow exists).
-function toolSolventUnit(t){ const m = toolPrice[toolSolventName(t).toLowerCase()]; const craft = toolSolventCraftCost(t); return (m && m>0) ? Math.min(m, craft) : craft; }
-// True when the solvent estimate is missing its seed/fish-oil inputs (unlisted) → only the 75 hex is counted.
-function toolSolventPartial(t){ return !(toolPrice[toolSolventName(t).toLowerCase()]>0) && (toolSeedPrice(t)===0 || toolFishOilPrice(t)===0); }
-// One reroll attempt on a tier-t tool, rolling TOWARD rarity R (2..6).
-function toolRerollCost(t, R){ return (REROLL_SCRAP[R]||0)*toolScrapUnit(t) + (REROLL_SOLVENT[R]||0)*toolSolventUnit(t); }
-function toolPricesReady(){ for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()] === undefined) return false; return true; }
-
-// ── Optimizer A: cheapest expected hex to reach (tier T, rarity R) ──  DP over states (t, r).
-// Actions: reroll (fixed price at this tier, p(r) chance +1 rarity) or upgrade (mats, +1 tier, a free p(r) roll).
-function solveRarity(T, R){
-  if (R > Math.min(T,6)) return { possible:false, reason:'cap' };
-  const EC  = Array.from({length:T+1}, () => new Array(R+1).fill(Infinity));
-  const act = Array.from({length:T+1}, () => new Array(R+1).fill(null));
-  EC[T][R] = 0;
-  for (let t=T; t>=1; t--){
-    for (let r=Math.min(t,R); r>=1; r--){
-      if (t===T && r===R){ EC[t][r]=0; continue; }
-      const p = RARITY_UP_CHANCE[r] || 0;
-      let best = Infinity, ba = null;
-      if (r < R && t >= r+1 && p > 0){                 // reroll toward r+1 (tier must be able to hold r+1)
-        const c = toolRerollCost(t, r+1)/p + EC[t][r+1];
-        if (c < best){ best = c; ba = 'reroll'; }
-      }
-      if (t < T){                                       // upgrade one tier (a free rarity roll rides along)
-        const up = Math.min(r+1, R, t+1);               // rarity capped by the new tier and by the target
-        const c = toolMatCost(t+1) + p*EC[t+1][up] + (1-p)*EC[t+1][r];
-        if (c < best){ best = c; ba = 'upgrade'; }
-      }
-      EC[t][r] = best; act[t][r] = ba;
-    }
-  }
-  const cost = toolMatCost(1) + EC[1][1];
-  return { possible:isFinite(cost), cost, act, T, R };
-}
-// Deterministic "planned" trace: rarity only advances on rerolls (free upgrade-rolls are the upside baked
-// into the expected cost). Batches consecutive upgrades into one "upgrade to Tk" step.
-function reconstructPlan(res){
-  const { act, T, R } = res;
-  const steps = []; let t=1, r=1, lastTier=1, guard=0;
-  const emitUp = () => { if (t > lastTier){ steps.push({ type:'upgrade', to:t }); lastTier=t; } };
-  while (!(t===T && r>=R) && guard++ < 300){
-    const a = act[t][Math.min(r,R)];
-    if (a === 'upgrade'){ t++; }
-    else if (a === 'reroll'){ emitUp(); steps.push({ type:'reroll', tier:t, to:r+1 }); r++; }
-    else break;
-  }
-  emitUp();
-  return steps;
-}
-// Monte-Carlo the optimal policy with real RNG to get the spread (p50/p90 hex).
-function simulateToolPlan(res, trials){
-  const { act, T, R } = res; const costs = new Array(trials);
-  for (let n=0; n<trials; n++){
-    let t=1, r=1, cost=toolMatCost(1), guard=0;
-    while (!(t===T && r>=R) && guard++ < 400){
-      const a = act[t][Math.min(r,R)];
-      if (a === 'upgrade'){ const p=RARITY_UP_CHANCE[r]||0; cost += toolMatCost(t+1); t++; if (Math.random()<p) r=Math.min(r+1, t, R); }
-      else if (a === 'reroll'){ const p=RARITY_UP_CHANCE[r]||0; cost += toolRerollCost(t, r+1); if (Math.random()<p) r=Math.min(r+1, R); }
-      else break;
-    }
-    costs[n]=cost;
-  }
-  costs.sort((a,b)=>a-b);
-  const q = f => costs[Math.min(trials-1, Math.floor(trials*f))];
-  return { p50:q(0.5), p90:q(0.9) };
-}
-// Baseline for comparison: craft straight to tier T, then buy ALL the rarity via rerolls at T (no free rolls).
-function toolBaselineCost(T, R){
-  let c = toolCumCost(T);
-  for (let r=1; r<R; r++){ const p=RARITY_UP_CHANCE[r]||0; if (p<=0) return Infinity; c += toolRerollCost(T, r+1)/p; }
-  return c;
-}
-
-function setToolTarget(v){ loadToolCalc(); toolCalc.target = +v; saveToolCalc(); renderToolCalcResult(); }
-function setToolTier(v){ loadToolCalc(); toolCalc.tier = +v; saveToolCalc(); renderToolCalcResult(); }
-function renderToolCalcResult(){
-  const el = document.getElementById('tool-calc-result');
-  if (!el) return;
-  loadToolCalc();
-  if (!toolPricesReady()){ el.innerHTML = '<span class="dot-spin"></span> loading market prices…'; return; }
-  const R = toolCalc.target, T = toolCalc.tier, rn = RARITY_NAMES[R];
-  const art = /^[aeiou]/i.test(rn) ? 'an' : 'a';
-  const res = solveRarity(T, R);
-  if (!res.possible){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${rn} rarity needs at least tier ${R} — a T${T} tool caps at ${RARITY_NAMES[Math.min(T,6)]}.</div>`; return; }
-  const plan = reconstructPlan(res);
-  const sim = simulateToolPlan(res, 4000);
-  const base = toolBaselineCost(T, R);
-  const saved = (isFinite(base) && base>0) ? Math.round((1 - res.cost/base)*100) : 0;
-  let anyPartialSolvent = false;
-  const stepHtml = plan.map((s, i) => {
-    if (s.type === 'upgrade') return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-arrow-up-circle" style="color:var(--teal-light)"></i> Upgrade to <b>T${s.to}</b> <span class="tc2-sub">(each tier upgrade also rolls rarity for free)</span></div>`;
-    const p = RARITY_UP_CHANCE[s.to-1], each = toolRerollCost(s.tier, s.to), rolls = 1/p;
-    if (toolSolventPartial(s.tier)) anyPartialSolvent = true;
-    return `<div class="tc2-step"><span class="tc2-stepnum">${i+1}</span><i class="ti ti-dice" style="color:var(--purple-light)"></i> Reroll at <b>T${s.tier}</b> → <b>${RARITY_NAMES[s.to]}</b> <span class="tc2-sub">~${Math.round(rolls)} rolls × ${fmtCoin(Math.round(each))} = ${fmtCoin(Math.round(rolls*each))}</span></div>`;
-  }).join('');
-  el.innerHTML = `
-    <div class="tc2-headline">Cheapest path to ${art} <b style="color:var(--teal-light)">${rn}</b> <b>T${T}</b> tool</div>
-    <div class="tc2-cost">${fmtCoin(Math.round(res.cost))} <span class="tc2-sub" style="font-size:12px">expected total</span></div>
-    <div class="tc2-line"><span>Likely spend (p50 – p90)</span><b>${fmtCoin(Math.round(sim.p50))} – ${fmtCoin(Math.round(sim.p90))}</b></div>
-    <div class="tc2-steps">${stepHtml || '<div class="tc2-sub">Already attainable — just craft it.</div>'}</div>
-    ${isFinite(base) ? `<div class="tc2-line"><span>vs. tier-up then reroll all at T${T}</span><b style="color:${saved>0?'var(--green-light)':'var(--text2)'}">${saved>0?saved+'% cheaper':'≈ same'}</b></div>` : ''}
-    <div class="tc2-line"><span>Roll chance ${RARITY_NAMES[R-1]} → ${rn}</span><b>${(RARITY_UP_CHANCE[R-1]*100).toFixed(RARITY_UP_CHANCE[R-1]<0.1?3:1)}%</b></div>
-    ${anyPartialSolvent ? '<div class="tc2-sub" style="margin-top:.5rem;color:var(--amber-light)"><i class="ti ti-info-circle"></i> Some solvent inputs (seeds / fish oil) aren\'t listed at these tiers, so its cost is only a partial estimate.</div>' : ''}`;
-}
-function toolCalcHtml(){
-  loadToolCalc();
-  const rarOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolCalc.target===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
-  const tierOpts = [1,2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolCalc.tier===t?' selected':''}>T${t}</option>`).join('');
-  return `<div class="tool-calc">
-    <div class="tool-calc-hdr"><i class="ti ti-calculator"></i> Rarity reroll planner <span class="tc-wip">work in progress</span></div>
-    <div class="tc2-controls">
-      <div class="tc-field"><label>I want a…</label><select id="tc-target" class="sj-input" onchange="setToolTarget(this.value)">${rarOpts}</select></div>
-      <div class="tc-field"><label>…tool at tier</label><select id="tc-tier" class="sj-input" onchange="setToolTier(this.value)">${tierOpts}</select></div>
-    </div>
-    <div class="tc2-result" id="tool-calc-result"></div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Rarity comes only from RNG rolls: every tier-upgrade rolls for free, and a <b>reroll</b> ("Recraft") spends <b>Tool Scrap</b> + a <b>Reforging Solvent</b> for another roll at fixed odds. The planner finds the cheapest mix using live market prices: scrap falls back to craft-and-salvage a Common tool when unlisted, and the untraded Reforging Solvent is costed from its recipe (10 seeds + 2 fish oil + 75 hex). Expected values use the real per-roll odds.</div>
-  </div>`;
-}
-
-// ── Optimizer B: batch upgrade advisor (resource-constrained, max keepers) ──  docs/rarity-optimizer.md §6.
-// From a blind-upgrade batch, maximize tools reaching ≥ "rarity wanted", capped by the scrap + craftable
-// Reforging Solvents in the tracked inventory — scrapping the laggards for extra reroll fuel.
-const RARITY_COLORS = ['', '#b8c0cc', '#63c45a', '#4aa3ff', '#b07cc6', '#e0a53f', '#e0556e'];
-let toolBatch = null; // { count, maxTier, want }
-function loadToolBatch(){ if (toolBatch) return; try { toolBatch = Object.assign({ count:100, maxTier:6, want:3 }, JSON.parse(localStorage.getItem('bc_tool_batch_v2')||'{}')); } catch(e){ toolBatch = { count:100, maxTier:6, want:3 }; } }
-function saveToolBatch(){ try { safeSetItem('bc_tool_batch_v2', JSON.stringify(toolBatch)); } catch(e){} }
-
-// Read the tracked inventory for per-tier reroll resources: scrap on hand + solvents you can field
-// (existing + craftable = min(Σ⌊seeds/10⌋, ⌊fish oil/2⌋); the ~75-hex stabilizer is treated as buyable).
-function toolBatchInventory(maxT){
-  const pool = (toolTrackedInvs && invData) ? poolInvByIndices(toolTrackedInvs) : {};
-  const get = nm => pool[String(nm).toLowerCase()] || 0;
-  const scrap = {}, solvent = {};
-  for (let t=2; t<=maxT; t++){
-    scrap[t] = get(toolScrapName(t));
-    const adj = CONSUMABLE_ADJ[t-1];
-    const catFromSeeds = SEED_CROPS.reduce((s,k)=> s + Math.floor(get(adj+' '+k+' Seeds')/10), 0);
-    const catFromOil = Math.floor(get(adj+' Fish Oil')/2);
-    solvent[t] = get(toolSolventName(t)) + Math.min(catFromSeeds, catFromOil);
-  }
-  return { scrap, solvent };
-}
-// P(reach ≥R by tier maxT via blind upgrades alone), per (tier, rarity). Backward DP.
-function keeperProb(R, maxT){
-  const Pk = Array.from({length:maxT+1}, () => []);
-  for (let t=maxT; t>=1; t--){
-    const cap = Math.min(t,6);
-    for (let r=1; r<=cap; r++){
-      if (r >= R){ Pk[t][r] = 1; continue; }        // already a keeper (rarity never drops)
-      if (t === maxT){ Pk[t][r] = 0; continue; }
-      const p = RARITY_UP_CHANCE[r] || 0, up = Math.min(r+1, Math.min(t+1,6));
-      Pk[t][r] = p*Pk[t+1][up] + (1-p)*Pk[t+1][r];
-    }
-  }
-  return Pk;
-}
-// Forward-simulate the batch (fractional/expected counts). At each tier: spend solvents on rerolls toward
-// the target (nearest-target first, net-positive only); then UPGRADE only the bands worth keeping and
-// CULL the "leave" bands (cost-per-keeper worse than a fresh tool, or can't reach the target) — so leave
-// bands are not carried forward. Keeps a band's own keeper-chance (Pk) as the cost of scrapping it.
-function simulateBatch(N, R, maxT, inv){
-  let count = { 1: N };
-  const Pk = keeperProb(R, maxT);
-  const ready = toolPricesReady();
-  const cumMax = toolCumCost(maxT);
-  const freshCPK = (ready && Pk[1] && Pk[1][1] > 0.001) ? cumMax / Pk[1][1] : null;
-  const cpkOf = (t, r) => { const pk = (Pk[t] && Pk[t][r]) || 0; return pk > 0.001 ? (cumMax - toolCumCost(t)) / pk : Infinity; };
-  const shouldLeave = (t, r) => {
-    if (t <= 1) return false;                              // never cull the fresh starting batch — always climb once
-    if (r >= R) return false;                              // already a keeper
-    const pk = (Pk[t] && Pk[t][r]) || 0;
-    if (pk < 0.005) return true;                           // can't realistically reach the target in time
-    return ready && freshCPK != null && cpkOf(t,r) > freshCPK;   // worse cost-per-keeper than a fresh tool
-  };
-  const tiers = [], out = { keepers:0, scrapped:0, rerolls:0, solventUsed:0, solventAvail:0, left:0, matsSaved:0 };
-  for (let t=1; t<=maxT; t++){
-    const cap = Math.min(t,6);
-    let solventLeft = inv.solvent[t] || 0, scrapPool = inv.scrap[t] || 0;
-    out.solventAvail += (inv.solvent[t] || 0);
-    // snapshot the arrival distribution + per-band verdict (before this tier's rerolls, for display)
-    const bands = [];
-    for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n < 0.005) continue;
-      bands.push({ r, count:n, keeper: r>=R, leave: shouldLeave(t,r), pk:(Pk[t]&&Pk[t][r])||0, cpk: (r<R && ready) ? cpkOf(t,r) : null });
-    }
-    let scrappedHere = 0, rerollsHere = 0, promotedHere = 0, topBand = 0;
-    for (let r = Math.min(cap, R) - 1; r >= 1 && solventLeft > 0.001; r--){   // reroll nearest-target band first
-      const c = REROLL_SCRAP[r+1] || 0, p = RARITY_UP_CHANCE[r] || 0;
-      const gainPerScrap = c > 0 ? (p * (Pk[t][r+1] - Pk[t][r])) / c : 0;   // keeper gain per scrap spent here
-      if (gainPerScrap <= 0) continue;                                       // reroll wouldn't help keepers
-      let guard = 0;
-      while (solventLeft > 0.001 && (count[r]||0) > 0.001 && guard++ < 100000){
-        while (scrapPool < c){                       // out of free scrap → cannibalize a laggard IF worth it
-          let src = -1;
-          for (let rr = 1; rr <= r; rr++){
-            if ((count[rr]||0) > 0.001 && (rr < r || (count[r]||0) > 1.001)){
-              const costPerScrap = (SALVAGE_YIELD[rr]>0) ? Pk[t][rr]/SALVAGE_YIELD[rr] : Infinity;
-              if (gainPerScrap > costPerScrap){ src = rr; break; }   // net-positive: gain per scrap beats the laggard's cost
-            }
-          }
-          if (src < 0) break;
-          const take = Math.min(count[src], 1);
-          count[src] -= take; scrapPool += take * (SALVAGE_YIELD[src]||0); scrappedHere += take;
-        }
-        if (scrapPool < c) break;
-        const k = Math.min(1, count[r], solventLeft);
-        scrapPool -= k*c; solventLeft -= k; rerollsHere += k;
-        count[r] -= k; count[r+1] = (count[r+1]||0) + k*p; count[r] += k*(1-p);
-        promotedHere += k*p; topBand = Math.max(topBand, r+1);
-      }
-    }
-    out.scrapped += scrappedHere; out.rerolls += rerollsHere; out.solventUsed += (inv.solvent[t]||0) - solventLeft;
-    tiers.push({ t, bands, scrapped:scrappedHere, rerolls:rerollsHere, promoted:promotedHere, promotedTo:topBand, solvent:inv.solvent[t]||0 });
-    if (t < maxT){                                    // upgrade the "keep" bands; CULL the "leave" bands
-      const next = {};
-      for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n<=0.001) continue;
-        if (shouldLeave(t, r)){ out.left += n; out.matsSaved += n * (cumMax - toolCumCost(t)); continue; }
-        const pr = RARITY_UP_CHANCE[r]||0, up = Math.min(r+1, Math.min(t+1,6)); next[r]=(next[r]||0)+n*(1-pr); next[up]=(next[up]||0)+n*pr;
-      }
-      count = next;
-    } else {                                          // final tier: tally keepers vs. didn't-make-it
-      for (let r=1;r<=cap;r++){ const n = count[r]||0; if (n<=0.001) continue; if (r>=R) out.keepers += n; else out.left += n; }
-    }
-  }
-  return { tiers, out };
-}
-function setToolBatch(k, v){ loadToolBatch(); toolBatch[k] = +v; saveToolBatch(); renderToolBatchResult(); }
-function renderToolBatchResult(){
-  const el = document.getElementById('tool-batch-result'); if (!el) return;
-  loadToolBatch();
-  const { count, maxTier, want } = toolBatch;
-  if (want > Math.min(maxTier,6)){ el.innerHTML = `<div class="tc2-bad"><i class="ti ti-alert-triangle"></i> ${RARITY_NAMES[want]} needs at least tier ${want} — raise the max tier.</div>`; return; }
-  const inv = toolBatchInventory(maxTier);
-  const sim = simulateBatch(count, want, maxTier, inv);
-  const fmtN = n => Math.round(n).toString();                              // whole tools/solvents
-  const fmtP = n => (n > 0 && n < 0.5) ? '<1' : Math.round(n).toString();  // small "promoted" counts
-  // Bands (with verdicts + cost-per-keeper) come from the sim, so the display matches what it culled.
-  const bandRow = (b) => {
-    let vcls = 'keeper', vlabel = 'keeper', cpkTxt = '';
-    if (!b.keeper){
-      vcls = b.leave ? 'leave' : 'keep'; vlabel = vcls;
-      cpkTxt = (b.leave && b.pk < 0.005) ? "can't reach in time"
-             : (b.cpk != null ? `${fmtCoin(Math.round(b.cpk))} / keeper · ${Math.round(b.pk*100)}% make it`
-                              : `${Math.round(b.pk*100)}% make it`);
-    }
-    return `<div class="tcb-band"><b class="tcb-cnt">${fmtN(b.count)}×</b><span class="tcb-rar" style="color:${RARITY_COLORS[b.r]}">${RARITY_NAMES[b.r]}</span><span class="tcb-sub">${cpkTxt}</span><span class="tcb-verdict tcb-v-${vcls}">${vlabel}</span></div>`;
-  };
-  const tiersHtml = sim.tiers.map(tg => {
-    const bands = tg.bands.filter(b => b.count >= 0.5).map(bandRow).join('');
-    let rec = '';
-    if (tg.rerolls >= 0.05){
-      rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub"><i class="ti ti-dice" style="color:var(--purple-light)"></i> Scrap <b style="color:var(--amber-light)">${fmtN(tg.scrapped)}</b> laggards → reroll <b style="color:var(--purple-light)">${fmtN(tg.rerolls)}</b> <span style="color:var(--text3)">(${fmtN(tg.solvent)} solvents avail)</span> → ~<b style="color:var(--green-light)">${fmtP(tg.promoted)}</b> promoted up</span></div>`;
-    } else if (tg.solvent < 0.5 && Math.min(tg.t,6) < want && tg.t < maxTier){
-      rec = `<div class="tcb-band" style="display:block"><span class="tcb-sub" style="color:var(--text3)">No T${tg.t} solvents — blind-upgrade only</span></div>`;
-    }
-    return `<div class="tcb-tier"><div class="tcb-tier-hdr"><i class="ti ti-arrow-big-up-lines" style="font-size:13px"></i> Tier ${tg.t}</div>${bands}${rec}</div>`;
-  }).join('');
-  const o = sim.out;
-  const warn = o.keepers < 0.5 ? `<div class="tc2-bad" style="margin-bottom:.6rem"><i class="ti ti-alert-triangle"></i> ${RARITY_NAMES[want]} by T${maxTier} is barely reachable by blind-upgrading a fresh batch (~0 keepers) — try a higher max tier, a lower target rarity, or feed it more rerolls (scrap + solvents).</div>` : '';
-  el.innerHTML = warn + tiersHtml + `<div class="tcb-summary">
-    <span class="tcb-chip">Keepers (≥${RARITY_NAMES[want]} @ T${maxTier}): <b style="color:var(--green-light)">${fmtN(o.keepers)}</b> / ${count}</span>
-    ${o.left>=0.5 ? `<span class="tcb-chip">Left / culled: <b>${fmtN(o.left)}</b>${o.matsSaved>0.5?` · saved ~<b>${fmtCoin(Math.round(o.matsSaved))}</b> in mats`:''}</span>` : ''}
-    ${o.solventAvail>=0.5 ? `<span class="tcb-chip">Solvents used: <b>${fmtN(o.solventUsed)}</b> / ${fmtN(o.solventAvail)}</span>` : ''}
-    ${o.scrapped>=0.5 ? `<span class="tcb-chip">Scrapped for fuel: <b>${fmtN(o.scrapped)}</b> tools</span>` : ''}
-  </div>`;
-}
-function toolBatchHtml(){
-  loadToolBatch();
-  const tierOpts = [2,3,4,5,6,7,8,9,10].map(t=>`<option value="${t}"${toolBatch.maxTier===t?' selected':''}>T${t}</option>`).join('');
-  const wantOpts = [2,3,4,5,6].map(r=>`<option value="${r}"${toolBatch.want===r?' selected':''}>${RARITY_NAMES[r]}</option>`).join('');
-  return `<div class="tool-calc" style="margin-top:1rem">
-    <div class="tool-calc-hdr"><i class="ti ti-stack-2"></i> Batch upgrade advisor <span class="tc-wip">work in progress</span></div>
-    <div class="tcb-controls" style="grid-template-columns:1fr 1fr 1fr">
-      <div class="tc-field"><label># tools (crafted at T1)</label><input type="number" min="1" max="100000" class="sj-input" value="${toolBatch.count}" onchange="setToolBatch('count',this.value)"></div>
-      <div class="tc-field"><label>Max tier</label><select class="sj-input" onchange="setToolBatch('maxTier',this.value)">${tierOpts}</select></div>
-      <div class="tc-field"><label>Rarity wanted</label><select class="sj-input" onchange="setToolBatch('want',this.value)">${wantOpts}</select></div>
-    </div>
-    <div class="tc2-result" id="tool-batch-result"></div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Blind-upgrade the batch and reroll toward your target, capped by the <b>scrap</b> and craftable <b>Reforging Solvents</b> in your tracked inventory (each solvent = 10 seeds + 2 fish oil; shared across all tools of a tier). Each below-target band shows its <b>cost per keeper</b> — the remaining upgrade mats ÷ its chance of reaching the target — and is flagged <span class="tcb-verdict tcb-v-leave" style="font-size:9px">leave</span> when that's worse than starting a fresh tool (e.g. Commons that "won't make it"). The keeper count assumes you upgrade everything; leaving the flagged bands trades a few keepers for saved mats.</div>
-  </div>`;
-}
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(names)); }
 function toggleToolInvLoc(idx){ if (!toolTrackedInvs) toolTrackedInvs = new Set(); if (toolTrackedInvs.has(idx)) toolTrackedInvs.delete(idx); else toolTrackedInvs.add(idx); _saveToolTrackedNames(); renderToolCrafting(); }
@@ -7732,11 +7425,13 @@ async function renderToolCrafting(){
       <div class="tool-cell tool-cost" title="7-day average market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
     </div>`);
   }
-  // Second grid: scrap + seed counts by tier (same layout, pooled from the selected inventories).
-  const ssCols = [...SCRAP_COLS, ...SEED_COLS];
+  // Second grid (below the first): scrap + solvent + seed counts by tier, pooled from the selected inventories.
+  const ssCols = [...SCRAP_COLS, SOLVENT_COL, ...SEED_COLS];
+  const seedStart = SCRAP_COLS.length + 1;   // index of the first seed column (after scrap + solvent)
   const ssHeader = `<div class="tool-grid-row tool-grid-head">
     <div class="tool-hcell">Tier</div>
     ${SCRAP_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.label)} Scrap">${c.label}</div>`).join('')}
+    <div class="tool-hcell" title="Reforging Solvent">${SOLVENT_COL.label}</div>
     ${SEED_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.full)} Seeds">${c.label}</div>`).join('')}
   </div>`;
   const ssRows = [];
@@ -7745,7 +7440,7 @@ async function renderToolCrafting(){
     const cells = ssCols.map((c, i) => {
       const nm = c.name(t), h = have(nm);
       const cls = h===0 ? 'tool-zero' : 'tool-ok';
-      const sep = i===SCRAP_COLS.length ? 'border-left-width:3px;border-left-color:var(--border2)' : '';   // divider before seeds
+      const sep = (i===SCRAP_COLS.length || i===seedStart) ? 'border-left-width:3px;border-left-color:var(--border2)' : '';   // dividers around Solvent
       return `<div class="tool-cell ${cls}" style="${sep}" title="${escHtml(nm)}">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     ssRows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
@@ -7753,22 +7448,13 @@ async function renderToolCrafting(){
       ${cells}
     </div>`);
   }
-  const subtitle = txt => `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4rem">${txt}</div>`;
-  el.innerHTML = toolInvSelectorHtml() + `
-    <div style="display:flex;gap:1.25rem;flex-wrap:wrap;align-items:flex-start;margin-top:1rem">
-      <div style="flex:1 1 440px;min-width:0">
-        ${subtitle('<i class="ti ti-tools" style="color:var(--text3)"></i> Tool materials')}
-        <div class="tool-grid" style="margin-top:0">${header}${rows.join('')}</div>
-      </div>
-      <div style="flex:1 1 400px;min-width:0">
-        ${subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap &amp; Seed')}
-        <div class="tool-grid" style="margin-top:0">${ssHeader}${ssRows.join('')}</div>
-      </div>
-    </div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate. <b>Scrap &amp; Seed</b> shows how many of each you're holding at that tier.</div>`
-    + toolCalcHtml() + toolBatchHtml();
-  renderToolCalcResult();
-  renderToolBatchResult();
+  const subtitle = (txt, mt) => `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin:${mt||'0'} 0 .45rem">${txt}</div>`;
+  el.innerHTML = toolInvSelectorHtml()
+    + subtitle('<i class="ti ti-tools" style="color:var(--text3)"></i> Tool materials', '1rem')
+    + `<div class="tool-grid" style="margin-top:0">${header}${rows.join('')}</div>`
+    + subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap · Solvent · Seed', '1.4rem')
+    + `<div class="tool-grid ss" style="margin-top:0">${ssHeader}${ssRows.join('')}</div>`
+    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate. <b>Scrap · Solvent · Seed</b> shows how many of each you're holding at that tier.</div>`;
   updateLiveBtns();
   // Kick off market pricing for any materials not yet priced.
   const anyUnpriced = (() => { for (let t=1;t<=10;t++) for (const c of TOOL_COLS) if (toolPrice[c.name(t).toLowerCase()]===undefined) return true; return false; })();
