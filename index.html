@@ -7280,6 +7280,17 @@ const TOOL_COLS = [
   { label:'Leather', per:2, name:t=>`${TOOL_ADJ[t-1]} Leather` },
   { label:'Rope',    per:2, name:t=>`${TOOL_ADJ[t-1]} Rope` },
 ];
+// Second table: salvage scrap (tool-tier adjectives) + farming crop seeds (consumable adjectives), by tier.
+const SCRAP_COLS = [
+  { label:'Tool',   name:t=>`${TOOL_ADJ[t-1]} Tool Scrap` },
+  { label:'Armor',  name:t=>`${TOOL_ADJ[t-1]} Armor Scrap` },
+  { label:'Weapon', name:t=>`${TOOL_ADJ[t-1]} Weapon Scrap` },
+];
+const SEED_COLS = [
+  { label:'Ember',  full:'Embergrain', name:t=>`${CONSUMABLE_ADJ[t-1]} Embergrain Seeds` },
+  { label:'Star',   full:'Starbulb',   name:t=>`${CONSUMABLE_ADJ[t-1]} Starbulb Seeds` },
+  { label:'Wisp',   full:'Wispweave',  name:t=>`${CONSUMABLE_ADJ[t-1]} Wispweave Seeds` },
+];
 // Market pricing for tool materials: 7-day average traded price (a truer going rate than the single
 // lowest sell order). Cached in memory. 0 = no market data, undefined = unfetched.
 let toolPrice = {};        // lowercase item name -> avg7d hex (0 = no data, undefined = unfetched)
@@ -7721,9 +7732,40 @@ async function renderToolCrafting(){
       <div class="tool-cell tool-cost" title="7-day average market price to upgrade one tier: 4 ingots + 2 planks + 2 leather + 2 rope (excludes the previous-tier tool)">${costInner}</div>
     </div>`);
   }
+  // Second grid: scrap + seed counts by tier (same layout, pooled from the selected inventories).
+  const ssCols = [...SCRAP_COLS, ...SEED_COLS];
+  const ssHeader = `<div class="tool-grid-row tool-grid-head">
+    <div class="tool-hcell">Tier</div>
+    ${SCRAP_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.label)} Scrap">${c.label}</div>`).join('')}
+    ${SEED_COLS.map(c=>`<div class="tool-hcell" title="${escHtml(c.full)} Seeds">${c.label}</div>`).join('')}
+  </div>`;
+  const ssRows = [];
+  for (let t=1; t<=10; t++){
+    const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
+    const cells = ssCols.map((c, i) => {
+      const nm = c.name(t), h = have(nm);
+      const cls = h===0 ? 'tool-zero' : 'tool-ok';
+      const sep = i===SCRAP_COLS.length ? 'border-left-width:3px;border-left-color:var(--border2)' : '';   // divider before seeds
+      return `<div class="tool-cell ${cls}" style="${sep}" title="${escHtml(nm)}">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
+    }).join('');
+    ssRows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
+      <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
+      ${cells}
+    </div>`);
+  }
+  const subtitle = txt => `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4rem">${txt}</div>`;
   el.innerHTML = toolInvSelectorHtml() + `
-    <div class="tool-grid">${header}${rows.join('')}</div>
-    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate.</div>`
+    <div style="display:flex;gap:1.25rem;flex-wrap:wrap;align-items:flex-start;margin-top:1rem">
+      <div style="flex:1 1 440px;min-width:0">
+        ${subtitle('<i class="ti ti-tools" style="color:var(--text3)"></i> Tool materials')}
+        <div class="tool-grid" style="margin-top:0">${header}${rows.join('')}</div>
+      </div>
+      <div style="flex:1 1 400px;min-width:0">
+        ${subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap &amp; Seed')}
+        <div class="tool-grid" style="margin-top:0">${ssHeader}${ssRows.join('')}</div>
+      </div>
+    </div>
+    <div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Upgrade cost</b> = <b>7-day average</b> market price of that tier's mats — i.e. the cost to upgrade from the previous-tier tool (T1 is the initial craft), <i>not</i> the full from-scratch build. A <span style="color:var(--amber-light)">+</span> means some mats aren't listed, so the figure is an underestimate. <b>Scrap &amp; Seed</b> shows how many of each you're holding at that tier.</div>`
     + toolCalcHtml() + toolBatchHtml();
   renderToolCalcResult();
   renderToolBatchResult();
