@@ -4897,6 +4897,7 @@ function shoppingRenderSearch() {
       isCargo: g.it.type === 'cargo' || g.it.isCargo || g.it.itemType === 1,
       tier:    g.tier,
       rarity:  g.rarity,
+      iconAssetName: g.it.iconAssetName || g.it.icon || '',
       noOrders: shoppingOrderIds ? !hasOrder(g.id) : false   // only claim "no listings" once we actually know
     }));
   shoppingSearchResults = results;
@@ -4936,7 +4937,8 @@ function shoppingAddItem(resultIdx) {
     shoppingItems.push({
       id: it.id, name: it.name, isCargo: !!it.isCargo,
       tier: it.tier > 0 ? it.tier : 0,
-      rarity: rarityName(it.rarity ?? it.rarityStr)
+      rarity: rarityName(it.rarity ?? it.rarityStr),
+      iconAssetName: it.iconAssetName || ''
     });
     saveShoppingItems();
   }
@@ -4950,7 +4952,7 @@ function shoppingAddItem(resultIdx) {
   const listEl = document.getElementById('shopping-list-el');
   if (listEl) listEl.innerHTML = renderShoppingListHtml();
   // Fetch price for the new item
-  if (shoppingItems.length) fetchShoppingPrice(it.id, it.isCargo);
+  if (shoppingItems.length) fetchShoppingPrice(it.id, it.isCargo, true);
 }
 
 function shoppingAddFirst() {
@@ -5106,7 +5108,7 @@ function renderShoppingListHtml() {
     return `<tr style="border-bottom:${isExpanded?'none':'1px solid var(--border)'};cursor:pointer;${isExpanded?'background:var(--bg3)':''}" onclick="shoppingToggleExpand('${item.id}')">
       <td style="padding:.5rem .75rem">
         <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">
-          ${gameIconImg(item.iconAssetName || mkt?.iconAssetName, 20)}
+          ${gameIconImg(item.iconAssetName || mkt?.iconAssetName || shoppingCatalogById[String(item.id)]?.iconAssetName, 20)}
           <span style="font-size:13px;font-weight:500;color:var(--text)">${escHtml(item.name)}</span>
           ${item.isCargo ? '<span style="font-size:10px;background:var(--bg3);color:var(--text3);border-radius:3px;padding:1px 5px">cargo</span>' : ''}
           ${chips}
@@ -5160,7 +5162,33 @@ async function fetchShoppingAvg7d(id, isCargo) {
   return null;
 }
 
-async function fetchShoppingPrice(id, isCargo) {
+// Try to re-point an unresolved item at a sibling id (same name+tier+rarity) that has picked up orders.
+// Bitjita mints several ids per display item; only some carry listings. Returns {id,detail,...} or null.
+async function shoppingTryResolveId(item){
+  try {
+    const nameLc = (item.name||'').toLowerCase();
+    const tier = item.tier > 0 ? item.tier : 0;
+    const rarLc = (rarityName(item.rarity)||'').toLowerCase();
+    const d = await apiFetch('/api/items?q=' + encodeURIComponent(item.name));
+    const arr = (d && (d.items || (d.data && d.data.items))) || [];
+    const sibs = arr.filter(it => {
+      const t = it.tier > 0 ? it.tier : 0;
+      const rr = (rarityName(it.rarityStr ?? it.rarity)||'').toLowerCase();
+      return (it.name||'').toLowerCase() === nameLc && t === tier && rr === rarLc && String(it.id||it.itemId) !== String(item.id);
+    }).slice(0, 8);   // cap the extra market calls per unresolved item
+    const type = item.isCargo ? 'cargo' : 'item';   // the whole name+tier+rarity group is the same kind
+    for (const it of sibs){
+      const sid = String(it.id || it.itemId);
+      try {
+        const det = await fetchWithCache(type, sid, 15000);
+        if ((det.sellOrders && det.sellOrders.length) || (det.buyOrders && det.buyOrders.length))
+          return { id: sid, detail: det, iconAssetName: it.iconAssetName, isCargo: item.isCargo };
+      } catch(_){}
+    }
+  } catch(e){}
+  return null;
+}
+async function fetchShoppingPrice(id, isCargo, allowResolve) {
   shoppingPrices[id] = 'loading';
   _refreshShoppingRow(id);
   try {
@@ -5169,6 +5197,23 @@ async function fetchShoppingPrice(id, isCargo) {
     let d;
     try { d = await fetchWithCache(type, id, 15000); }
     catch(_) { type = (type === 'item') ? 'cargo' : 'item'; d = await fetchWithCache(type, id, 15000); }
+    const hasOrders = dd => !!((dd && dd.sellOrders && dd.sellOrders.length) || (dd && dd.buyOrders && dd.buyOrders.length));
+    let item = shoppingItems.find(s => String(s.id) === String(id));
+    if (item && item.isCargo !== (type === 'cargo')) { item.isCargo = (type === 'cargo'); isCargo = item.isCargo; }   // remember the corrected type
+    // Re-resolve an unresolved item (never confirmed to carry a listing) that currently has 0 orders — a
+    // sibling id may have gained orders since. Items already known to have listings are left untouched.
+    if (allowResolve && item && !item.resolved && !hasOrders(d)) {
+      const better = await shoppingTryResolveId(item);
+      if (better && String(better.id) !== String(id)) {
+        delete shoppingPrices[id];
+        item.id = String(better.id);
+        if (better.iconAssetName && !item.iconAssetName) item.iconAssetName = better.iconAssetName;
+        id = String(better.id); d = better.detail; isCargo = better.isCargo;
+        shoppingPrices[id] = 'loading';
+        saveShoppingItems();
+      }
+    }
+    if (item && hasOrders(d) && !item.resolved) { item.resolved = true; saveShoppingItems(); }   // lock in a good id
     const avg7d = await fetchShoppingAvg7d(id, isCargo);
     const regionId = shoppingRegionFilter || null;
 
@@ -5214,7 +5259,7 @@ async function fetchAllShoppingPrices() {
   }
   const items = [...shoppingItems];
   for (const item of items) {
-    await fetchShoppingPrice(item.id, item.isCargo);
+    await fetchShoppingPrice(item.id, item.isCargo, true);
   }
   shoppingPricingActive = false;
   const listEl = document.getElementById('shopping-list-el');
