@@ -104,6 +104,14 @@ main.planner-mode{max-width:none;padding:1rem}
 .badge-buy{background:var(--green-dim);color:var(--green-light)}
 .ord-section-hdr{display:flex;align-items:center;gap:.5rem;margin:1rem 0 .6rem;padding:.5rem .85rem;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;font-weight:600;font-size:13px;color:var(--c,var(--text))}
 .ord-row{display:flex;align-items:center;gap:.5rem;padding:.5rem .9rem;border-top:1px solid var(--border);font-size:12px}
+.ord-row-click{cursor:pointer}
+.ord-row-click:hover{background:var(--bg4)}
+.ord-chev{color:var(--text3);font-size:13px;flex-shrink:0;margin-left:.1rem}
+.ord-uc{display:inline-flex;align-items:center;gap:.2rem;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;background:var(--red-dim);color:#f09595;white-space:nowrap}
+.ord-expand:empty{display:none}
+.ord-exp-inner{padding:.6rem .9rem;background:var(--bg2);border-top:1px solid var(--border);font-size:12px}
+.ord-exp-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.ord-exp-mine td{background:rgba(29,158,117,.10)}
 .ord-item{display:flex;align-items:center;gap:.4rem;min-width:0}
 .ord-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
 .ord-qty{color:var(--text2);font-size:11px;white-space:nowrap}
@@ -2245,6 +2253,7 @@ async function renderInventoryTab(silent) {
 // /api/players/{id}/market-collections → everything waiting to be picked up (coins earned from sells AND
 // items from filled buy orders), each tagged with its claim + region.
 let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders, collections }
+let ordersExpanded = new Set();  // order entityIds whose market order-book is expanded
 async function fetchPlayerMarket(id){
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
@@ -2281,12 +2290,19 @@ function ordersContentHtml(data){
     </div>
     <div>${rows}</div>
   </div>`;
-  const orderRow = o => `<div class="ord-row">
-    <span class="badge badge-${o.kind}">${o.kind==='sell'?'Sell':'Buy'}</span>
-    ${nameCell(o)}<span style="flex:1"></span>
-    <span class="ord-qty">×${fmtCount(num(o.quantity))}</span>
-    <span class="price-${o.kind}">${fmtCoin(num(o.priceThreshold))}</span>
-  </div>`;
+  const orderRow = o => {
+    const oid = String(o.entityId||'');
+    const expanded = ordersExpanded.has(oid);
+    return `<div class="ord-row ord-row-click" data-oid="${oid}" data-item-id="${escHtml(String(o.itemId))}" data-item-type="${num(o.itemType)}" data-price="${num(o.priceThreshold)}" data-region="${escHtml(String(o.regionId||''))}" data-kind="${o.kind}" onclick="ordersToggleExpand('${oid}')">
+      <span class="badge badge-${o.kind}">${o.kind==='sell'?'Sell':'Buy'}</span>
+      ${nameCell(o)}
+      <span class="ord-uc-slot" data-oid="${oid}"></span>
+      <span style="flex:1"></span>
+      <span class="ord-qty">×${fmtCount(num(o.quantity))}</span>
+      <span class="price-${o.kind}">${fmtCoin(num(o.priceThreshold))}</span>
+      <i class="ti ti-chevron-${expanded?'up':'down'} ord-chev"></i>
+    </div><div class="ord-expand" id="ord-exp-${oid}"></div>`;
+  };
   const collRow = o => `<div class="ord-row">${nameCell(o)}<span style="flex:1"></span>${isCoin(o)?`<span class="ord-coins">${fmtCoin(num(o.quantity))}</span>`:`<span class="ord-qty">×${fmtCount(num(o.quantity))}</span>`}</div>`;
   const sectionHdr = (label, ic, color, total) => `<div class="ord-section-hdr" style="--c:${color}"><i class="ti ${ic}"></i> <span>${label}</span><span style="flex:1"></span><span class="badge badge-tier">${total}</span></div>`;
 
@@ -2316,7 +2332,91 @@ function ordersContentHtml(data){
 }
 function fillPlayerOrdersCached(id){
   const b = document.getElementById('psec-orders-' + id);
-  if (b) b.innerHTML = ordersContentHtml(ordersByPlayer[id]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>';
+  if (b){ b.innerHTML = ordersContentHtml(ordersByPlayer[id]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>'; ordersAfterRender(b); }
+}
+// After (re)rendering a player's orders: flag undercut sells + re-open any rows that were expanded.
+function ordersAfterRender(sectionEl){
+  if (!sectionEl) return;
+  ordersCheckUndercuts(sectionEl);
+  ordersExpanded.forEach(oid => { const row = sectionEl.querySelector(`.ord-row[data-oid="${oid}"]`); if (row) ordersRenderExpand(oid, row); });
+}
+// For each SELL row, compare its price to the cheapest OTHER sell of the same item in the SAME region and
+// flag "Undercut · <price>" when someone's listed lower. Region-scoped = the competition that matters; the
+// expandable view shows every region so the full picture is one click away. Runs in the background,
+// patching chips in as each item's market comes back.
+async function ordersCheckUndercuts(sectionEl){
+  const rows = [...sectionEl.querySelectorAll('.ord-row[data-kind="sell"]')];
+  for (const row of rows){
+    const slot = row.querySelector('.ord-uc-slot');
+    if (!slot || slot.getAttribute('data-done')) continue;
+    const itemId = row.getAttribute('data-item-id');
+    const myPrice = +row.getAttribute('data-price') || 0;
+    const myRegion = row.getAttribute('data-region');
+    const oid = row.getAttribute('data-oid');
+    if (!itemId || !myPrice){ slot.setAttribute('data-done','1'); continue; }
+    const type = row.getAttribute('data-item-type') === '1' ? 'cargo' : 'item';
+    try {
+      const det = await fetchWithCache(type, itemId, 15000);
+      const price = o => +(o.price||o.priceThreshold||0);
+      const rivals = (det.sellOrders||[])
+        .filter(o => String(o.regionId) === String(myRegion) && String(o.entityId||'') !== String(oid))
+        .map(price).filter(v => v > 0);
+      const lowest = rivals.length ? Math.min(...rivals) : null;
+      slot.setAttribute('data-done','1');
+      slot.innerHTML = (lowest != null && lowest < myPrice)
+        ? `<span class="ord-uc" title="Cheapest rival in R${myRegion}: ${fmtCount(lowest)} ⬡ · yours ${fmtCount(myPrice)} ⬡"><i class="ti ti-arrow-down-right"></i> Undercut · ${fmtCount(lowest)}</span>`
+        : '';
+    } catch(e){ slot.setAttribute('data-done','1'); }
+  }
+}
+function ordersToggleExpand(oid){
+  const cont = document.getElementById('ord-exp-'+oid); if (!cont) return;
+  const row = document.querySelector(`.ord-row[data-oid="${oid}"]`);
+  const chev = row && row.querySelector('.ord-chev');
+  if (ordersExpanded.has(oid)){
+    ordersExpanded.delete(oid); cont.innerHTML = '';
+    if (chev){ chev.classList.remove('ti-chevron-up'); chev.classList.add('ti-chevron-down'); }
+    return;
+  }
+  ordersExpanded.add(oid);
+  if (chev){ chev.classList.remove('ti-chevron-down'); chev.classList.add('ti-chevron-up'); }
+  if (row) ordersRenderExpand(oid, row);
+}
+async function ordersRenderExpand(oid, row){
+  const cont = document.getElementById('ord-exp-'+oid); if (!cont) return;
+  cont.innerHTML = `<div class="ord-exp-inner" style="color:var(--text3)"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.35rem"></i>Loading market…</div>`;
+  const itemId = row.getAttribute('data-item-id');
+  const type = row.getAttribute('data-item-type') === '1' ? 'cargo' : 'item';
+  try {
+    const det = await fetchWithCache(type, itemId, 15000);
+    cont.innerHTML = ordersExpandHtml(det, { myPrice:+row.getAttribute('data-price')||0, myRegion:row.getAttribute('data-region'), kind:row.getAttribute('data-kind') });
+  } catch(e){ cont.innerHTML = `<div class="ord-exp-inner" style="color:var(--red-light,#e06666)">Couldn't load market listings</div>`; }
+}
+function ordersExpandHtml(det, ctx){
+  const price = o => +(o.price||o.priceThreshold||0);
+  const sells = (det.sellOrders||[]).filter(o=>price(o)>0).sort((a,b)=>price(a)-price(b));
+  const buys  = (det.buyOrders||[]).filter(o=>price(o)>0).sort((a,b)=>price(b)-price(a));
+  const CAP = 8;
+  const rowHtml = (o, color) => {
+    const inMyReg = ctx.myRegion && String(o.regionId)===String(ctx.myRegion);
+    const loc = [o.regionId?`R${o.regionId}`:'', o.claimName||o.settlementName||''].filter(Boolean).join(' · ');
+    return `<tr class="${inMyReg?'ord-exp-mine':''}">
+      <td style="padding:.25rem .9rem;font-weight:600;color:${color}">${fmtCount(price(o))}</td>
+      <td style="padding:.25rem .5rem;color:var(--text2);font-size:11px">×${fmtNum(+(o.quantity||0))}</td>
+      <td style="padding:.25rem .9rem;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px">${escHtml(loc)||'—'}</td>
+    </tr>`;
+  };
+  const section = (title, ic, color, arr) => {
+    if (!arr.length) return `<div style="padding:.35rem .9rem;font-size:11px;color:var(--text3)"><i class="ti ${ic}" style="color:${color};margin-right:.3rem"></i>No ${title.toLowerCase()}</div>`;
+    const more = arr.length>CAP ? `<div style="padding:.2rem .9rem;font-size:11px;color:var(--text3)">+${arr.length-CAP} more…</div>` : '';
+    return `<div style="padding:.4rem .9rem .15rem;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)"><i class="ti ${ic}" style="color:${color};margin-right:.3rem"></i>${title} (${arr.length})</div>
+      <table class="ord-exp-tbl"><tbody>${arr.slice(0,CAP).map(o=>rowHtml(o,color)).join('')}</tbody></table>${more}`;
+  };
+  const sellSec = section('Sell listings','ti-tag','#f09595',sells);
+  const buySec  = section('Buy orders','ti-shopping-cart','var(--green-light)',buys);
+  const body = ctx.kind==='buy' ? (buySec+sellSec) : (sellSec+buySec);   // lead with the side that matters for this order
+  const note = ctx.myRegion ? `<div style="padding:.25rem .9rem .45rem;font-size:10px;color:var(--text3)">Listings in your region (R${ctx.myRegion}) are highlighted.</div>` : '';
+  return `<div style="background:var(--bg2);border-top:1px solid var(--border);padding:.3rem 0 .5rem">${body}${note}</div>`;
 }
 async function renderOrdersTab(silent){
   const el = document.getElementById('tab-orders'); if (!el) return;
