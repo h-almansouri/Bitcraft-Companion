@@ -2651,7 +2651,12 @@ function jsnRenderResults(){
   avgVal.sort((x,y) => y.value - x.value);
   const avgTotal = avgVal.reduce((s,x) => s + x.value, 0);
 
-  const itemCell = a => `<span style="display:inline-flex;align-items:center;gap:.4rem">${gameIconImg(a.meta?.iconAssetName, 20)}<span>${escHtml(a.meta?.name || ('Item '+a.id))}</span>${jsnTierBadge(a.meta)}</span>`;
+  // Fixed column widths so both tables line up; the Item column takes the rest and ellipsizes long names.
+  const COLS = `<colgroup><col><col style="width:80px"><col style="width:92px"><col style="width:138px"></colgroup>`;
+  // One-line item cell: icon + ellipsized name + tier badge, so long names (e.g. "High-Quality Mincemeat
+  // Pie", "Stonesmith's Down Feather Gloves") never wrap and every row is the same height. Full name on hover.
+  const itemCell = (a, chev) => { const nm = escHtml(a.meta?.name || ('Item '+a.id));
+    return `<div style="display:flex;align-items:center;gap:.4rem;min-width:0">${chev||''}<span style="flex-shrink:0;display:inline-flex">${gameIconImg(a.meta?.iconAssetName, 20)}</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${nm}">${nm}</span>${a.meta&&a.meta.tier>0?`<span style="flex-shrink:0">${jsnTierBadge(a.meta)}</span>`:''}</div>`; };
   const tableHead = qtyLabel => `<thead><tr style="background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
     <th style="padding:.35rem .6rem;text-align:left;font-weight:600">Item</th>
     <th style="padding:.35rem .6rem;text-align:right;font-weight:600;white-space:nowrap">${qtyLabel}</th>
@@ -2664,7 +2669,7 @@ function jsnRenderResults(){
   const sellRows = sellNow.map(x => {
     const open = jsnExpanded.has(x.a.key);
     const row = `<tr style="border-top:1px solid var(--border);cursor:pointer${open?';background:var(--bg3)':''}" onclick="jsnToggleExpand('${x.a.key}')">
-    <td style="padding:.4rem .6rem"><i class="ti ti-chevron-${open?'down':'right'}" style="font-size:11px;color:var(--text3);margin-right:.25rem"></i>${itemCell(x.a)}</td>
+    <td style="padding:.4rem .6rem">${itemCell(x.a, `<i class="ti ti-chevron-${open?'down':'right'}" style="font-size:11px;color:var(--text3);flex-shrink:0"></i>`)}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.sold)}${x.sold < x.a.qty ? `<span style="color:var(--text3);font-size:11px"> / ${fmtCount(x.a.qty)}</span>` : ''}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtNum(Math.round(x.unit))}${x.avg7d > 0 ? avgRef(x.avg7d) : ''}</td>
     <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--green-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}${x.avg7d > 0 ? avgRef(x.avg7d * x.sold) : ''}</td>
@@ -2672,7 +2677,7 @@ function jsnRenderResults(){
     return row + (open ? jsnExpandedRowHtml(x.a) : '');
   }).join('');
   const avgRows = avgVal.map(x => `<tr style="border-top:1px solid var(--border)">
-    <td style="padding:.4rem .6rem">${itemCell(x.a)}</td>
+    <td style="padding:.4rem .6rem">${itemCell(x.a, '')}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtCount(x.a.qty)}</td>
     <td style="padding:.4rem .6rem;text-align:right;color:var(--text2);white-space:nowrap">${fmtNum(Math.round(x.unit))}</td>
     <td style="padding:.4rem .6rem;text-align:right;font-weight:600;color:var(--purple-light);white-space:nowrap">${fmtCoin(Math.round(x.value))}</td>
@@ -2683,23 +2688,23 @@ function jsnRenderResults(){
   const sellFilter = jsnFilterBlock(false);
   const avgFilterSpacer = jsnFilterBlock(true);
 
-  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
+  const sellCard = `<div class="card" style="overflow:hidden;flex:1;min-width:500px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-cash" style="color:var(--green-light)"></i><div style="font-weight:600">Sellable now</div>
       <span style="font-size:11px;color:var(--text3)">${sellNow.length} item${sellNow.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--green-light)">${fmtCoin(Math.round(sellTotal))}</span>
     </div>
     ${sellFilter}
-    ${sellNow.length ? `<div id="jsn-sell-scroll" style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</span></div>`}
+    ${sellNow.length ? `<div id="jsn-sell-scroll" style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed">${COLS}${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</span></div>`}
   </div>`;
-  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
+  const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:500px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
       <i class="ti ti-chart-line" style="color:var(--purple-light)"></i><div style="font-weight:600">7-day average value</div>
       <span style="font-size:11px;color:var(--text3)">${avgVal.length} item${avgVal.length!==1?'s':''}</span>
       <span style="flex:1"></span><span style="font-weight:700;color:var(--purple-light)">${fmtCoin(Math.round(avgTotal))}</span>
     </div>
     ${avgFilterSpacer}
-    ${avgVal.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Qty')}<tbody>${avgRows}</tbody></table></div>` : '<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No items with a 7d average price.</span></div>'}
+    ${avgVal.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed">${COLS}${tableHead('Qty')}<tbody>${avgRows}</tbody></table></div>` : '<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No items with a 7d average price.</span></div>'}
   </div>`;
 
   host.innerHTML = `<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:stretch">${sellCard}${avgCard}</div>`;
