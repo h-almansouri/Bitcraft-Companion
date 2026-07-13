@@ -405,6 +405,7 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .status-ready{background:var(--green-dim);color:var(--green-light)}
 .status-active{background:rgba(29,158,117,.15);color:var(--teal-light)}
 .status-passive{background:rgba(186,117,23,.15);color:var(--amber-light)}
+.status-idle{background:var(--bg4);color:var(--text3)}
 .craft-tabs{display:flex;gap:4px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:1rem}
 .craft-tab{padding:9px 20px;font-size:14px;font-weight:600;color:var(--text2);cursor:pointer;border-radius:7px;display:flex;align-items:center;gap:7px;transition:background .15s,color .15s,box-shadow .15s;user-select:none;white-space:nowrap}
 .craft-tab i{font-size:16px}
@@ -1022,6 +1023,17 @@ let shoppingSearchResults = [];
 let shoppingSearchQ = '';
 let shoppingCatalogById = {};      // id -> item, accumulated from /api/items?q= (includes items with NO market orders)
 let shoppingCatalogTimer = null, shoppingCatalogSeq = 0;
+let shoppingOrderIds = null;       // Set of item ids that have ANY market orders (sell OR buy) — the accurate "has listings" source; lazy-loaded
+let shoppingOrderIdsLoading = false;
+async function ensureShoppingOrderIds(){
+  if (shoppingOrderIds || shoppingOrderIdsLoading) return;
+  shoppingOrderIdsLoading = true;
+  try { const m = await apiFetch('/api/market?hasOrders=true'); const arr = (m.data && m.data.items) || m.items || []; shoppingOrderIds = new Set(arr.map(x => String(x.id || x.itemId))); }
+  catch(e){ shoppingOrderIds = null; }
+  shoppingOrderIdsLoading = false;
+  if (shoppingOrderIds) shoppingRenderSearch();   // re-render the open dropdown with accurate "no listings" flags
+}
+const SHOP_RARITY_RANK = { common:1, uncommon:2, rare:3, epic:4, legendary:5, mythic:6 };
 let shoppingMarketItems = []; // market API items for search autocomplete
 const SHOPPING_LS = 'bc_shopping_v2'; // legacy single-list key (migrated into bc_shopping_lists_v1)
 const SHOPPING_LISTS_LS = 'bc_shopping_lists_v1';
@@ -2680,11 +2692,15 @@ function craftingContentHtml(craftData) {
     const secsLeft = (ts && !isDone) ? Math.max(0, ts - Math.floor(Date.now() / 1000)) : null;
 
     // ── Status badge ──
+    // "Active" only when the craft is actually being worked right now (its lock is live, or a live tick
+    // arrived recently); an in-progress craft nobody's on shows a muted "Idle" chip instead.
     const statusEl = isDone
       ? '<span class="craft-status status-ready"><i class="ti ti-check"></i> Complete</span>'
       : type === 'passive'
         ? '<span class="craft-status status-passive"><i class="ti ti-clock"></i> Passive</span>'
-        : '<span class="craft-status status-active"><i class="ti ti-flame"></i> Active</span>';
+        : craftIsBeingWorked(c)
+          ? '<span class="craft-status status-active"><i class="ti ti-flame"></i> Active</span>'
+          : '<span class="craft-status status-idle"><i class="ti ti-player-pause"></i> Idle</span>';
 
     // ── Progress / timer line ──
     let timerLine;
@@ -2791,6 +2807,15 @@ function startCraftLive(){
   } catch(e){}
 }
 function stopCraftLive(){ if (bcCraftES){ try { bcCraftES.close(); } catch(_){} bcCraftES = null; } bcCraftIdsKey = ''; bcCraftRate = {}; }
+// A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
+// tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
+function craftIsBeingWorked(c){
+  const now = Date.now();
+  if (c.lockExpiration){ const t = new Date(c.lockExpiration).getTime(); if (isFinite(t) && t > now) return true; }
+  const cid = String(c.entityId || c.entity_id || '');
+  const r = cid && bcCraftRate[cid];
+  return !!(r && r.lastT && (now - r.lastT) < 15000);
+}
 // Coarse, low-jitter ETA text. Drops seconds for anything ≥1min (that's where the flicker lived) and
 // quantizes the sub-minute range, since this is only ever a rough estimate.
 function fmtEtaLeft(secs){
@@ -2841,6 +2866,9 @@ function onLiveCraftProgress(d){
   const fill = card.querySelector('.craft-progress'); if (fill && pct != null) fill.style.width = pct + '%';
   const txt = card.querySelector('.craft-prog-text');
   if (txt && total > 0) txt.innerHTML = craftProgInner(prog, total, cid);
+  // a live tick means it's being worked → make sure the chip reads Active (not Idle)
+  const st = card.querySelector('.craft-status');
+  if (st && !st.classList.contains('status-active') && !st.classList.contains('status-ready')){ st.className = 'craft-status status-active'; st.innerHTML = '<i class="ti ti-flame"></i> Active'; }
 }
 function setCraftTab(t) {
   craftTabActive = t;
@@ -4717,6 +4745,7 @@ function renderShoppingTab() {
   // Load saved lists on first render
   if (!shoppingLists.length) loadShoppingLists();
   _syncActiveShoppingList();
+  ensureShoppingOrderIds();   // warm the "has listings" set so search flags are accurate from the first keystroke
 
   const regionOpts = regionOptionsHtml(shoppingRegionFilter);
 
@@ -4813,6 +4842,7 @@ function shoppingSearchType(q) {
   const dd = document.getElementById('shopping-search-dropdown');
   if (!dd) return;
   if (!shoppingSearchQ || shoppingSearchQ.length < 2) { dd.innerHTML = ''; clearTimeout(shoppingCatalogTimer); return; }
+  ensureShoppingOrderIds();   // load the accurate "has listings" set (once) for correct flags
   shoppingRenderSearch();   // instant results from the already-loaded market pool + session catalog
   // Augment with the FULL item catalog (bitjita /api/items) so items with no current market orders —
   // e.g. a Legendary/Epic Rathium Quill nobody's listed — still show up and can be added for later.
@@ -4833,27 +4863,41 @@ function shoppingRenderSearch() {
   const dd = document.getElementById('shopping-search-dropdown'); if (!dd) return;
   const q = shoppingSearchQ; if (!q || q.length < 2) { dd.innerHTML = ''; return; }
   const pool = shoppingMarketItems.length ? shoppingMarketItems : marketRawItems;
-  const onMarket = new Set(pool.map(it => String(it.id || it.itemId)));
-  const byId = {};
-  const consider = it => { const id = String(it.id || it.itemId); if (id && !byId[id] && (it.name||'').toLowerCase().includes(q)) byId[id] = it; };
+  const poolIds = new Set(pool.map(it => String(it.id || it.itemId)));
+  const hasOrder = id => shoppingOrderIds ? shoppingOrderIds.has(String(id)) : false;
+  // The game has many distinct item-ids that share the same name+tier+rarity. Collapse them into ONE row,
+  // preferring the id that actually has orders (then one in the local pool) — so the row isn't duplicated,
+  // the "no listings" flag is correct, and adding it lands on the id that carries the real listing.
+  const byKey = {};
+  const consider = it => {
+    const id = String(it.id || it.itemId); if (!id) return;
+    if (!(it.name||'').toLowerCase().includes(q)) return;
+    const tier = it.tier > 0 ? it.tier : 0;
+    const rarity = rarityName(it.rarityStr ?? it.rarity);
+    const key = (it.name||'').toLowerCase() + '|' + tier + '|' + rarity;
+    const score = (hasOrder(id) ? 2 : 0) + (poolIds.has(id) ? 1 : 0);
+    const cur = byKey[key];
+    if (!cur || score > cur.score) byKey[key] = { it, id, tier, rarity, score, name: it.name || ('Item ' + id) };
+  };
   pool.forEach(consider);
-  Object.values(shoppingCatalogById).forEach(consider);   // adds no-order items
-  let results = Object.values(byId)
+  Object.values(shoppingCatalogById).forEach(consider);   // adds items with no market orders
+  let results = Object.values(byKey)
     .sort((a,b) => {
-      const an = (a.name||'').toLowerCase(), bn = (b.name||'').toLowerCase();
+      const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
       const ai = an.indexOf(q), bi = bn.indexOf(q);
       if (ai !== bi) return ai - bi;
       if (an !== bn) return an.localeCompare(bn);
-      return (a.tier||0) - (b.tier||0);
+      if ((a.tier||0) !== (b.tier||0)) return (a.tier||0) - (b.tier||0);
+      return (SHOP_RARITY_RANK[(a.rarity||'').toLowerCase()]||0) - (SHOP_RARITY_RANK[(b.rarity||'').toLowerCase()]||0);
     })
     .slice(0, 16)
-    .map(it => ({
-      id:      it.id || it.itemId,
-      name:    it.name || ('Item ' + (it.id||it.itemId)),
-      isCargo: it.type === 'cargo' || it.isCargo || it.itemType === 1,
-      tier:    it.tier > 0 ? it.tier : 0,
-      rarity:  rarityName(it.rarityStr ?? it.rarity),
-      noOrders: !onMarket.has(String(it.id || it.itemId))
+    .map(g => ({
+      id:      g.id,
+      name:    g.name,
+      isCargo: g.it.type === 'cargo' || g.it.isCargo || g.it.itemType === 1,
+      tier:    g.tier,
+      rarity:  g.rarity,
+      noOrders: shoppingOrderIds ? !hasOrder(g.id) : false   // only claim "no listings" once we actually know
     }));
   shoppingSearchResults = results;
 
