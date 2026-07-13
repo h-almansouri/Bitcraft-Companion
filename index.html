@@ -626,6 +626,11 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .shop-list-tab:active{cursor:grabbing}
 .shop-list-tab.dragging{opacity:.4}
 .shop-list-tab.drop-target{outline:2px dashed var(--teal);outline-offset:1px}
+.shop-item-grip{color:var(--text3);cursor:grab;font-size:15px;flex-shrink:0}
+.shop-item-grip:hover{color:var(--text2)}
+.shop-item-grip:active{cursor:grabbing}
+tr.shop-item-dragging{opacity:.4}
+tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 /* Tasks toolbar — unified bar holding rotation + buttons */
 .tasks-toolbar{display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .75rem}
 .tasks-toolbar .task-rotation{padding:0;background:none;border:none;border-radius:0;margin:0}
@@ -4736,6 +4741,44 @@ function shopMoveList(draggedId, targetId){
   saveShoppingLists();
   renderShoppingTab();
 }
+// ── Drag-to-reorder the items within a list (drag starts from the grip handle) ──
+let shopDragItemId = null;
+function shopItemGripDown(el){ const tr = el.closest('tr'); if (tr) tr.setAttribute('draggable','true'); }
+function shopItemGripUp(el){ if (shopDragItemId) return; const tr = el.closest('tr'); if (tr) tr.setAttribute('draggable','false'); }
+function shopItemDragStart(e, tr){
+  shopDragItemId = tr.getAttribute('data-item-id');
+  tr.classList.add('shop-item-dragging');
+  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', shopDragItemId); } catch(_){}
+}
+function shopItemDragOver(e, tr){
+  if (!shopDragItemId) return;
+  e.preventDefault();
+  try { e.dataTransfer.dropEffect = 'move'; } catch(_){}
+  if (tr.getAttribute('data-item-id') !== shopDragItemId) tr.classList.add('shop-item-drop');
+}
+function shopItemDragLeave(e, tr){ tr.classList.remove('shop-item-drop'); }
+function shopItemDrop(e, tr){
+  e.preventDefault();
+  tr.classList.remove('shop-item-drop');
+  shopMoveItem(shopDragItemId, tr.getAttribute('data-item-id'));
+  shopDragItemId = null;
+}
+function shopItemDragEnd(){
+  document.querySelectorAll('#shopping-list-el tr.shop-item-dragging, #shopping-list-el tr.shop-item-drop').forEach(x => x.classList.remove('shop-item-dragging','shop-item-drop'));
+  document.querySelectorAll('#shopping-list-el tr[draggable="true"]').forEach(x => x.setAttribute('draggable','false'));
+  shopDragItemId = null;
+}
+function shopMoveItem(draggedId, targetId){
+  if (!draggedId || !targetId || String(draggedId) === String(targetId)) return;
+  const from = shoppingItems.findIndex(it => String(it.id) === String(draggedId));
+  const to   = shoppingItems.findIndex(it => String(it.id) === String(targetId));
+  if (from < 0 || to < 0) return;
+  const [moved] = shoppingItems.splice(from, 1);
+  const newTo = shoppingItems.findIndex(it => String(it.id) === String(targetId));
+  shoppingItems.splice(from < to ? newTo + 1 : newTo, 0, moved);   // downward drop lands after target, upward before
+  saveShoppingItems();
+  const listEl = document.getElementById('shopping-list-el'); if (listEl) listEl.innerHTML = renderShoppingListHtml();
+}
 function shoppingSwitchList(id) {
   if (id === activeShoppingListId) return;
   activeShoppingListId = id;
@@ -5146,9 +5189,12 @@ function renderShoppingListHtml() {
 
     const expandedRows = isExpanded ? allOrdersHtml(pd, shoppingRegionFilter||null) : '';
 
-    return `<tr style="border-bottom:${isExpanded?'none':'1px solid var(--border)'};cursor:pointer;${isExpanded?'background:var(--bg3)':''}" onclick="shoppingToggleExpand('${item.id}')">
+    return `<tr data-item-id="${item.id}" draggable="false"
+      ondragstart="shopItemDragStart(event,this)" ondragover="shopItemDragOver(event,this)" ondragleave="shopItemDragLeave(event,this)" ondrop="shopItemDrop(event,this)" ondragend="shopItemDragEnd()"
+      style="border-bottom:${isExpanded?'none':'1px solid var(--border)'};cursor:pointer;${isExpanded?'background:var(--bg3)':''}" onclick="shoppingToggleExpand('${item.id}')">
       <td style="padding:.5rem .75rem">
         <div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">
+          <i class="ti ti-grip-vertical shop-item-grip" title="Drag to reorder" onmousedown="shopItemGripDown(this)" onmouseup="shopItemGripUp(this)" onclick="event.stopPropagation()"></i>
           ${gameIconImg(item.iconAssetName || mkt?.iconAssetName || shoppingCatalogById[String(item.id)]?.iconAssetName, 20)}
           <span style="font-size:13px;font-weight:500;color:var(--text)">${escHtml(item.name)}</span>
           ${item.isCargo ? '<span style="font-size:10px;background:var(--bg3);color:var(--text3);border-radius:3px;padding:1px 5px">cargo</span>' : ''}
