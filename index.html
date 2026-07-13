@@ -2519,7 +2519,19 @@ function jsnImmediate(buyOrders, qty){
   for (const o of orders){ if (remaining <= 0) break; const take = Math.min(remaining, +o.quantity); value += take * jsnBuyPrice(o); sold += take; remaining -= take; }
   return { value, sold, top: orders.length ? jsnBuyPrice(orders[0]) : 0 };
 }
-function jsnToggleExpand(key){ if (jsnExpanded.has(key)) jsnExpanded.delete(key); else jsnExpanded.add(key); jsnRenderResults(); }
+function jsnToggleExpand(key){
+  // The sellable table scrolls inside its own max-height container, which jsnRenderResults recreates from
+  // scratch (resetting it to the top). Capture that scroll (and the page scroll) and restore both so the
+  // row you clicked stays exactly where it was.
+  const y = window.scrollY;
+  const sc = document.getElementById('jsn-sell-scroll');
+  const top = sc ? sc.scrollTop : 0;
+  if (jsnExpanded.has(key)) jsnExpanded.delete(key); else jsnExpanded.add(key);
+  jsnRenderResults();
+  const sc2 = document.getElementById('jsn-sell-scroll');
+  if (sc2) sc2.scrollTop = top;
+  window.scrollTo(0, y);
+}
 // ── Claim filter (mirrors the Shopping List; restricts "Sellable now" buy orders to chosen claims) ──
 function saveJsnClaims(){ safeSetItem('bc_jsn_claims', JSON.stringify(jsnClaimFilter)); }
 function jsnClaimSearchType(q){
@@ -2678,7 +2690,7 @@ function jsnRenderResults(){
       <span style="flex:1"></span><span style="font-weight:700;color:var(--green-light)">${fmtCoin(Math.round(sellTotal))}</span>
     </div>
     ${sellFilter}
-    ${sellNow.length ? `<div style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</span></div>`}
+    ${sellNow.length ? `<div id="jsn-sell-scroll" style="max-height:62vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">${tableHead('Sell qty')}<tbody>${sellRows}</tbody></table></div>` : `<div class="empty" style="padding:1.5rem"><i class="ti ti-mood-empty"></i><span>No buy orders to fill${(jsnRegionFilter||jsnClaimFilter.length)?' in this filter':''}.</span></div>`}
   </div>`;
   const avgCard = `<div class="card" style="overflow:hidden;flex:1;min-width:440px;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)">
