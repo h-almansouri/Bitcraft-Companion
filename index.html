@@ -2254,6 +2254,7 @@ async function renderInventoryTab(silent) {
 // items from filled buy orders), each tagged with its claim + region.
 let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders, collections }
 let ordersExpanded = new Set();  // order entityIds whose market order-book is expanded
+let ordersHistoryOpen = new Set();  // playerIds whose completed-trade history panel is open
 async function fetchPlayerMarket(id){
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
@@ -2261,8 +2262,9 @@ async function fetchPlayerMarket(id){
   ]);
   return { sellOrders: m.sellOrders || [], buyOrders: m.buyOrders || [], collections: c.collections || [] };
 }
-function ordersContentHtml(data){
-  if (!data) return '';
+function ordersContentHtml(data, playerId){
+  const hist = playerId ? ordersHistoryBlock(playerId) : '';
+  if (!data) return hist;
   const num = x => +x || 0;
   const sells = data.sellOrders || [], buys = data.buyOrders || [];
   const orders = [
@@ -2272,7 +2274,7 @@ function ordersContentHtml(data){
   const collections = data.collections || [];   // coins (Hex Coin) from sells + items from filled buy orders
   const isCoin = o => num(o.itemId) === 1 || /hex coin/i.test(o.itemName || '');
   if (!orders.length && !collections.length)
-    return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No market orders or collections</span></div>';
+    return hist + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No market orders or collections</span></div>';
 
   const groupByLoc = arr => {
     const g = {};
@@ -2328,17 +2330,84 @@ function ordersContentHtml(data){
       return locCard(loc, rows, meta);
     }).join('');
   }
-  return html;
+  return hist + html;
 }
 function fillPlayerOrdersCached(id){
   const b = document.getElementById('psec-orders-' + id);
-  if (b){ b.innerHTML = ordersContentHtml(ordersByPlayer[id]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>'; ordersAfterRender(b); }
+  if (b){ b.innerHTML = ordersContentHtml(ordersByPlayer[id], id) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>'; ordersAfterRender(b, id); }
 }
-// After (re)rendering a player's orders: flag undercut sells + re-open any rows that were expanded.
-function ordersAfterRender(sectionEl){
+// After (re)rendering a player's orders: flag undercut sells, re-open expanded rows, re-open trade history.
+function ordersAfterRender(sectionEl, pid){
   if (!sectionEl) return;
   ordersCheckUndercuts(sectionEl);
   ordersExpanded.forEach(oid => { const row = sectionEl.querySelector(`.ord-row[data-oid="${oid}"]`); if (row) ordersRenderExpand(oid, row); });
+  if (pid && ordersHistoryOpen.has(String(pid))) ordersRenderHistory(String(pid));
+}
+// ── Trade history (completed sales/purchases) — toggled per player under their orders ──
+function fmtTradeWhen(s){
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ','T').replace(/\+00$/,'Z'));   // "2026-07-12 10:02:47.5+00" → ISO
+  if (isNaN(d)) return escHtml(String(s));
+  return d.toLocaleString(undefined, { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+}
+function ordersHistoryBlock(pid){
+  const open = ordersHistoryOpen.has(String(pid));
+  return `<div style="margin-bottom:.7rem">
+    <button id="ord-hist-btn-${pid}" class="btn" style="font-size:12px" onclick="ordersToggleHistory('${pid}')"><i class="ti ti-history"></i> Trade history <i class="ti ti-chevron-${open?'up':'down'}" style="font-size:12px;margin-left:.1rem"></i></button>
+    <div id="ord-hist-${pid}" style="margin-top:.55rem"></div>
+  </div>`;
+}
+function ordersToggleHistory(pid){
+  pid = String(pid);
+  const btn = document.getElementById('ord-hist-btn-'+pid);
+  const setChev = up => { const c = btn && btn.querySelector('.ti-chevron-up,.ti-chevron-down'); if (c){ c.classList.remove('ti-chevron-up','ti-chevron-down'); c.classList.add(up?'ti-chevron-up':'ti-chevron-down'); } };
+  if (ordersHistoryOpen.has(pid)){
+    ordersHistoryOpen.delete(pid);
+    const panel = document.getElementById('ord-hist-'+pid); if (panel) panel.innerHTML = '';
+    setChev(false);
+    return;
+  }
+  ordersHistoryOpen.add(pid);
+  setChev(true);
+  ordersRenderHistory(pid);
+}
+async function ordersRenderHistory(pid){
+  const panel = document.getElementById('ord-hist-'+pid); if (!panel) return;
+  panel.innerHTML = `<div style="padding:.75rem;color:var(--text3);font-size:12px"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.35rem"></i>Loading trade history…</div>`;
+  try {
+    const res = await apiFetch(`/api/market/player/${pid}/trades?limit=100`);
+    const trades = res.trades || (res.data && res.data.trades) || [];
+    panel.innerHTML = ordersHistoryHtml(trades, pid, res.total);
+  } catch(e){
+    panel.innerHTML = `<div style="padding:.75rem;color:var(--red-light,#e06666);font-size:12px">Couldn't load trade history.</div>`;
+  }
+}
+function ordersHistoryHtml(trades, pid, total){
+  if (!trades.length) return `<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No completed trades yet</span></div>`;
+  const rows = trades.map(t => {
+    const sold = String(t.sellerEntityId) === String(pid);
+    const counter = escHtml((sold ? t.purchaserUsername : t.sellerUsername) || '?');
+    const qty = +t.quantity || 0;
+    const tierB = (t.itemTier > 0) ? ocTierBadge(t.itemTier) : '';
+    const role = sold ? `<span class="badge badge-sell">Sold</span>` : `<span class="badge badge-buy">Bought</span>`;
+    return `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:.35rem .6rem;white-space:nowrap;color:var(--text3);font-size:11px">${fmtTradeWhen(t.createdAt)}</td>
+      <td style="padding:.35rem .6rem"><span style="display:flex;align-items:center;gap:.4rem;min-width:0">${role}<span style="flex-shrink:0;display:inline-flex">${gameIconImg(t.iconAssetName, 18)}</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0" title="${escHtml(t.itemName||'')}">${escHtml(t.itemName || ('Item '+t.itemId))}</span>${qty>1?`<span style="flex-shrink:0;color:var(--text3);font-size:11px">×${fmtCount(qty)}</span>`:''}${tierB?`<span style="flex-shrink:0">${tierB}</span>`:''}</span></td>
+      <td style="padding:.35rem .6rem;text-align:right;white-space:nowrap"><span style="font-weight:600;color:${sold?'var(--green-light)':'var(--amber-light)'}">${fmtNum(+t.totalPrice||0)} ⬡</span>${qty>1?`<span style="color:var(--text3);font-size:11px"> · ${fmtNum(+t.unitPrice||0)} ea</span>`:''}</td>
+      <td style="padding:.35rem .6rem;white-space:nowrap;color:var(--text2);font-size:12px">${sold?'to':'from'} <span style="color:var(--text)">${counter}</span></td>
+    </tr>`;
+  }).join('');
+  const more = (total && total > trades.length) ? `<div style="padding:.4rem .6rem;font-size:11px;color:var(--text3);border-top:1px solid var(--border)">Showing the latest ${trades.length} of ${fmtCount(total)} trades.</div>` : '';
+  return `<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+    <div style="max-height:52vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
+        <th style="padding:.35rem .6rem;text-align:left;font-weight:600">When</th>
+        <th style="padding:.35rem .6rem;text-align:left;font-weight:600">Item</th>
+        <th style="padding:.35rem .6rem;text-align:right;font-weight:600">Price</th>
+        <th style="padding:.35rem .6rem;text-align:left;font-weight:600">With</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table></div>${more}
+  </div>`;
 }
 // For each SELL row, compare its price to the cheapest OTHER sell of the same item in the SAME region and
 // flag "Undercut · <price>" when someone's listed lower. Region-scoped = the competition that matters; the
