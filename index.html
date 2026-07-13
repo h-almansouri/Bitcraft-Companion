@@ -406,6 +406,7 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .status-active{background:rgba(29,158,117,.15);color:var(--teal-light)}
 .status-passive{background:rgba(186,117,23,.15);color:var(--amber-light)}
 .status-idle{background:var(--bg4);color:var(--text3)}
+.status-private{background:rgba(139,92,246,.15);color:var(--purple-light)}
 .craft-tabs{display:flex;gap:4px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:1rem}
 .craft-tab{padding:9px 20px;font-size:14px;font-weight:600;color:var(--text2);cursor:pointer;border-radius:7px;display:flex;align-items:center;gap:7px;transition:background .15s,color .15s,box-shadow .15s;user-select:none;white-space:nowrap}
 .craft-tab i{font-size:16px}
@@ -2710,6 +2711,10 @@ function craftingContentHtml(craftData) {
         : craftIsBeingWorked(c)
           ? '<span class="craft-status status-active"><i class="ti ti-flame"></i> Active</span>'
           : '<span class="craft-status status-idle"><i class="ti ti-player-pause"></i> Idle</span>';
+    // "Private" = not open for others to help (isPublic === false). Shown alongside the Active/Idle chip.
+    const privateEl = (type === 'active' && c.isPublic === false)
+      ? '<span class="craft-status status-private" title="Not public — others can\'t help with this craft"><i class="ti ti-lock"></i> Private</span>'
+      : '';
 
     // ── Progress / timer line ──
     let timerLine;
@@ -2741,7 +2746,7 @@ function craftingContentHtml(craftData) {
         ${!isDone ? `<div class="craft-progress-wrap"><div class="craft-progress active" style="width:${pct}%"></div></div>` : ''}
         ${timerLine}
       </div>
-      ${statusEl}
+      ${privateEl ? `<div style="display:flex;flex-direction:column;gap:.25rem;align-items:flex-end;flex-shrink:0">${statusEl}${privateEl}</div>` : statusEl}
     </div>`;
   }
 
