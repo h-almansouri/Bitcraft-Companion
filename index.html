@@ -622,6 +622,10 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .live-status-label{font-size:11px;color:var(--text3);margin-left:.25rem}
 .shopping-dd-row{transition:background .1s}
 .shopping-dd-row:hover{background:var(--bg4)!important}
+.shop-list-tab{cursor:grab}
+.shop-list-tab:active{cursor:grabbing}
+.shop-list-tab.dragging{opacity:.4}
+.shop-list-tab.drop-target{outline:2px dashed var(--teal);outline-offset:1px}
 /* Tasks toolbar — unified bar holding rotation + buttons */
 .tasks-toolbar{display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .75rem}
 .tasks-toolbar .task-rotation{padding:0;background:none;border:none;border-radius:0;margin:0}
@@ -4697,6 +4701,41 @@ function loadShoppingLists() {
   shoppingLists.forEach(l => { if (!Array.isArray(l.items)) l.items = []; });
   _syncActiveShoppingList();
 }
+// ── Drag-to-reorder the list tabs ──
+let shopDragListId = null;
+function shopListDragStart(e, el){
+  shopDragListId = el.getAttribute('data-list-id');
+  el.classList.add('dragging');
+  try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', shopDragListId); } catch(_){}
+}
+function shopListDragOver(e, el){
+  if (!shopDragListId) return;
+  e.preventDefault();                                  // allow the drop
+  try { e.dataTransfer.dropEffect = 'move'; } catch(_){}
+  if (el.getAttribute('data-list-id') !== shopDragListId) el.classList.add('drop-target');
+}
+function shopListDragLeave(e, el){ el.classList.remove('drop-target'); }
+function shopListDrop(e, el){
+  e.preventDefault();
+  el.classList.remove('drop-target');
+  shopMoveList(shopDragListId, el.getAttribute('data-list-id'));
+  shopDragListId = null;
+}
+function shopListDragEnd(){
+  document.querySelectorAll('.shop-list-tab.dragging, .shop-list-tab.drop-target').forEach(x => x.classList.remove('dragging','drop-target'));
+  shopDragListId = null;
+}
+function shopMoveList(draggedId, targetId){
+  if (!draggedId || !targetId || draggedId === targetId) return;
+  const from = shoppingLists.findIndex(l => l.id === draggedId);
+  const to   = shoppingLists.findIndex(l => l.id === targetId);
+  if (from < 0 || to < 0) return;
+  const [moved] = shoppingLists.splice(from, 1);
+  const newTo = shoppingLists.findIndex(l => l.id === targetId);
+  shoppingLists.splice(from < to ? newTo + 1 : newTo, 0, moved);   // dropping rightward lands after target, leftward before
+  saveShoppingLists();
+  renderShoppingTab();
+}
 function shoppingSwitchList(id) {
   if (id === activeShoppingListId) return;
   activeShoppingListId = id;
@@ -4749,10 +4788,12 @@ function renderShoppingTab() {
 
   const regionOpts = regionOptionsHtml(shoppingRegionFilter);
 
-  // List selector bar
+  // List selector bar — buttons are draggable to reorder the lists
   const listTabs = shoppingLists.map(l => {
     const active = l.id === activeShoppingListId;
-    return `<button class="btn${active?' primary':''}" style="font-size:12px" onclick="shoppingSwitchList('${l.id}')">
+    return `<button class="btn shop-list-tab${active?' primary':''}" data-list-id="${l.id}" draggable="true"
+      ondragstart="shopListDragStart(event,this)" ondragover="shopListDragOver(event,this)" ondragleave="shopListDragLeave(event,this)" ondrop="shopListDrop(event,this)" ondragend="shopListDragEnd(event,this)"
+      style="font-size:12px" onclick="shoppingSwitchList('${l.id}')" title="Drag to reorder">
       ${escHtml(l.name)} <span style="opacity:.55;margin-left:.15rem">${l.items.length}</span>
     </button>`;
   }).join('');
