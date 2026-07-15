@@ -2189,6 +2189,18 @@ function buildSlotsFor(data) {
 }
 // Returns the grouped/flat inventory HTML for one player's data. Section/chip state keys are prefixed
 // with the player's entityId so multiple sections coexist without colliding.
+// Combine stacks of the same item (same id) within one location into a single card with the summed
+// quantity — so e.g. five "T4 Fine Wood Log" stacks show as one "4,746". (Grouped view only; Flat keeps
+// every individual stack.)
+function mergeInvSlots(slots){
+  const byItem = {}, order = [];
+  slots.forEach(s => {
+    const key = String(s.itemId) + ':' + (s.itemType ?? 0);
+    if (!byItem[key]){ byItem[key] = { ...s, quantity: +s.quantity || 0 }; order.push(key); }
+    else byItem[key].quantity += (+s.quantity || 0);
+  });
+  return order.map(k => byItem[k]);
+}
 function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data);
   q = (q||'').toLowerCase();
@@ -2225,14 +2237,15 @@ function inventoryContentHtml(data, q, pfx) {
       const sub = isBank ? `R${loc.regionId||'?'} · ${loc.claimName||''}` : (loc.claimName && loc.locationType==='housing' ? loc.claimName : '');
       const lk = _invLocId(secKey, loc);
       const col = !!invLocCollapsed[lk];
+      const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
       return `<div class="inv-chip-content">
         <div class="inv-locb-hdr" onclick="toggleInvLocBlock('${lk}')">
           <i class="ti ti-chevron-down" id="inv-locc-${lk}" style="font-size:12px;color:var(--text3);flex-shrink:0;transition:transform .2s;${col?'transform:rotate(-90deg)':''}"></i>
           <span class="inv-locb-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-locb-sub">${escHtml(sub)}</span>`:''}
           <span style="flex:1"></span>
-          <span class="inv-locb-count">${loc.slots.length} item${loc.slots.length!==1?'s':''}</span>
+          <span class="inv-locb-count">${mSlots.length} item${mSlots.length!==1?'s':''}</span>
         </div>
-        <div id="inv-locb-${lk}"${col?' style="display:none"':''}>${renderItemGrid(loc.slots)}</div>
+        <div id="inv-locb-${lk}"${col?' style="display:none"':''}>${renderItemGrid(mSlots)}</div>
       </div>`;
     };
     const content = expandedLocs.length ? expandedLocs.map(locBlock).join('') : '';
