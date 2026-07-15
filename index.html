@@ -1534,6 +1534,10 @@ function applyPlayerOnlineDots(){
       dot.style.boxShadow = on ? '0 0 5px var(--green-light)' : 'none';
       dot.title = on === true ? 'Online' : on === false ? 'Offline' : 'Status unknown';
     });
+    document.querySelectorAll(`[data-online-icon="${id}"]`).forEach(ic => {   // player-section header person icons
+      ic.style.color = on === true ? 'var(--green-light)' : on === false ? 'var(--text3)' : 'var(--teal-light)';
+      ic.title = on === true ? 'Online' : on === false ? 'Offline' : '';
+    });
   });
 }
 async function refreshPlayerOnline(){
@@ -1598,7 +1602,7 @@ function playerSection(p, innerHtml, bodyId){
   return `<div class="player-section" style="margin-bottom:1.1rem;border:1px solid var(--border);border-radius:8px;overflow:hidden">
     <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
       <i class="ti ti-chevron-${collapsed?'right':'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
-      <i class="ti ti-user" style="color:var(--teal-light);font-size:14px"></i>
+      <i class="ti ti-user" data-online-icon="${id}" title="${(()=>{const o=playerIsOnline(p);return o===true?'Online':o===false?'Offline':'';})()}" style="color:${(()=>{const o=playerIsOnline(p);return o===true?'var(--green-light)':o===false?'var(--text3)':'var(--teal-light)';})()};font-size:14px"></i>
       <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
       <span class="badge psec-paused" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
       <span style="flex:1"></span>
