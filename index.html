@@ -944,14 +944,29 @@ let marketLoading  = false;      // a market load/refresh is currently in flight
 let marketServerOk = null;       // null=unknown · true=backend /market available · false=use /api passthrough
 let dealsScannedAt = 0;          // ms timestamp of last completed deal scan
 const RESULT_TTL = 5 * 60 * 1000; // results older than this trigger a silent background refresh
+let marketDataTs = 0;             // server's market-data timestamp (from /market ts) — for the "last updated" label
+
+// ── "Last updated X ago" labels (Market + Deals) — self-updating every 30s ──
+function fmtAgo(ts){
+  if (!ts) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - +ts) / 1000));
+  if (s < 45) return 'just now';
+  if (s < 5400){ const m = Math.round(s/60); return `${m} min${m!==1?'s':''} ago`; }
+  const h = Math.round(s/3600); return `${h} hr${h!==1?'s':''} ago`;
+}
+let _agoTicker = null;
+function ensureAgoTicker(){ if (_agoTicker) return; _agoTicker = setInterval(() => { document.querySelectorAll('.ago-label[data-ago]').forEach(el => { el.textContent = fmtAgo(+el.dataset.ago||0); }); }, 30000); }
+function updateMarketUpdatedLabel(){ const l = document.getElementById('mkt-updated-lbl'); if (l){ l.dataset.ago = marketDataTs||0; l.textContent = fmtAgo(marketDataTs); } }
+function updateDealsUpdatedLabel(){ const l = document.getElementById('deals-updated-lbl'); if (l){ l.dataset.ago = dealsScannedAt||0; l.textContent = fmtAgo(dealsScannedAt); } }
+function refreshMarket(){ if (marketLoading) return; loadAllMarketItems(true, true); }   // force a fresh server fetch, keep current results on screen
 
 // Prefer the backend's shared market cache (/market); fall back to the bitjita passthrough. The full
 // list works for every filter since renderMarketResults applies the buy/sell/tier/rarity filters itself.
-async function fetchMarketList(){
+async function fetchMarketList(force){
   if (marketServerOk !== false){
     try {
-      const r = await fetch(`${API}/market`);
-      if (r.ok){ const j = await r.json(); if (j && Array.isArray(j.items) && j.items.length){ marketServerOk = true; return j.items; } }
+      const r = await fetch(`${API}/market${force?'?force=1':''}`);
+      if (r.ok){ const j = await r.json(); if (j && Array.isArray(j.items) && j.items.length){ marketServerOk = true; marketDataTs = j.ts || Date.now(); return j.items; } }
       marketServerOk = false;
     } catch(e){ marketServerOk = false; }
   }
@@ -959,6 +974,7 @@ async function fetchMarketList(){
   if (marketOrderFilter === 'buy')  url += '&hasBuyOrders=true';
   if (marketOrderFilter === 'sell') url += '&hasSellOrders=true';
   const d = await apiFetch(url);
+  marketDataTs = Date.now();
   return (d.data && d.data.items) ? d.data.items : (d.items || []);
 }
 
@@ -4073,6 +4089,8 @@ function renderMarket() {
         ${['Common','Uncommon','Rare','Epic','Legendary','Mythic'].map(r=>`<option value="${r}"${marketRarityFilter===r?' selected':''}>${r}</option>`).join('')}
       </select>
       <span style="flex:1"></span>
+      <span style="font-size:11px;color:var(--text3);white-space:nowrap">Updated <span class="ago-label" id="mkt-updated-lbl" data-ago="${marketDataTs||0}">${fmtAgo(marketDataTs)}</span></span>
+      <button class="btn" onclick="refreshMarket()" style="font-size:12px" title="Fetch fresh market data now"><i class="ti ti-refresh"></i> Refresh</button>
       <div style="position:relative">
         <button id="mkt-hidden-btn" class="btn" onclick="toggleRemovedPanel(this)" style="font-size:12px">
           <i class="ti ti-eye-off"></i> Hidden items <span id="mkt-hidden-count"></span>
@@ -4080,6 +4098,7 @@ function renderMarket() {
       </div>
     </div>
     <div id="market-results">${loading()}</div>`;
+  ensureAgoTicker();
   document.getElementById('market-q').addEventListener('input', () => {
     clearTimeout(marketSearchTimeout);
     marketSearchTimeout = setTimeout(renderMarketResults, 200);
@@ -4104,14 +4123,14 @@ function renderMarket() {
 // background=true → keep the currently-displayed results on screen and only swap in fresh data when
 // the refresh completes (no spinner, no blank). background=false → this is a deliberate (re)load
 // (first visit or filter change), so show the loading indicator.
-async function loadAllMarketItems(background) {
+async function loadAllMarketItems(background, force) {
   if (marketLoading) return;
   marketLoading = true;
   const haveData = marketRawItems.length > 0;
   const resEl = () => document.getElementById('market-results');
   if (!background) { marketItemDetailCache = {}; const e = resEl(); if (e) e.innerHTML = loading(); }
   try {
-    const allItems = await fetchMarketList();
+    const allItems = await fetchMarketList(force);
     if (marketSelectedRegion && marketOrderFilter !== 'all') {
       // The list API ignores regionId — we must verify each item's detail orders individually.
       await verifyMarketRegion(allItems, background);
@@ -4126,6 +4145,7 @@ async function loadAllMarketItems(background) {
     if (e2 && !haveData) e2.innerHTML = errBox(e);  // keep old results visible if a refresh fails
   } finally {
     marketLoading = false;
+    updateMarketUpdatedLabel();
   }
 }
 
@@ -4234,6 +4254,7 @@ function renderDeals() {
             style="width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px 6px 28px;font-size:12px;outline:none"
             oninput="dealsNameFilter=this.value.toLowerCase().trim();renderDealResults()">
         </div>
+        <span style="font-size:11px;color:var(--text3);white-space:nowrap">Updated <span class="ago-label" id="deals-updated-lbl" data-ago="${dealsScannedAt||0}">${fmtAgo(dealsScannedAt)}</span></span>
         <button class="btn primary" onclick="startDealScan()" id="deals-scan-btn" ${dealsScanning?'disabled':''}>
           ${dealsScanning ? `<i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i> ${dealsData.length ? 'Refreshing…' : 'Scanning…'}` : '<i class="ti ti-radar"></i> Scan for deals'}
         </button>
@@ -4286,6 +4307,7 @@ function renderDeals() {
   // away — even while a background refresh is running — so the tab is never blank on return.
   if (!dealsData.length) loadDealsCache();
   if (dealsData.length) renderDealResults();
+  ensureAgoTicker();
   loadServerDeals(); // prefer the backend precompute; silently falls back to the client scan
 }
 
@@ -4531,6 +4553,7 @@ function dealTravelHtml(d){
 function renderDealResults() {
   const el = document.getElementById('deals-results');
   if (!el) return;
+  updateDealsUpdatedLabel();
   const q   = (dealsNameFilter||'').toLowerCase().trim();
   const bf  = (dealsBuyFrom||'').toLowerCase().trim();
   const st  = (dealsSellTo||'').toLowerCase().trim();
@@ -5902,7 +5925,10 @@ async function bcInitMap(){
   // No `bounds` option: with the negative-Y hex projection it wrongly rejects every tile;
   // out-of-range tiles simply 404 and render blank via errorTileUrl.
   const de = [[0,0],[BC_MAP_H, BC_MAP_W]];
-  L.tileLayer(`${API}/bcexports/maps/terrain/tiles/{z}/{x}/{y}.webp`, {
+  // Terrain/road tiles load straight from bitjita (they're plain images, CORS-open) instead of through
+  // our proxy — that's the single biggest bandwidth saving, since map tiles never touch the host.
+  const BC_TILE_BASE = 'https://exports.bitjita.com/bitcraftmap';
+  L.tileLayer(`${BC_TILE_BASE}/maps/terrain/tiles/{z}/{x}/{y}.webp`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
     tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true
   }).addTo(bcMap);
@@ -6000,7 +6026,7 @@ async function bcInitMap(){
   // (added to the map by bcApplyLayerState)
 
   // ----- Roads (tiled overlay) -----
-  const roadsLayer = L.tileLayer(`${API}/bcexports/roads/tiles/{z}/{x}/{y}.webp`, {
+  const roadsLayer = L.tileLayer(`${BC_TILE_BASE}/roads/tiles/{z}/{x}/{y}.webp`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
     tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true, opacity:0.9
   });

@@ -23,9 +23,9 @@ process.on('uncaughtException',  (e) => console.error('[uncaughtException]',  (e
 // Dependency-free on purpose (only Node built-ins) so it stays "just run node proxy.js".
 // ────────────────────────────────────────────────────────────────────────────
 
-const MARKET_TTL = 3 * 60 * 1000;   // market list refresh cadence
+const MARKET_TTL = 15 * 60 * 1000;  // market list cache lifetime (served from cache within this window; refetched on demand after)
 const DETAIL_TTL = 5 * 60 * 1000;   // per-item detail cache TTL
-const DEALS_TTL  = 5 * 60 * 1000;   // recompute deals at most this often
+const DEALS_TTL  = 5 * 60 * 1000;   // recompute deals at most this often (only when the Deals tab asks)
 
 // Fetch JSON from bitjita (same upstream + headers the passthrough uses).
 function bitjitaJson(reqPath) {
@@ -310,9 +310,10 @@ http.createServer((req, res) => {
   // ── Tier 1 backend endpoints ──────────────────────────────────────────────
 
   // Cached market list (shared across all clients/reloads). { ts, items }
-  if (req.url === '/market') {
-    getMarketList().then(items => sendJson(res, 200, { ts: marketList.ts, items }))
-                   .catch(() => sendJson(res, 502, { error: 'market unavailable', items: [] }));
+  if (req.url === '/market' || req.url.startsWith('/market?')) {
+    const force = new URL(req.url, 'http://x').searchParams.get('force') === '1';   // client "Refresh" bypasses the cache
+    getMarketList(force).then(items => sendJson(res, 200, { ts: marketList.ts, items }))
+                        .catch(() => sendJson(res, 502, { error: 'market unavailable', items: [] }));
     return;
   }
 
@@ -375,9 +376,10 @@ http.createServer((req, res) => {
       method: 'GET',
       headers: { 'User-Agent': 'BitcraftCompanion/1.0' }
     }, (apiRes) => {
+      const isTile = /\.webp(\?|$)/.test(req.url);   // terrain/road tiles never change → cache hard
       res.writeHead(apiRes.statusCode, {
         'Content-Type': apiRes.headers['content-type'] || 'application/octet-stream',
-        'Cache-Control': apiRes.headers['cache-control'] || 'max-age=3600'
+        'Cache-Control': isTile ? 'public, max-age=604800, immutable' : (apiRes.headers['cache-control'] || 'max-age=3600')
       });
       apiRes.pipe(res);
     });
@@ -422,10 +424,9 @@ http.createServer((req, res) => {
   proxy.end();
 }).listen(PORT, () => {
   console.log(`Bitcraft proxy running on http://localhost:${PORT}`);
-  // Warm the caches and compute deals shortly after startup (don't block listen).
-  setTimeout(() => { getMarketList().then(() => computeDeals()).catch(e => console.error('[warm]', e && e.message)); }, 500);
-  setInterval(() => { getMarketList(true).catch(() => {}); }, MARKET_TTL);
-  setInterval(() => { try { maybeComputeDeals(); } catch (e) {} }, 60 * 1000);
+  // Bandwidth-lazy: no background market refresh or deal precompute. The market list is fetched on demand
+  // (and cached for MARKET_TTL); deals are computed only when the Deals tab requests /deals and they're
+  // stale. This avoids fetching ~2,400 market items every few minutes 24/7 whether or not anyone's using it.
   // Flush accumulated price-history snapshots to disk periodically (not on every record).
   setInterval(() => { if (historyDirty) { try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(HISTORY_FILE, JSON.stringify(history)); historyDirty = false; } catch (e) {} } }, 60 * 1000);
 });
