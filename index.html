@@ -3827,9 +3827,27 @@ async function relayVehicleInvs(playerId, region){
   const rows = await relayQuery(region, deps.map(d => `SELECT * FROM inventory_state WHERE owner_entity_id = ${d.entity_id}`), readInvRow);
   return rows.filter(x => x.items.length).map(x => ({ ...x, nickname: nick[x.owner_entity_id.toString()] || '' }));
 }
+// House storage — one pre-joined call returning every storage/cargo container inside the house.
+async function relayHousingInvs(id){
+  const res = await fetch(`${RELAY_HTTP}/player/${id}/housing`);
+  if (!res.ok) return [];
+  const j = await res.json();
+  const houseName = (j.house && j.house.name) || 'Housing';
+  const region = (j.house && j.house.region != null) ? j.house.region : null;
+  return (j.buildings||[]).filter(b => (b.items||[]).length).map(b => ({
+    entityId: String(b.entity_id),
+    inventoryName: b.nickname || b.name || 'Storage',
+    claimName: houseName, regionId: region != null ? region : regionOfEntity(b.entity_id),
+    _isHousing: true,
+    pockets: (b.items||[]).map(x => ({ contents: { itemId:x.item_id, itemType: x.item_type === 'Cargo' ? 1 : 0, quantity:x.quantity } }))
+  }));
+}
 async function fetchPlayerInvRelay(id){
   const defs = await loadGameItemDefs();
-  const res = await fetch(`${RELAY_HTTP}/player/${id}/inventory`);
+  const [res, housing] = await Promise.all([
+    fetch(`${RELAY_HTTP}/player/${id}/inventory`),
+    relayHousingInvs(id).catch(() => [])
+  ]);
   if (!res.ok) throw new Error('relay inventory HTTP ' + res.status);
   const j = await res.json();
   const mk = (entityId, name, claimName, items) => ({
@@ -3841,6 +3859,7 @@ async function fetchPlayerInvRelay(id){
     c.entity_id, c.nickname || c.name || c.category || 'Inventory', c.claim_name,
     (c.items||[]).map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 }))
   ));
+  housing.forEach(h => inventories.push(h));
   // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
   // (cache/wagon/deployable), so dedupe by entity id or their contents would be counted twice.
   const region = regionOfEntity(id);
@@ -3853,19 +3872,18 @@ async function fetchPlayerInvRelay(id){
       });
     } catch(e){}
   }
-  // Shallow copies: the housing merge below writes item metadata into these, and the defs are shared.
+  // Shallow copies: callers may write extra item metadata in, and the defs are shared/cached.
   return { inventories, items: { ...defs.items }, cargos: { ...defs.cargos } };
 }
 
 // ── TASKS ──
-// Fetch a player's full inventory, merged into one {inventories, items, cargos} structure — without
-// touching any global. Inventory comes from the relay; housing is still bitjita (the relay's HTTP
-// cache doesn't expose house contents yet), and bitjita also backstops a relay outage.
+// Fetch a player's full inventory as {inventories, items, cargos} — without touching any global.
+// The relay covers everything (personal, banks, house storage, vehicles); the bitjita path below is
+// only a fallback for when the relay is unreachable.
 async function fetchPlayerInv(id) {
-  let relayData = null;
-  try { relayData = await fetchPlayerInvRelay(id); } catch(e){ relayData = null; }
+  try { return await fetchPlayerInvRelay(id); } catch(e){ /* relay down → fall back to bitjita */ }
   const [d, housingList] = await Promise.all([
-    relayData ? Promise.resolve(relayData) : apiFetch(`/api/players/${id}/inventories`),
+    apiFetch(`/api/players/${id}/inventories`),
     apiFetch(`/api/players/${id}/housing`).catch(() => [])
   ]);
   const houses = Array.isArray(housingList) ? housingList.filter(h => !h.isEmpty) : [];
