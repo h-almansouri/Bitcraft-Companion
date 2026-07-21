@@ -3855,9 +3855,12 @@ async function fetchPlayerInvRelay(id){
     regionId: regionOfEntity(entityId),
     pockets: items.map(it => ({ contents: { itemId: it.item_id, itemType: it.item_type, quantity: it.quantity } }))
   });
-  const inventories = (j.inventories||[]).map(c => mk(
+  // Drop empty containers. The relay lists every bank you have access to (most hold nothing); the
+  // Inventory tab hides them naturally since it builds from slots, but the Planner/Tool-crafting/Tasks
+  // location chips iterate containers directly and would otherwise list ~25 empty Town Banks.
+  const inventories = (j.inventories||[]).filter(c => (c.items||[]).length).map(c => mk(
     c.entity_id, c.nickname || c.name || c.category || 'Inventory', c.claim_name,
-    (c.items||[]).map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 }))
+    c.items.map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 }))
   ));
   housing.forEach(h => inventories.push(h));
   // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
