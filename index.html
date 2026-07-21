@@ -2217,6 +2217,7 @@ function buildSlotsFor(data) {
       const n = invName.toLowerCase();
       let locationType = 'personal';
       if (inv._isHousing) locationType = 'housing';
+      else if (inv._isDeployable) locationType = 'personal';   // carts/boats/caches travel with the player
       else if (inv.claimName) locationType = n.includes('bank') ? 'bank' : 'storage';
       allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, meta });
     });
@@ -2328,13 +2329,12 @@ function inventoryContentHtml(data, q, pfx) {
     const collapsed = !!invSectionCollapsed[secKey];
     const selIdx = invSelectedChip[secKey] ?? -1;
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map((loc, i) => { const isBank = (loc.locationType==='bank'||loc.locationType==='storage'); const sub = isBank ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const chips = sorted.map((loc, i) => { const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     const expandedLocs = q ? sorted : (selIdx>=0 ? [sorted[selIdx]] : []);
     // Each expanded location renders as its own labelled, separately-bordered, collapsible block so items
     // from different inventories (e.g. two houses) never blend together — especially during a search.
     const locBlock = (loc) => {
-      const isBank = (loc.locationType==='bank'||loc.locationType==='storage');
-      const sub = isBank ? `R${loc.regionId||'?'} · ${loc.claimName||''}` : (loc.claimName && loc.locationType==='housing' ? loc.claimName : '');
+      const sub = !loc.claimName ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
       const lk = _invLocId(secKey, loc);
       const col = !!invLocCollapsed[lk];
       const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
@@ -4016,9 +4016,11 @@ async function fetchPlayerInvRelay(id){
   ]);
   if (!res.ok) throw new Error('relay inventory HTTP ' + res.status);
   const j = await res.json();
-  const mk = (entityId, name, claimName, items) => ({
+  // `deployable` = a cart/boat/cache the player owns and carries around. They report the claim they
+  // happen to be parked in, but they belong with the player's own stuff, not that claim's storage.
+  const mk = (entityId, name, claimName, items, deployable) => ({
     entityId: String(entityId), inventoryName: name, claimName: claimName || null,
-    regionId: regionOfEntity(entityId),
+    regionId: regionOfEntity(entityId), _isDeployable: !!deployable,
     pockets: items.map(it => ({ contents: { itemId: it.item_id, itemType: it.item_type, quantity: it.quantity } }))
   });
   // Drop empty containers. The relay lists every bank you have access to (most hold nothing); the
@@ -4026,7 +4028,8 @@ async function fetchPlayerInvRelay(id){
   // location chips iterate containers directly and would otherwise list ~25 empty Town Banks.
   const inventories = (j.inventories||[]).filter(c => (c.items||[]).length).map(c => mk(
     c.entity_id, c.nickname || c.name || c.category || 'Inventory', c.claim_name,
-    c.items.map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 }))
+    c.items.map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 })),
+    !/bank/i.test(c.category || '')
   ));
   housing.forEach(h => inventories.push(h));
   // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
@@ -4036,7 +4039,7 @@ async function fetchPlayerInvRelay(id){
       const have = new Set(inventories.map(i => String(i.entityId)));
       (await relayVehicleInvs(id, region)).forEach(v => {
         const eid = v.entity_id.toString();
-        if (!have.has(eid)) inventories.push(mk(eid, v.nickname || 'Vehicle', null, v.items));
+        if (!have.has(eid)) inventories.push(mk(eid, v.nickname || 'Vehicle', null, v.items, true));
       });
     } catch(e){}
   }
