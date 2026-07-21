@@ -102,7 +102,9 @@ main.planner-mode{max-width:none;padding:1rem}
 .badge-tier{background:var(--bg4);color:var(--text2)}
 .badge-sell{background:var(--red-dim);color:#f09595}
 .badge-buy{background:var(--green-dim);color:var(--green-light)}
-.ord-section-hdr{display:flex;align-items:center;gap:.5rem;margin:1rem 0 .6rem;padding:.5rem .85rem;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;font-weight:600;font-size:13px;color:var(--c,var(--text))}
+.ord-section-hdr{display:flex;align-items:center;gap:.5rem;margin:1rem 0 .6rem;padding:.5rem .85rem;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;font-weight:600;font-size:13px;color:var(--c,var(--text));cursor:pointer;user-select:none}
+.ord-section-hdr:hover{background:var(--bg3)}
+.ord-chev{font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s}
 .ord-row{display:flex;align-items:center;gap:.5rem;padding:.5rem .9rem;border-top:1px solid var(--border);font-size:12px}
 .ord-row-click{cursor:pointer}
 .ord-row-click:hover{background:var(--bg4)}
@@ -2400,6 +2402,17 @@ async function renderInventoryTab(silent) {
 let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders, collections }
 let ordersExpanded = new Set();  // order entityIds whose market order-book is expanded
 let ordersHistoryOpen = new Set();  // playerIds whose completed-trade history panel is open
+// Collapsed Orders-tab sections and per-town cards. Keyed by player so two tracked players don't share
+// state, and held outside the render so a refresh doesn't reopen what you closed. Absent = expanded.
+let ordCollapsed = new Set();
+function ordToggle(key){
+  const body = document.getElementById('ord-body-' + key), chev = document.getElementById('ord-chev-' + key);
+  if (!body) return;
+  const shut = !ordCollapsed.has(key);
+  if (shut) ordCollapsed.add(key); else ordCollapsed.delete(key);
+  body.style.display = shut ? 'none' : '';
+  if (chev) chev.style.transform = shut ? 'rotate(-90deg)' : '';
+}
 async function fetchPlayerMarket(id){
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
@@ -2421,22 +2434,23 @@ function ordersContentHtml(data, playerId){
   if (!orders.length && !collections.length)
     return hist + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No market orders or collections</span></div>';
 
+  const pk = String(playerId || 'x');
   const groupByLoc = arr => {
     const g = {};
-    arr.forEach(o => { const k = o.claimEntityId || o.claimName || '?'; if (!g[k]) g[k] = { name:o.claimName||'Unknown', regionId:o.regionId, regionName:o.regionName, items:[] }; g[k].items.push(o); });
+    arr.forEach(o => { const k = o.claimEntityId || o.claimName || '?'; if (!g[k]) g[k] = { key:String(k).replace(/[^\w-]/g,''), name:o.claimName||'Unknown', regionId:o.regionId, regionName:o.regionName, items:[] }; g[k].items.push(o); });
     return Object.values(g).sort((a,b) => b.items.length - a.items.length);
   };
   const icon = o => o.iconAssetName ? gameIconImg(o.iconAssetName, 22) : '';
   const tierB = o => (o.tier > 0) ? ocTierBadge(o.tier) : '';
   const nameCell = o => `<span class="ord-item">${icon(o)} <span class="ord-name">${escHtml(o.itemName||('Item '+o.itemId))}</span> ${tierB(o)}</span>`;
   const region = loc => `<span class="oc-region">${escHtml(loc.regionName||('R'+loc.regionId))} (R${loc.regionId})</span>`;
-  const locCard = (loc, rows, meta) => `<div class="craft-location-card">
-    <div class="craft-location-header" style="cursor:default">
+  const locCard = (key, loc, rows, meta) => { const col = ordCollapsed.has(key); return `<div class="craft-location-card">
+    <div class="craft-location-header" onclick="ordToggle('${key}')">
       <div class="craft-location-name"><i class="ti ti-map-pin"></i> <b>${escHtml(loc.name)}</b> ${region(loc)}</div>
-      <div class="craft-location-meta">${meta}</div>
+      <div class="craft-location-meta">${meta}<i class="ti ti-chevron-down ord-chev" id="ord-chev-${key}" style="${col?'transform:rotate(-90deg)':''}"></i></div>
     </div>
-    <div>${rows}</div>
-  </div>`;
+    <div id="ord-body-${key}"${col?' style="display:none"':''}>${rows}</div>
+  </div>`; };
   const orderRow = o => {
     const oid = String(o.entityId||'');
     const expanded = ordersExpanded.has(oid);
@@ -2451,29 +2465,27 @@ function ordersContentHtml(data, playerId){
     </div><div class="ord-expand" id="ord-exp-${oid}"></div>`;
   };
   const collRow = o => `<div class="ord-row">${nameCell(o)}<span style="flex:1"></span>${isCoin(o)?`<span class="ord-coins">${fmtCoin(num(o.quantity))}</span>`:`<span class="ord-qty">×${fmtCount(num(o.quantity))}</span>`}</div>`;
-  const sectionHdr = (label, ic, color, total) => `<div class="ord-section-hdr" style="--c:${color}"><i class="ti ${ic}"></i> <span>${label}</span><span style="flex:1"></span><span class="badge badge-tier">${total}</span></div>`;
+  const section = (key, label, ic, color, total, inner) => { const col = ordCollapsed.has(key); return `<div class="ord-section-hdr" style="--c:${color}" onclick="ordToggle('${key}')"><i class="ti ${ic}"></i> <span>${label}</span><span style="flex:1"></span><span class="badge badge-tier">${total}</span><i class="ti ti-chevron-down ord-chev" id="ord-chev-${key}" style="${col?'transform:rotate(-90deg)':''}"></i></div><div id="ord-body-${key}"${col?' style="display:none"':''}>${inner}</div>`; };
 
   let html = '';
   if (collections.length){
-    const groups = groupByLoc(collections);
-    html += sectionHdr('Collections to pick up', 'ti-coins', 'var(--amber-light)', collections.length);
-    html += groups.map(loc => {
+    const inner = groupByLoc(collections).map(loc => {
       const coinTotal = loc.items.filter(isCoin).reduce((s,o)=>s+num(o.quantity),0);
       const itemN = loc.items.filter(o=>!isCoin(o)).length;
       const meta = [coinTotal?`<span class="ord-coins">${fmtCoin(coinTotal)}</span>`:'', itemN?`<span class="badge badge-tier">${itemN} item${itemN!==1?'s':''}</span>`:''].filter(Boolean).join(' ');
-      return locCard(loc, loc.items.map(collRow).join(''), meta);
+      return locCard(`${pk}-coll-${loc.key}`, loc, loc.items.map(collRow).join(''), meta);
     }).join('');
+    html += section(`${pk}-coll`, 'Collections to pick up', 'ti-coins', 'var(--amber-light)', collections.length, inner);
   }
   if (orders.length){
-    const groups = groupByLoc(orders);
-    html += sectionHdr('Listed orders', 'ti-receipt-2', 'var(--text)', orders.length);
-    html += groups.map(loc => {
+    const inner = groupByLoc(orders).map(loc => {
       const s = loc.items.filter(o=>o.kind==='sell').length, b = loc.items.filter(o=>o.kind==='buy').length;
       const meta = `${s?`<span class="badge badge-sell">${s} sell</span>`:''} ${b?`<span class="badge badge-buy">${b} buy</span>`:''}`;
       // sells first, then buys, each by item name
       const rows = loc.items.slice().sort((a,b)=> (a.kind===b.kind ? (a.itemName||'').localeCompare(b.itemName||'') : (a.kind==='sell'?-1:1))).map(orderRow).join('');
-      return locCard(loc, rows, meta);
+      return locCard(`${pk}-ord-${loc.key}`, loc, rows, meta);
     }).join('');
+    html += section(`${pk}-ord`, 'Listed orders', 'ti-receipt-2', 'var(--text)', orders.length, inner);
   }
   return hist + html;
 }
