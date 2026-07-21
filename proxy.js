@@ -203,17 +203,31 @@ function slimDefs(rows) {
   });
   return out;
 }
+// equipment_desc.stats → { item_id: [[statIdx, value, isPct], …] }. Each raw stat is a tuple
+// [ [statIdx, {}], value, is_pct ] (the id is a SATS sum). statIdx indexes the game's stat enum.
+function slimEquip(rows) {
+  const out = {};
+  (Array.isArray(rows) ? rows : []).forEach(x => {
+    if (!x || x.item_id == null) return;
+    const stats = (x.stats || []).map(s => {
+      const id = Array.isArray(s[0]) ? s[0][0] : s[0];
+      return [+id || 0, +s[1] || 0, s[2] ? 1 : 0];
+    }).filter(s => s[1]);
+    if (stats.length) out[x.item_id] = stats;
+  });
+  return out;
+}
 async function getItemDefs() {
   if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
   itemDefsBuilding = (async () => {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL) { itemDefs = d; itemDefsBuilding = null; return d; }
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
-      const [items, cargos] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json')]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos) };
+      const [items, cargos, equip] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => [])]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip) };
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
@@ -398,8 +412,8 @@ http.createServer((req, res) => {
       const etag = '"idf-' + d.ts + '"';
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
       res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' });
-      res.end(JSON.stringify({ items: d.items, cargos: d.cargos }));
-    }).catch(() => sendJson(res, 502, { items: {}, cargos: {} }));
+      res.end(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {} }));
+    }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {} }));
     return;
   }
 

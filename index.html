@@ -402,7 +402,11 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .eq-slot{display:flex;align-items:center;gap:.4rem;padding:3px 2px;font-size:12px;border-top:1px solid var(--border)}
 .eq-slot:first-child{border-top:0}
 .eq-slot-lbl{width:78px;flex-shrink:0;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
-.eq-slot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.eq-slot-main{flex:1;min-width:0}
+.eq-slot-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.eq-slot-stats{font-size:10px;color:var(--text3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eq-totals{border-top:1px solid var(--border);padding:.4rem .7rem;font-size:10px;color:var(--text3);line-height:1.6}
+.eq-totals b{color:var(--teal-light);font-weight:600}
 .eq-empty{padding:.5rem .7rem;font-size:11px;color:var(--text3)}
 .inv-toggle{display:flex;gap:.4rem;margin-bottom:.75rem}
 .inv-toggle button{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:5px;padding:4px 12px;font-size:12px;cursor:pointer;transition:all .15s}
@@ -2238,26 +2242,36 @@ function equipmentSectionHtml(data, pfx){
   const eq = data && data.equipment;
   if (!eq || (!(eq.current||[]).length && !(eq.presets||[]).length)) return '';
   const { items = {}, cargos = {} } = data;
+  const equipDefs = (typeof gameItemDefs !== 'undefined' && gameItemDefs && gameItemDefs.equip) || {};
   const secKey = pfx + '|equipment';
   const collapsed = !!invSectionCollapsed[secKey];
+  const statText = st => `${fmtStatVal(st.value, st.isPct)} ${statLabel(st.i)}`;
   const slotRow = it => {
     const meta = (it.itemType === 1 ? cargos : items)[it.itemId] || {};
     const rar = (meta.rarityStr || '').toLowerCase();
+    const stats = (equipDefs[it.itemId] || []).map(([i, v, pct]) => statText({ i, value: v, isPct: !!pct }));
     return `<div class="eq-slot">
       <span class="eq-slot-lbl">${EQUIP_LABEL[it.slot] || it.slot}</span>
       ${gameIconImg(meta.iconAssetName, 20)}
-      <span class="eq-slot-name" title="${escHtml(meta.name || '')}">${escHtml(meta.name || ('Item ' + it.itemId))}</span>
+      <div class="eq-slot-main">
+        <div class="eq-slot-name" title="${escHtml(meta.name || '')}">${escHtml(meta.name || ('Item ' + it.itemId))}</div>
+        ${stats.length ? `<div class="eq-slot-stats" title="${escHtml(stats.join(' · '))}">${escHtml(stats.join(' · '))}</div>` : ''}
+      </div>
       ${meta.tier > 0 ? `<span class="badge badge-tier" style="font-size:9px;padding:0 4px">T${meta.tier}</span>` : ''}
       ${rar ? `<span class="badge ${rarityClass(rar)}" style="font-size:9px;padding:0 4px">${escHtml(cap(rar))}</span>` : ''}
     </div>`;
   };
-  const card = (title, slots, worn) => `<div class="eq-set${worn ? ' eq-set-on' : ''}">
+  const card = (title, slots, worn) => {
+    const totals = equipSetStats(slots, equipDefs);
+    return `<div class="eq-set${worn ? ' eq-set-on' : ''}">
     <div class="eq-set-hdr"><i class="ti ti-${worn ? 'shirt-filled' : 'shirt'}" style="font-size:13px"></i>${escHtml(title)}
       ${worn ? '<span class="eq-badge">EQUIPPED</span>' : ''}<span style="flex:1"></span>
       <span class="eq-count">${slots.length} piece${slots.length !== 1 ? 's' : ''}</span></div>
     ${slots.length ? `<div class="eq-slots">${EQUIP_ORDER.map(sl => { const it = slots.find(s => s.slot === sl); return it ? slotRow(it) : ''; }).join('')}</div>`
                    : '<div class="eq-empty">Nothing equipped</div>'}
+    ${totals.length ? `<div class="eq-totals"><b>Set totals</b> — ${totals.map(t => escHtml(statText(t))).join(' · ')}</div>` : ''}
   </div>`;
+  };
   const cards = [];
   if ((eq.current||[]).length) cards.push(card('Currently worn', eq.current, true));
   (eq.presets||[]).forEach(p => cards.push(card('Set ' + p.index, p.slots, false)));
@@ -3781,7 +3795,7 @@ async function loadGameItemDefs(){
   _gameItemDefsP = (async () => {
     const d = await apiFetch('/itemdefs');   // compact [name, tier, rarityIdx, tag, icon]
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
-    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}) };
+    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {} };
     _gameItemDefsP = null; return gameItemDefs;
   })();
   return _gameItemDefsP;
@@ -3892,6 +3906,26 @@ const EQUIP_ORDER = ['HeadClothing','TorsoClothing','HandClothing','BeltClothing
 const EQUIP_LABEL = { HeadClothing:'Head', TorsoClothing:'Torso', HandClothing:'Hands', BeltClothing:'Belt',
   LegClothing:'Legs', FeetClothing:'Feet', HeadArtifact:'Head artifact', TorsoArtifact:'Torso artifact',
   HandArtifact:'Hand artifact', FeetArtifact:'Feet artifact', MainHand:'Main hand', OffHand:'Off hand' };
+// The game's equipment stat enum, in order — equipment_desc stats reference it by index.
+const EQUIP_STAT_NAMES = ["MaxHealth","MaxStamina","PassiveHealthRegenRate","PassiveStaminaRegenRate","MovementMultiplier","SprintMultiplier","SprintStaminaDrain","Armor","CooldownMultiplier","HuntingWeaponPower","Strength","ColdProtection","HeatProtection","Evasion","ToolbeltSlots","CraftingSpeed","GatheringSpeed","BuildingSpeed","SatiationRegenRate","MaxSatiation","DefenseLevel","ForestrySpeed","CarpentrySpeed","MasonrySpeed","MiningSpeed","SmithingSpeed","ScholarSpeed","LeatherworkingSpeed","HuntingSpeed","TailoringSpeed","FarmingSpeed","FishingSpeed","CookingSpeed","ForagingSpeed","ForestryPower","CarpentryPower","MasonryPower","MiningPower","SmithingPower","ScholarPower","LeatherworkingPower","HuntingPower","TailoringPower","FarmingPower","FishingPower","CookingPower","ForagingPower","ActiveHealthRegenRate","ActiveStaminaRegenRate","ClimbProficiency","ExperienceRate","Accuracy","MaxTeleportationEnergy","TeleportationEnergyRegenRate","ConstructionPower","ForestryCritChance","CarpentryCritChance","MasonryCritChance","MiningCritChance","SmithingCritChance","ScholarCritChance","LeatherworkingCritChance","HuntingCritChance","TailoringCritChance","FarmingCritChance","FishingCritChance","ForagingCritChance","ForestryCritMultiplier","CarpentryCritMultiplier","MasonryCritMultiplier","MiningCritMultiplier","SmithingCritMultiplier","ScholarCritMultiplier","LeatherworkingCritMultiplier","HuntingCritMultiplier","TailoringCritMultiplier","FarmingCritMultiplier","FishingCritMultiplier","ForagingCritMultiplier","HexiteGatheringPower","HexiteGatheringSpeed","HexiteGatheringCritChance","HexiteGatheringCritMultiplier","CartSpeed","MountSpeed","BoatSpeed"];
+function statLabel(i){
+  const n = EQUIP_STAT_NAMES[i]; if (!n) return 'Stat ' + i;
+  return n.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/ Multiplier$/,'').replace(/ Rate$/,'').trim();
+}
+function fmtStatVal(v, isPct){
+  const n = isPct ? v * 100 : v;                 // is_pct values are fractions (0.04 = 4%)
+  const s = Math.round(n * 100) / 100;
+  return (n > 0 ? '+' : '') + s + (isPct ? '%' : '');
+}
+// Sum an equipment set's stats into one ordered list: [{i, value, isPct}]
+function equipSetStats(slots, equipDefs){
+  const acc = {};
+  (slots||[]).forEach(s => (equipDefs[s.itemId] || []).forEach(([i, v, pct]) => {
+    const k = i + '|' + pct;
+    (acc[k] = acc[k] || { i, isPct: !!pct, value: 0 }).value += v;
+  }));
+  return Object.values(acc).sort((a,b) => Math.abs(b.value) - Math.abs(a.value));
+}
 // equipment_slots: Array<{ item: Sum[some(itemstack)|none], primary: Sum[slot…] }>
 function readEquipSlots(r){
   const n = r.u32(); const out = [];
