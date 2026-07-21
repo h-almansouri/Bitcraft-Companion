@@ -174,6 +174,57 @@ function maybeComputeDeals() {
   if (!dealsCache.computing && (Date.now() - dealsCache.ts) > DEALS_TTL) computeDeals();
 }
 
+// ── Game item definitions (name/icon/tier/rarity/tag keyed by RAW GAME item id) ──────────────
+// The bitcraftsync relay returns raw game item ids; /crafting-data uses a DIFFERENT id space, so it
+// can't resolve them. BitCraftToolBox mirrors the game's item_desc/cargo_desc with the right ids.
+// Fetched once, slimmed to compact arrays [name, tier, rarityIdx, tag, icon], cached in RAM + on disk.
+const ITEMDEFS_FILE = path.join(DATA_DIR, 'itemdefs.json');
+const ITEMDEFS_TTL = 7 * 24 * 60 * 60 * 1000;   // game data only changes on patches
+const GAMEDATA_PATH = '/BitCraftToolBox/BitCraft_GameData/refs/heads/sats-json/static/';
+let itemDefs = null, itemDefsBuilding = null;
+function ghJson(file) {
+  return new Promise((resolve, reject) => {
+    const r = https.get({ hostname: 'raw.githubusercontent.com', path: GAMEDATA_PATH + file, headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, res => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      const chunks = []; res.on('data', c => chunks.push(c));
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
+    });
+    r.on('error', reject);
+    r.setTimeout(45000, () => r.destroy(new Error('timeout')));
+  });
+}
+function slimDefs(rows) {
+  const out = {};
+  (Array.isArray(rows) ? rows : []).forEach(x => {
+    if (x && x.id != null) {
+      const rar = Array.isArray(x.rarity) ? x.rarity[0] : x.rarity;   // SATS sum: [index, {}]
+      out[x.id] = [x.name || '', x.tier != null ? x.tier : -1, +rar || 0, x.tag || '', x.icon_asset_name || ''];
+    }
+  });
+  return out;
+}
+async function getItemDefs() {
+  if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
+  if (itemDefsBuilding) return itemDefsBuilding;
+  itemDefsBuilding = (async () => {
+    try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
+      const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL) { itemDefs = d; itemDefsBuilding = null; return d; }
+    } catch (e) { /* no/stale disk cache — rebuild */ }
+    try {
+      const [items, cargos] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json')]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos) };
+      itemDefs = built;
+      try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
+      return built;
+    } catch (e) {
+      if (itemDefs) return itemDefs;                       // serve stale rather than nothing
+      return { ts: 0, items: {}, cargos: {} };
+    } finally { itemDefsBuilding = null; }
+  })();
+  return itemDefsBuilding;
+}
+
 // ── Preference storage (JSON file; survives reloads, cross-device, no localStorage quota) ──
 function prefsPath() { return path.join(DATA_DIR, 'prefs.json'); }
 function readPrefs() {
@@ -336,6 +387,19 @@ http.createServer((req, res) => {
   if (req.url === '/deals/refresh') {
     computeDeals();
     sendJson(res, 200, { ts: dealsCache.ts, computing: true });
+    return;
+  }
+
+  // Game item definitions keyed by RAW GAME item id — lets the client resolve the item ids the
+  // bitcraftsync relay returns (names/icons/tier/rarity) without calling bitjita. Long-cached + ETag,
+  // so it's a one-time download per client per game patch.
+  if (req.url === '/itemdefs' || req.url.startsWith('/itemdefs?')) {
+    getItemDefs().then(d => {
+      const etag = '"idf-' + d.ts + '"';
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' });
+      res.end(JSON.stringify({ items: d.items, cargos: d.cargos }));
+    }).catch(() => sendJson(res, 502, { items: {}, cargos: {} }));
     return;
   }
 
