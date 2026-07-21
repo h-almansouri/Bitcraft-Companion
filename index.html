@@ -390,6 +390,20 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .inv-item-name{font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inv-item-tag{font-size:10px;color:var(--text3);margin-top:1px}
 .inv-item-qty{font-size:13px;font-weight:600;color:var(--teal-light);flex-shrink:0}
+/* Equipment (worn gear + saved presets) */
+.eq-sets{display:flex;gap:.7rem;flex-wrap:wrap;padding:.5rem}
+.eq-set{flex:1;min-width:250px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.eq-set-on{border-color:var(--green-light);box-shadow:0 0 0 1px var(--green-dim)}
+.eq-set-hdr{display:flex;align-items:center;gap:.4rem;padding:.45rem .7rem;background:var(--bg3);font-size:12px;font-weight:600;color:var(--text)}
+.eq-set-on .eq-set-hdr{background:var(--green-dim)}
+.eq-badge{font-size:9px;font-weight:700;letter-spacing:.04em;background:var(--green-light);color:#0d1117;border-radius:10px;padding:1px 7px}
+.eq-count{font-size:10px;color:var(--text3);font-weight:400}
+.eq-slots{padding:.3rem .5rem .45rem}
+.eq-slot{display:flex;align-items:center;gap:.4rem;padding:3px 2px;font-size:12px;border-top:1px solid var(--border)}
+.eq-slot:first-child{border-top:0}
+.eq-slot-lbl{width:78px;flex-shrink:0;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
+.eq-slot-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.eq-empty{padding:.5rem .7rem;font-size:11px;color:var(--text3)}
 .inv-toggle{display:flex;gap:.4rem;margin-bottom:.75rem}
 .inv-toggle button{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:5px;padding:4px 12px;font-size:12px;cursor:pointer;transition:all .15s}
 .inv-toggle button.active{background:var(--bg4);border-color:var(--border2);color:var(--text)}
@@ -2217,12 +2231,53 @@ function mergeInvSlots(slots){
   });
   return order.map(k => byItem[k]);
 }
+// Worn gear + saved loadouts, as a collapsible block at the top of the Inventory tab. The set that's
+// actually on the player (equipment_state) is accented green and badged — the presets' own `active`
+// flag can't be trusted for that.
+function equipmentSectionHtml(data, pfx){
+  const eq = data && data.equipment;
+  if (!eq || (!(eq.current||[]).length && !(eq.presets||[]).length)) return '';
+  const { items = {}, cargos = {} } = data;
+  const secKey = pfx + '|equipment';
+  const collapsed = !!invSectionCollapsed[secKey];
+  const slotRow = it => {
+    const meta = (it.itemType === 1 ? cargos : items)[it.itemId] || {};
+    const rar = (meta.rarityStr || '').toLowerCase();
+    return `<div class="eq-slot">
+      <span class="eq-slot-lbl">${EQUIP_LABEL[it.slot] || it.slot}</span>
+      ${gameIconImg(meta.iconAssetName, 20)}
+      <span class="eq-slot-name" title="${escHtml(meta.name || '')}">${escHtml(meta.name || ('Item ' + it.itemId))}</span>
+      ${meta.tier > 0 ? `<span class="badge badge-tier" style="font-size:9px;padding:0 4px">T${meta.tier}</span>` : ''}
+      ${rar ? `<span class="badge ${rarityClass(rar)}" style="font-size:9px;padding:0 4px">${escHtml(cap(rar))}</span>` : ''}
+    </div>`;
+  };
+  const card = (title, slots, worn) => `<div class="eq-set${worn ? ' eq-set-on' : ''}">
+    <div class="eq-set-hdr"><i class="ti ti-${worn ? 'shirt-filled' : 'shirt'}" style="font-size:13px"></i>${escHtml(title)}
+      ${worn ? '<span class="eq-badge">EQUIPPED</span>' : ''}<span style="flex:1"></span>
+      <span class="eq-count">${slots.length} piece${slots.length !== 1 ? 's' : ''}</span></div>
+    ${slots.length ? `<div class="eq-slots">${EQUIP_ORDER.map(sl => { const it = slots.find(s => s.slot === sl); return it ? slotRow(it) : ''; }).join('')}</div>`
+                   : '<div class="eq-empty">Nothing equipped</div>'}
+  </div>`;
+  const cards = [];
+  if ((eq.current||[]).length) cards.push(card('Currently worn', eq.current, true));
+  (eq.presets||[]).forEach(p => cards.push(card('Set ' + p.index, p.slots, false)));
+  const total = ((eq.current||[]).length ? 1 : 0) + (eq.presets||[]).length;
+  return `<div class="inv-group">
+    <div class="inv-group-header" onclick="toggleInvSection('${secKey}')">
+      <span class="inv-group-name"><i class="ti ti-shirt"></i>Equipment</span>
+      <span class="inv-group-meta" style="font-size:11px;color:var(--text3)">${total} set${total !== 1 ? 's' : ''}</span>
+      <i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i>
+    </div>
+    <div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="eq-sets">${cards.join('')}</div></div>
+  </div>`;
+}
 function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data);
   q = (q||'').toLowerCase();
-  if (!allSlots.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
+  const equip = q ? '' : equipmentSectionHtml(data, pfx);   // hidden while searching, so results stay focused
+  if (!allSlots.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
   const filtered = q ? allSlots.filter(s => (s.meta?.name||'').toLowerCase().includes(q) || (s.meta?.tag||'').toLowerCase().includes(q)) : allSlots;
-  if (!filtered.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
+  if (!filtered.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
   // Sort by tier (untiered sinks to the bottom), then name; accent each card with its tier colour.
   const invTierKey = m => (m && m.tier > 0) ? m.tier : 99;
   const invTierCol = m => (m && m.tier > 0) ? TIER_COLORS[Math.min(m.tier, TIER_COLORS.length-1)].c : 'var(--border)';
@@ -2267,7 +2322,7 @@ function inventoryContentHtml(data, q, pfx) {
     const content = expandedLocs.length ? expandedLocs.map(locBlock).join('') : '';
     return `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${secKey}')"><span class="inv-group-name"><i class="ti ${icon}"></i>${title}</span><span class="inv-group-meta"></span><i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i></div><div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="inv-chips-row">${chips.join('')}</div>${content}</div></div>`;
   }
-  return renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage');
+  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage');
 }
 function fillPlayerInvCached(entityId) {
   const body = document.getElementById('psec-inv-' + entityId);
@@ -3787,14 +3842,14 @@ function relayDecodeRows(b, rowFn){
   const r = bsRead(b); r.o = 2; r.u32(); r.u32();
   const nTables = r.u32(); const rows = [];
   for (let t=0;t<nTables;t++){
-    r.str();
+    const table = r.str();     // passed to rowFn so one subscription can span several tables
     const hint = r.u8(); let offsets = null, fixed = 0;
     if (hint === 0) fixed = r.u16(); else { const n = r.u32(); offsets = []; for (let i=0;i<n;i++) offsets.push(Number(r.u64())); }
     const data = r.sub(r.u32());
     const starts = offsets || (fixed ? Array.from({length:Math.floor(data.length/fixed)},(_,i)=>i*fixed) : (data.length?[0]:[]));
     for (let i=0;i<starts.length;i++){
       const end = (i+1 < starts.length) ? starts[i+1] : data.length;
-      try { rows.push(rowFn(bsRead(data.subarray(starts[i], end)))); } catch(e){ /* skip malformed row */ }
+      try { rows.push(rowFn(bsRead(data.subarray(starts[i], end)), table)); } catch(e){ /* skip malformed row */ }
     }
   }
   return rows;
@@ -3827,6 +3882,47 @@ async function relayVehicleInvs(playerId, region){
   const rows = await relayQuery(region, deps.map(d => `SELECT * FROM inventory_state WHERE owner_entity_id = ${d.entity_id}`), readInvRow);
   return rows.filter(x => x.items.length).map(x => ({ ...x, nickname: nick[x.owner_entity_id.toString()] || '' }));
 }
+// ── Equipment: worn gear (equipment_state) + saved loadouts (equipment_preset_state) ──
+// Not in any HTTP cache route, so both come over the WS in a single subscription. Note the presets'
+// `active` flag is false even for the gear actually being worn — equipment_state is the live set.
+const EQUIP_SLOTS = ['MainHand','OffHand','HeadArtifact','TorsoArtifact','HandArtifact','FeetArtifact',
+  'HeadClothing','TorsoClothing','HandClothing','BeltClothing','LegClothing','FeetClothing','None'];
+const EQUIP_ORDER = ['HeadClothing','TorsoClothing','HandClothing','BeltClothing','LegClothing','FeetClothing',
+  'HeadArtifact','TorsoArtifact','HandArtifact','FeetArtifact','MainHand','OffHand'];
+const EQUIP_LABEL = { HeadClothing:'Head', TorsoClothing:'Torso', HandClothing:'Hands', BeltClothing:'Belt',
+  LegClothing:'Legs', FeetClothing:'Feet', HeadArtifact:'Head artifact', TorsoArtifact:'Torso artifact',
+  HandArtifact:'Hand artifact', FeetArtifact:'Feet artifact', MainHand:'Main hand', OffHand:'Off hand' };
+// equipment_slots: Array<{ item: Sum[some(itemstack)|none], primary: Sum[slot…] }>
+function readEquipSlots(r){
+  const n = r.u32(); const out = [];
+  for (let i=0;i<n;i++){
+    let item = null;
+    if (r.u8() === 0){                                   // item = some
+      const itemId = r.i32(), quantity = r.i32();
+      const itemType = r.u8();                           // 0 Item · 1 Cargo
+      if (r.u8() === 0) r.i32();                         // durability = some(i32)
+      item = { itemId, itemType, quantity };
+    }
+    const slot = EQUIP_SLOTS[r.u8()] || 'None';
+    if (item) out.push({ slot, ...item });
+  }
+  return out;
+}
+async function relayEquipment(playerId, region){
+  const rows = await relayQuery(region, [
+    `SELECT * FROM equipment_state WHERE entity_id = ${playerId}`,
+    `SELECT * FROM equipment_preset_state WHERE player_entity_id = ${playerId}`
+  ], (r, table) => {
+    if (table === 'equipment_state'){ r.u64(); return { kind:'current', slots: readEquipSlots(r) }; }
+    r.u64(); r.u64(); const index = r.i32(); const active = r.bool();   // entity, player, index, active
+    return { kind:'preset', index, active, slots: readEquipSlots(r) };
+  });
+  return {
+    current: (rows.find(x => x.kind === 'current') || {}).slots || [],
+    presets: rows.filter(x => x.kind === 'preset').sort((a,b) => a.index - b.index)
+  };
+}
+
 // House storage — one pre-joined call returning every storage/cargo container inside the house.
 async function relayHousingInvs(id){
   const res = await fetch(`${RELAY_HTTP}/player/${id}/housing`);
@@ -3844,9 +3940,11 @@ async function relayHousingInvs(id){
 }
 async function fetchPlayerInvRelay(id){
   const defs = await loadGameItemDefs();
-  const [res, housing] = await Promise.all([
+  const region = regionOfEntity(id);
+  const [res, housing, equipment] = await Promise.all([
     fetch(`${RELAY_HTTP}/player/${id}/inventory`),
-    relayHousingInvs(id).catch(() => [])
+    relayHousingInvs(id).catch(() => []),
+    region != null ? relayEquipment(id, region).catch(() => null) : Promise.resolve(null)
   ]);
   if (!res.ok) throw new Error('relay inventory HTTP ' + res.status);
   const j = await res.json();
@@ -3865,7 +3963,6 @@ async function fetchPlayerInvRelay(id){
   housing.forEach(h => inventories.push(h));
   // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
   // (cache/wagon/deployable), so dedupe by entity id or their contents would be counted twice.
-  const region = regionOfEntity(id);
   if (region != null){
     try {
       const have = new Set(inventories.map(i => String(i.entityId)));
@@ -3876,7 +3973,7 @@ async function fetchPlayerInvRelay(id){
     } catch(e){}
   }
   // Shallow copies: callers may write extra item metadata in, and the defs are shared/cached.
-  return { inventories, items: { ...defs.items }, cargos: { ...defs.cargos } };
+  return { inventories, equipment, items: { ...defs.items }, cargos: { ...defs.cargos } };
 }
 
 // ── TASKS ──
