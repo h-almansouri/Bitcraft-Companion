@@ -4177,10 +4177,11 @@ function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     ws.onmessage = ev => {
       const b = new Uint8Array(ev.data);
       if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){ clearTimeout(t); fin([]); } return; }
-      // A multi-query subscribe can come back as several SubscribeApplied frames, so keep collecting
-      // until the server goes quiet rather than settling on the first one.
+      // The relay bundles a whole multi-query subscribe into ONE SubscribeApplied frame (verified), so
+      // we can settle almost immediately once it lands. A short grace still catches the rare straggler
+      // without paying a fixed half-second on every round-trip — that wait dominated cold-load latency.
       if (b[1] === 1){ answered = true; try { rows = rows.concat(relayDecodeRows(b, rowFn)); } catch(e){} }
-      clearTimeout(idle); idle = setTimeout(() => fin(rows), 500);
+      clearTimeout(idle); idle = setTimeout(() => fin(rows), 60);
     };
     ws.onerror = () => fin(rows);
     ws.onclose = () => fin(rows);      // the server may hang up once it has answered — keep what arrived
