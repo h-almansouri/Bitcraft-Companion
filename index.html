@@ -356,7 +356,6 @@ main.planner-mode{max-width:none;padding:1rem}
 .eq-slot-lbl{width:78px;flex-shrink:0;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
 .eq-slot-main{flex:1;min-width:0}
 .eq-slot-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
-.eq-slot-stats{margin-top:3px;display:flex;flex-wrap:wrap;gap:3px}
 .eq-totals{border-top:1px solid var(--border);padding:.45rem .7rem;font-size:10px;color:var(--text3);display:flex;flex-wrap:wrap;align-items:center;gap:4px}
 .eq-totals b{color:var(--teal-light);font-weight:600;margin-right:.15rem}
 .eq-stat{display:inline-block;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:10px;color:var(--text2);white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -2217,16 +2216,16 @@ function equipmentSectionHtml(data, pfx){
   const shut = eqSetCollapsed[pfx] !== false;                 // all sets share one collapse state (default: collapsed)
   const statText = st => `${fmtStatVal(st.value, st.isPct)} ${statLabel(st.i)}`;
   const statPills = list => list.map(s => `<span class="eq-stat">${escHtml(s)}</span>`).join('');   // no dots between stats
+  // Per-piece rows show just the item now — the stat breakdown lives once at the set-totals footer, which
+  // is clearer than repeating a stat pile under every slot.
   const slotRow = it => {
     const meta = (it.itemType === 1 ? cargos : items)[it.itemId] || {};
     const rar = (meta.rarityStr || '').toLowerCase();
-    const stats = (equipDefs[it.itemId] || []).map(([i, v, pct]) => statText({ i, value: v, isPct: !!pct }));
     return `<div class="eq-slot">
       <span class="eq-slot-lbl">${EQUIP_LABEL[it.slot] || it.slot}</span>
       ${gameIconImg(meta.iconAssetName, 20)}
       <div class="eq-slot-main">
         <div class="eq-slot-name" title="${escHtml(meta.name || '')}">${escHtml(meta.name || ('Item ' + it.itemId))}</div>
-        ${stats.length ? `<div class="eq-slot-stats">${statPills(stats)}</div>` : ''}
       </div>
       ${meta.tier > 0 ? `<span class="badge badge-tier" style="font-size:9px;padding:0 4px">T${meta.tier}</span>` : ''}
       ${rar ? `<span class="badge ${rarityClass(rar)}" style="font-size:9px;padding:0 4px">${escHtml(cap(rar))}</span>` : ''}
@@ -2246,15 +2245,15 @@ function equipmentSectionHtml(data, pfx){
     </div>
   </div>`;
   };
-  // The EQUIPPED badge marks what's actually worn (equipment_state). If the worn gear exactly matches a
-  // saved preset, badge that preset; otherwise the player is wearing a custom mix, shown as its own
-  // "Currently worn" card. (The presets' own `active` flag is unreliable — it stays set on a stale loadout.)
-  const sig = slots => (slots||[]).map(s => s.slot + ':' + s.itemId).sort().join('|');
-  const curSig = sig(eq.current);
-  const matchIdx = (eq.current||[]).length ? (eq.presets||[]).findIndex(p => sig(p.slots) === curSig) : -1;
+  // What's actually worn = the preset the game flags `active`. That flag is authoritative; the live
+  // equipment_state LAGS on the relay after a loadout switch (confirmed: it kept showing a Leather set a
+  // player had swapped out of while the active preset — the Woven set they were really wearing — was
+  // right). Only when no preset is active do we fall back to equipment_state as "Currently worn".
+  const presets = eq.presets || [];
+  const activeIdx = presets.findIndex(p => p.active);
   const cards = [];
-  if ((eq.current||[]).length && matchIdx < 0) cards.push(card('Currently worn', eq.current, true));
-  (eq.presets||[]).forEach((p, i) => cards.push(card('Set ' + p.index, p.slots, i === matchIdx)));
+  if (activeIdx < 0 && (eq.current||[]).length) cards.push(card('Currently worn', eq.current, true));
+  presets.forEach((p, i) => cards.push(card('Set ' + p.index, p.slots, i === activeIdx)));
   const total = cards.length;
   return `<div class="inv-group">
     <div class="inv-group-header" onclick="toggleInvSection('${secKey}')">
