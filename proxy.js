@@ -217,17 +217,25 @@ function slimEquip(rows) {
   });
   return out;
 }
+// building_desc → { id: name }. Only the name is kept (~37KB): the crafts tab resolves a station's
+// name from its description id, and decoding building_desc over the relay would mean walking a nested
+// variable-length array just to reach the name field.
+function slimBuildings(rows) {
+  const out = {};
+  (Array.isArray(rows) ? rows : []).forEach(x => { if (x && x.id != null && x.name) out[x.id] = x.name; });
+  return out;
+}
 async function getItemDefs() {
   if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
   itemDefsBuilding = (async () => {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip) { itemDefs = d; itemDefsBuilding = null; return d; }
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
-      const [items, cargos, equip] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip) };
+      const [items, cargos, equip, buildings] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => [])]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings) };
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
@@ -412,8 +420,8 @@ http.createServer((req, res) => {
       const etag = '"idf-' + d.ts + '"';
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
       res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' });
-      res.end(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {} }));
-    }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {} }));
+      res.end(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {} }));
+    }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {}, buildings: {} }));
     return;
   }
 

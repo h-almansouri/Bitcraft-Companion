@@ -3121,7 +3121,137 @@ function craftingContentHtml(craftData) {
 
 // ── Multi-player Crafts (one collapsible section per tracked player) ─────────────
 let craftByPlayer = {}; // entityId -> {active, done, passive, itemMap}
+
+// ── Crafts straight from the relay's state tables, across every region ──────────
+// The relay's pre-joined /player/<id>/crafts route only covers the region the player is STANDING in —
+// it silently dropped 5 of BigKitten's 14 crafts (one of them 98% done). So we read the state tables
+// ourselves: one subscription per region, all 13 in parallel (~1s, ~25KB). Recipe names, durations and
+// outputs come from /crafting-data, which is already loaded and keyed by the same game recipe ids.
+const BC_REGIONS = [3,7,8,9,11,12,13,14,15,17,18,19,23];
+const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
+const relayClaimNames = {};     // claim entityId -> name
+// progressive_action_state (fixed 53B) — the full row, including the lock the Active/Idle chip needs.
+function readProgFull(r){
+  const entityId = r.u64().toString(), buildingId = r.u64().toString();
+  r.i32();                                            // function_type
+  const progress = r.i32(), recipeId = r.i32(), craftCount = r.i32();
+  r.i32();                                            // last_crit_outcome
+  const ownerId = r.u64().toString(), lock = r.u64();
+  return { kind:'active', entityId, buildingId, progress, recipeId, craftCount, ownerId, lockMs: Number(lock / 1000n) };
+}
+// passive_craft_state: entity u64, owner u64, recipe i32, building u64, timestamp i64(micros),
+// status Sum[Queued|Processing|Complete], slot Sum[some u32|none]
+function readPassiveRow(r){
+  const entityId = r.u64().toString(), ownerId = r.u64().toString();
+  const recipeId = r.i32(), buildingId = r.u64().toString(), ts = r.u64();
+  const status = ['queued','processing','complete'][r.u8()] || 'queued';
+  return { kind:'passive', entityId, ownerId, recipeId, buildingId, startMs: Number(ts / 1000n), status };
+}
+function readBuildingState(r){
+  const entityId = r.u64().toString(), claimId = r.u64().toString();
+  r.i32(); return { entityId, claimId, descId: r.i32() };
+}
+// One region: every craft the player owns there, plus which of them are public.
+async function relayRegionCrafts(region, playerId){
+  const rows = await relayQuery(region, [
+    `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${playerId}`,
+    `SELECT * FROM passive_craft_state WHERE owner_entity_id = ${playerId}`,
+    `SELECT * FROM public_progressive_action_state WHERE owner_entity_id = ${playerId}`
+  ], (r, table) => {
+    if (table === 'progressive_action_state') return readProgFull(r);
+    if (table === 'passive_craft_state') return readPassiveRow(r);
+    if (table === 'public_progressive_action_state') return { kind:'public', entityId: r.u64().toString() };
+    return null;
+  }, 9000);
+  return rows.filter(Boolean);
+}
+// Resolve the buildings/claims we haven't seen before. Buildings don't move and claims rarely rename,
+// so both are cached for the session — after the first load a refresh only pays for the craft scan.
+async function relayResolvePlaces(region, buildingIds){
+  const unknown = buildingIds.filter(b => !relayBuildingInfo[b]);
+  if (unknown.length){
+    const bs = await relayQuery(region, unknown.map(b => `SELECT * FROM building_state WHERE entity_id = ${b}`), readBuildingState, 9000);
+    bs.forEach(b => { if (b) relayBuildingInfo[b.entityId] = { claimId: b.claimId, descId: b.descId, nickname: '' }; });
+    unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });
+    // nicknames + claim names for whatever those buildings turned out to belong to
+    const claims = [...new Set(unknown.map(b => relayBuildingInfo[b].claimId).filter(c => c && c !== '0' && relayClaimNames[c] === undefined))];
+    const sqls = [
+      ...unknown.map(b => `SELECT * FROM building_nickname_state WHERE entity_id = ${b}`),
+      ...claims.map(c => `SELECT * FROM claim_state WHERE entity_id = ${c}`)
+    ];
+    if (sqls.length){
+      const extra = await relayQuery(region, sqls, (r, table) => {
+        if (table === 'building_nickname_state') return { t:'nick', id: r.u64().toString(), name: r.str() };
+        if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { t:'claim', id: e.toString(), name: r.str() }; }
+        return null;
+      }, 9000);
+      extra.forEach(x => { if (!x) return;
+        if (x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name;
+        else if (x.t === 'claim') relayClaimNames[x.id] = x.name; });
+    }
+    claims.forEach(c => { if (relayClaimNames[c] === undefined) relayClaimNames[c] = null; });   // don't re-ask
+  }
+}
+async function fetchPlayerCraftsRelay(id){
+  await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
+  const perRegion = await Promise.all(BC_REGIONS.map(rg => relayRegionCrafts(rg, id).then(rows => ({ rg, rows })).catch(() => ({ rg, rows: [] }))));
+  const hits = perRegion.filter(x => x.rows.length);
+  if (!hits.length) return { active: [], done: [], passive: [], itemMap: {} };
+  // resolve place names region by region (cached, so this is a no-op on later refreshes)
+  await Promise.all(hits.map(({ rg, rows }) => {
+    const bIds = [...new Set(rows.filter(r => r.buildingId && r.buildingId !== '0').map(r => r.buildingId))];
+    return relayResolvePlaces(rg, bIds).catch(() => {});
+  }));
+  const recipes = (craftingData && craftingData.recipesById) || {};
+  const defs = gameItemDefs || { items:{}, cargos:{}, buildings:{} };
+  const itemMap = {};
+  const place = r => {
+    const b = relayBuildingInfo[r.buildingId] || { claimId:'0', descId:0, nickname:'' };
+    const claimId = b.claimId && b.claimId !== '0' ? b.claimId : null;
+    return {
+      buildingEntityId: r.buildingId,
+      buildingName: b.nickname || defs.buildings[b.descId] || 'Unknown Building',
+      claimEntityId: claimId,
+      claimName: (claimId && relayClaimNames[claimId]) || null,
+      regionId: regionOfEntity(claimId || r.entityId)
+    };
+  };
+  const outputsOf = recipeId => {
+    const rec = recipes[recipeId];
+    const outs = (rec && rec.outputs) || [];
+    outs.forEach(o => { const m = defs.items[o.itemId] || defs.cargos[o.itemId]; if (m) itemMap[o.itemId] = m; });
+    return outs.map(o => ({ item_id: o.itemId, quantity: o.quantity, item_type: 0 }));
+  };
+  const active = [], passive = [];
+  perRegion.forEach(({ rows }) => {
+    const pub = new Set(rows.filter(r => r.kind === 'public').map(r => r.entityId));
+    rows.forEach(r => {
+      if (r.kind === 'active'){
+        const rec = recipes[r.recipeId] || {};
+        const perItem = rec.actionsRequired || 0;
+        active.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
+          progress: r.progress, recipeId: r.recipeId, recipeName: rec.name || '',
+          craftCount: r.craftCount,
+          actionsRequiredPerItem: perItem,
+          totalActionsRequired: perItem * (r.craftCount || 1),
+          craftedItem: outputsOf(r.recipeId),
+          lockExpiration: r.lockMs ? new Date(r.lockMs).toISOString() : null,
+          isPublic: pub.has(r.entityId), completed: false, ...place(r) });
+      } else if (r.kind === 'passive'){
+        passive.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
+          recipeId: r.recipeId, recipeName: (recipes[r.recipeId]||{}).name || '',
+          status: r.status, timestamp: new Date(r.startMs).toISOString(),
+          craftedItem: outputsOf(r.recipeId), ...place(r) });
+      }
+    });
+  });
+  return { active, done: [], passive, itemMap };
+}
 async function fetchPlayerCrafts(id) {
+  try {
+    const r = await fetchPlayerCraftsRelay(id);
+    if (r.active.length || r.passive.length) return r;
+  } catch(e){ /* relay unreachable → fall back to bitjita below */ }
   const [acData, pcData] = await Promise.all([
     apiFetch(`/api/players/${id}/crafts?completed=all`),
     apiFetch(`/api/players/${id}/passive-crafts?status=all`),
@@ -3880,9 +4010,9 @@ async function loadGameItemDefs(){
   if (gameItemDefs) return gameItemDefs;
   if (_gameItemDefsP) return _gameItemDefsP;
   _gameItemDefsP = (async () => {
-    const d = await apiFetch('/itemdefs');   // compact [name, tier, rarityIdx, tag, icon]
+    const d = await apiFetch('/itemdefs?v=bld1');   // compact [name, tier, rarityIdx, tag, icon]; ?v busts the 24h browser cache when the payload gains fields
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
-    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {} };
+    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {} };
     _gameItemDefsP = null; return gameItemDefs;
   })();
   return _gameItemDefsP;
