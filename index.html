@@ -3467,7 +3467,9 @@ function startCraftLive(){
 // One self-reconnecting relay subscription for a region. Stays open while the Active crafts tab is shown.
 function craftLiveConn(region, sqls){
   const conn = { closed:false, ws:null };
-  const feed = row => onLiveCraftProgress({ entity_id: row.entityId, progress: row.progress });
+  // isDelta distinguishes a live progress tick (someone's working) from the initial snapshot, which just
+  // carries the current state of EVERY in-progress craft — idle ones included — and must not read as Active.
+  const feed = (row, isDelta) => onLiveCraftProgress({ entity_id: row.entityId, progress: row.progress }, isDelta);
   const open = () => {
     if (conn.closed) return;
     let ws;
@@ -3476,8 +3478,8 @@ function craftLiveConn(region, sqls){
     conn.ws = ws; ws.binaryType = 'arraybuffer'; let first = true;
     ws.onmessage = ev => { const b = new Uint8Array(ev.data);
       if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){} return; }
-      try { if (b[1] === 1) relayDecodeRows(b, readProgRow).forEach(feed);          // initial snapshot
-            else if (b[1] === 4) relayDecodeDelta(b, readProgRow).forEach(feed); }  // live delta
+      try { if (b[1] === 1) relayDecodeRows(b, readProgRow).forEach(r => feed(r, false));          // initial snapshot
+            else if (b[1] === 4) relayDecodeDelta(b, readProgRow).forEach(r => feed(r, true)); }   // live delta
       catch(e){}
     };
     ws.onclose = () => { conn.ws = null; schedule(); };
@@ -3490,12 +3492,15 @@ function craftLiveConn(region, sqls){
 function stopCraftLive(){ bcCraftConns.forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} }); bcCraftConns = []; bcCraftIdsKey = ''; bcCraftRate = {}; }
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
 // tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
+// "Being worked" = the game streamed an actual progress DELTA for this craft in the last ~15s. We do NOT
+// trust lockExpiration (it lingers in the future for a while after work stops, so idle crafts kept flashing
+// Active) nor the subscription snapshot (it carries every in-progress craft, idle included). Before the
+// live stream has delivered a delta a craft simply reads Idle, then flips to Active within a second or two
+// once real progress arrives — far better than idle crafts briefly showing Active.
 function craftIsBeingWorked(c){
-  const now = Date.now();
-  if (c.lockExpiration){ const t = new Date(c.lockExpiration).getTime(); if (isFinite(t) && t > now) return true; }
   const cid = String(c.entityId || c.entity_id || '');
   const r = cid && bcCraftRate[cid];
-  return !!(r && r.lastT && (now - r.lastT) < 15000);
+  return !!(r && r.workedT && (Date.now() - r.workedT) < 15000);
 }
 // Coarse, low-jitter ETA text. Drops seconds for anything ≥1min (that's where the flicker lived) and
 // quantizes the sub-minute range, since this is only ever a rough estimate.
@@ -3532,7 +3537,7 @@ function craftProgInner(prog, total, cid){
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(prog / total * 100))) : 0;
   return `<span style="color:var(--text2);font-weight:500">${fmtNum(prog)}</span><span> / ${fmtNum(total)} actions</span><span style="margin-left:.3rem;color:var(--amber-light);font-weight:600">${pct}%</span>${craftEtaSpan(cid)}`;
 }
-function onLiveCraftProgress(d){
+function onLiveCraftProgress(d, isDelta){
   const cid = String(d.entity_id || d.entityId || ''); if (!cid) return;
   const prog = +d.progress; if (!isFinite(prog)) return;
   // update the cached craft + find its total (the live payload has no total)
@@ -3540,16 +3545,22 @@ function onLiveCraftProgress(d){
   const owner = String(d.owner_entity_id || d.ownerEntityId || '');
   const scan = cd => { if (!cd || !cd.active) return; const c = cd.active.find(x => String(x.entityId||x.entity_id) === cid); if (c){ c.progress = prog; if (c.totalActionsRequired) total = c.totalActionsRequired; } };
   if (owner && craftByPlayer[owner]) scan(craftByPlayer[owner]); else Object.values(craftByPlayer).forEach(scan);
+  const prevP = (bcCraftRate[cid] || {}).lastP;
   recordCraftRate(cid, prog, total, Date.now());
+  // Only a real progress increase from a live delta counts as "being worked" — the snapshot seeds the
+  // baseline (prevP) but must not mark the craft Active.
+  const worked = isDelta && prevP != null && prog > prevP;
+  if (worked) bcCraftRate[cid].workedT = Date.now();
   // patch the DOM in place (no full re-render → no flicker)
   const card = document.querySelector(`.craft-card[data-cid="${cid}"]`); if (!card) return;
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(prog / total * 100))) : null;
   const fill = card.querySelector('.craft-progress'); if (fill && pct != null) fill.style.width = pct + '%';
   const txt = card.querySelector('.craft-prog-text');
   if (txt && total > 0) txt.innerHTML = craftProgInner(prog, total, cid);
-  // a live tick means it's being worked → make sure the chip reads Active (not Idle)
-  const st = card.querySelector('.craft-status');
-  if (st && !st.classList.contains('status-active') && !st.classList.contains('status-ready')){ st.className = 'craft-status status-active'; st.innerHTML = '<i class="ti ti-flame"></i> Active'; }
+  if (worked){   // flip the chip to Active only on genuine progress
+    const st = card.querySelector('.craft-status');
+    if (st && !st.classList.contains('status-active') && !st.classList.contains('status-ready')){ st.className = 'craft-status status-active'; st.innerHTML = '<i class="ti ti-flame"></i> Active'; }
+  }
 }
 function setCraftTab(t) {
   craftTabActive = t;
