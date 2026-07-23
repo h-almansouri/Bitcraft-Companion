@@ -2438,10 +2438,12 @@ function readClosedListing(r){
 // was unreachable. Claim names ride along via a join, so there's no separate name-resolution pass.
 async function fetchMarketRelayMulti(ids){
   ids = ids.map(String);
+  hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
   const owner = ids.map(id => `owner_entity_id = ${id}`).join(' OR ');
-  // The join subscription needs an index on the filtered column, which an OR defeats — so emit ONE join
-  // per owner per table (all single-owner, all bundled into the same round-trip) instead of OR-ing them.
+  // Orders/collections AND their claim names in ONE round-trip per region — the claim rows ride along via
+  // a join. A join can't be OR'd (the relay needs an index the OR defeats), so emit one single-owner join
+  // per player per table, all bundled into the same subscribe. Names are also persisted for next session.
   const claimJoins = t => ids.map(id => `SELECT claim_state.* FROM claim_state JOIN ${t} ON claim_state.entity_id = ${t}.claim_entity_id WHERE ${t}.owner_entity_id = ${id}`);
   let ok = 0;
   const per = await Promise.all(BC_REGIONS.map(rg =>
@@ -2460,6 +2462,7 @@ async function fetchMarketRelayMulti(ids){
   ));
   if (!ok) throw new Error('relay unreachable');
   per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
+  saveRelayPlaces();
   // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
   // location headers keep reading "Ba Sing Se · Zephra (R19)" instead of falling back to a bare R19.
   if (typeof marketRegions !== 'undefined' && !marketRegions.length){
@@ -3227,6 +3230,27 @@ let craftByPlayer = {}; // entityId -> {active, done, passive, itemMap}
 const BC_REGIONS = [3,7,8,9,11,12,13,14,15,17,18,19,23];
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
+// Buildings never move and claims rarely rename, so the building→claim→name maps are worth keeping
+// ACROSS sessions — that turns the cold-load resolve pass into a no-op on every visit after the first.
+// A 7-day TTL bounds the staleness from the occasional claim rename.
+const RELAY_PLACE_CACHE_KEY = 'bcRelayPlaces', RELAY_PLACE_TTL = 7*24*60*60*1000;
+let _relayPlacesHydrated = false, _relayPlaceSaveTimer = null;
+function hydrateRelayPlaces(){
+  if (_relayPlacesHydrated) return; _relayPlacesHydrated = true;
+  try {
+    const d = JSON.parse(localStorage.getItem(RELAY_PLACE_CACHE_KEY) || '{}');
+    if (d && d.ts && (Date.now() - d.ts) < RELAY_PLACE_TTL){
+      Object.assign(relayBuildingInfo, d.buildings || {});
+      Object.assign(relayClaimNames, d.claims || {});
+    }
+  } catch(e){}
+}
+function saveRelayPlaces(){
+  clearTimeout(_relayPlaceSaveTimer);
+  _relayPlaceSaveTimer = setTimeout(() => {
+    try { localStorage.setItem(RELAY_PLACE_CACHE_KEY, JSON.stringify({ ts: Date.now(), buildings: relayBuildingInfo, claims: relayClaimNames })); } catch(e){}
+  }, 1500);
+}
 // progressive_action_state (fixed 53B) — the full row, including the lock the Active/Idle chip needs.
 function readProgFull(r){
   const entityId = r.u64().toString(), buildingId = r.u64().toString();
@@ -3265,12 +3289,12 @@ async function relayRegionCrafts(region, playerIds){
   }, 9000);
   const out = rows.filter(Boolean); out.ok = rows.ok; return out;   // carry the answered flag through the filter
 }
-// Resolve the buildings/claims we haven't seen before. Buildings don't move and claims rarely rename,
-// so both are cached for the session — after the first load a refresh only pays for the craft scan.
-// One round-trip: building_state (→ desc id + claim id), its nickname, and the claim NAME via a join on
-// the building, so we don't wait for building_state to come back before asking who owns the claim.
+// Resolve building/claim names for buildings we haven't seen — in ONE round-trip. The per-connection
+// cost to the relay is ~1s once connections are churning, so what matters is round-trip COUNT, not query
+// count: building_state, its nickname, and the claim name (joined through the building) all come back
+// together. Persisted across sessions (saveRelayPlaces), so after the first-ever visit this is a no-op.
 async function relayResolvePlaces(region, buildingIds){
-  const unknown = buildingIds.filter(b => !relayBuildingInfo[b]);
+  const unknown = [...new Set(buildingIds)].filter(b => b && b !== '0' && !relayBuildingInfo[b]);
   if (!unknown.length) return;
   const sqls = [
     ...unknown.map(b => `SELECT * FROM building_state WHERE entity_id = ${b}`),
@@ -3286,15 +3310,16 @@ async function relayResolvePlaces(region, buildingIds){
   rows.forEach(x => { if (!x) return;
     if (x.t === 'bld') relayBuildingInfo[x.entityId] = { claimId: x.claimId, descId: x.descId, nickname: (relayBuildingInfo[x.entityId]||{}).nickname || '' };
     else if (x.t === 'claim') relayClaimNames[x.id] = x.name; });
-  // apply nicknames after buildings exist (frame order isn't guaranteed)
   rows.forEach(x => { if (x && x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name; });
   unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
+  saveRelayPlaces();
 }
 // Fetch crafts for MANY players in one pass: 13 connections total (one per region, all players OR'd in),
 // not 13 per player. Returns { playerId: {active, done, passive, itemMap} }. Throws only if every mirror
 // was unreachable, so the caller can fall back to bitjita.
 async function fetchCraftsRelayMulti(ids){
   ids = ids.map(String);
+  hydrateRelayPlaces();
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
   const perRegion = await Promise.all(BC_REGIONS.map(rg =>
     relayRegionCrafts(rg, ids).then(rows => ({ rg, rows, ok: rows.ok })).catch(() => ({ rg, rows: [], ok: false }))));
