@@ -2433,32 +2433,28 @@ function readClosedListing(r){
   if (r.u8() === 0) r.i32();                       // durability = some(i32)
   return { kind:'closed', entityId, ownerId, claimId, itemId, quantity, itemType, tsMicros: r.u64().toString() };
 }
-async function relayResolveClaimNames(region, claimIds){
-  const need = claimIds.filter(c => c && c !== '0' && relayClaimNames[c] === undefined);
-  if (!need.length) return;
-  const rows = await relayQuery(region, need.map(c => `SELECT * FROM claim_state WHERE entity_id = ${c}`),
-    r => { const e = r.u64(); r.u64(); r.u64(); return { id: e.toString(), name: r.str() }; }, 9000);
-  rows.forEach(x => { if (x) relayClaimNames[x.id] = x.name; });
-  need.forEach(c => { if (relayClaimNames[c] === undefined) relayClaimNames[c] = null; });   // don't re-ask
-}
 async function fetchPlayerMarketRelay(id){
   const defs = await loadGameItemDefs();
   let ok = 0;
+  // One round-trip per region: the orders/collections AND their claim names together. The claim rows
+  // ride along via a join on owner_entity_id, so there's no separate name-resolution pass.
+  const claimJoin = t => `SELECT claim_state.* FROM claim_state JOIN ${t} ON claim_state.entity_id = ${t}.claim_entity_id WHERE ${t}.owner_entity_id = ${id}`;
   const per = await Promise.all(BC_REGIONS.map(rg =>
     relayQuery(rg, [
       `SELECT * FROM sell_order_state WHERE owner_entity_id = ${id}`,
       `SELECT * FROM buy_order_state WHERE owner_entity_id = ${id}`,
-      `SELECT * FROM closed_listing_state WHERE owner_entity_id = ${id}`
+      `SELECT * FROM closed_listing_state WHERE owner_entity_id = ${id}`,
+      claimJoin('sell_order_state'), claimJoin('buy_order_state'), claimJoin('closed_listing_state')
     ], (r, table) => {
       if (table === 'sell_order_state') return readOrderRow('sell')(r);
       if (table === 'buy_order_state') return readOrderRow('buy')(r);
       if (table === 'closed_listing_state') return readClosedListing(r);
+      if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { kind:'claim', id: e.toString(), name: r.str() }; }
       return null;
     }, 9000).then(rows => { if (rows.ok) ok++; return { rg, rows: rows.filter(Boolean) }; }).catch(() => ({ rg, rows: [] }))
   ));
   if (!ok) throw new Error('relay unreachable');
-  await Promise.all(per.filter(x => x.rows.length).map(({ rg, rows }) =>
-    relayResolveClaimNames(rg, [...new Set(rows.map(r => r.claimId))]).catch(() => {})));
+  per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
   // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
   // location headers keep reading "Ba Sing Se · Zephra (R19)" instead of falling back to a bare R19.
   if (typeof marketRegions !== 'undefined' && !marketRegions.length){
@@ -2481,7 +2477,7 @@ async function fetchPlayerMarketRelay(id){
   const sellOrders = [], buyOrders = [], collections = [];
   per.forEach(({ rows }) => rows.forEach(r => {
     if (r.kind === 'closed') collections.push(shape(r));
-    else {
+    else if (r.kind === 'sell' || r.kind === 'buy'){
       const o = { ...shape(r), priceThreshold: String(r.price), storedCoins: String(r.storedCoins) };
       (r.kind === 'sell' ? sellOrders : buyOrders).push(o);
     }
@@ -3244,30 +3240,28 @@ async function relayRegionCrafts(region, playerId){
 }
 // Resolve the buildings/claims we haven't seen before. Buildings don't move and claims rarely rename,
 // so both are cached for the session — after the first load a refresh only pays for the craft scan.
+// One round-trip: building_state (→ desc id + claim id), its nickname, and the claim NAME via a join on
+// the building, so we don't wait for building_state to come back before asking who owns the claim.
 async function relayResolvePlaces(region, buildingIds){
   const unknown = buildingIds.filter(b => !relayBuildingInfo[b]);
-  if (unknown.length){
-    const bs = await relayQuery(region, unknown.map(b => `SELECT * FROM building_state WHERE entity_id = ${b}`), readBuildingState, 9000);
-    bs.forEach(b => { if (b) relayBuildingInfo[b.entityId] = { claimId: b.claimId, descId: b.descId, nickname: '' }; });
-    unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });
-    // nicknames + claim names for whatever those buildings turned out to belong to
-    const claims = [...new Set(unknown.map(b => relayBuildingInfo[b].claimId).filter(c => c && c !== '0' && relayClaimNames[c] === undefined))];
-    const sqls = [
-      ...unknown.map(b => `SELECT * FROM building_nickname_state WHERE entity_id = ${b}`),
-      ...claims.map(c => `SELECT * FROM claim_state WHERE entity_id = ${c}`)
-    ];
-    if (sqls.length){
-      const extra = await relayQuery(region, sqls, (r, table) => {
-        if (table === 'building_nickname_state') return { t:'nick', id: r.u64().toString(), name: r.str() };
-        if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { t:'claim', id: e.toString(), name: r.str() }; }
-        return null;
-      }, 9000);
-      extra.forEach(x => { if (!x) return;
-        if (x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name;
-        else if (x.t === 'claim') relayClaimNames[x.id] = x.name; });
-    }
-    claims.forEach(c => { if (relayClaimNames[c] === undefined) relayClaimNames[c] = null; });   // don't re-ask
-  }
+  if (!unknown.length) return;
+  const sqls = [
+    ...unknown.map(b => `SELECT * FROM building_state WHERE entity_id = ${b}`),
+    ...unknown.map(b => `SELECT * FROM building_nickname_state WHERE entity_id = ${b}`),
+    ...unknown.map(b => `SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`)
+  ];
+  const rows = await relayQuery(region, sqls, (r, table) => {
+    if (table === 'building_state'){ const b = readBuildingState(r); return { t:'bld', ...b }; }
+    if (table === 'building_nickname_state') return { t:'nick', id: r.u64().toString(), name: r.str() };
+    if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { t:'claim', id: e.toString(), name: r.str() }; }
+    return null;
+  }, 9000);
+  rows.forEach(x => { if (!x) return;
+    if (x.t === 'bld') relayBuildingInfo[x.entityId] = { claimId: x.claimId, descId: x.descId, nickname: (relayBuildingInfo[x.entityId]||{}).nickname || '' };
+    else if (x.t === 'claim') relayClaimNames[x.id] = x.name; });
+  // apply nicknames after buildings exist (frame order isn't guaranteed)
+  rows.forEach(x => { if (x && x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name; });
+  unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
 }
 async function fetchPlayerCraftsRelay(id){
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
