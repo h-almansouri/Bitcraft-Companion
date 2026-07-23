@@ -2245,14 +2245,17 @@ function equipmentSectionHtml(data, pfx){
     </div>
   </div>`;
   };
-  // What's actually worn = the preset the game flags `active`. That flag is authoritative; the live
-  // equipment_state LAGS on the relay after a loadout switch (confirmed: it kept showing a Leather set a
-  // player had swapped out of while the active preset — the Woven set they were really wearing — was
-  // right). Only when no preset is active do we fall back to equipment_state as "Currently worn".
+  // What's actually worn = the preset the game flags `active` — that flag is authoritative for the badge.
+  // The live equipment_state can differ from it (it lags on the relay after a loadout switch), so we still
+  // show it as its own "Currently worn" card when it isn't one of the presets — nothing gets hidden — but
+  // the green EQUIPPED badge follows the active preset (or the equipment_state card if no preset is active).
   const presets = eq.presets || [];
   const activeIdx = presets.findIndex(p => p.active);
+  const sig = slots => (slots||[]).map(s => s.slot + ':' + s.itemId).sort().join('|');
+  const curSig = sig(eq.current);
+  const curIsPreset = (eq.current||[]).length && presets.some(p => sig(p.slots) === curSig);
   const cards = [];
-  if (activeIdx < 0 && (eq.current||[]).length) cards.push(card('Currently worn', eq.current, true));
+  if ((eq.current||[]).length && !curIsPreset) cards.push(card('Currently worn', eq.current, activeIdx < 0));
   presets.forEach((p, i) => cards.push(card('Set ' + p.index, p.slots, i === activeIdx)));
   const total = cards.length;
   return `<div class="inv-group">
