@@ -3140,30 +3140,90 @@ function fillPlayerCraftCached(entityId) {
   const b = document.getElementById('psec-craft-' + entityId);
   if (b) b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
 }
-// ── Live active-craft progress (progressive_action_state via the SSE /live proxy) ──
-// While viewing the Crafts tab (Active), subscribe to each in-progress craft's entityId and patch its
-// progress bar + counts as the game streams updates (~1/sec while someone works the station).
-let bcCraftES = null, bcCraftIdsKey = '', bcCraftRate = {};   // cid -> {t0,p0,tLast,pLast} for the live ETA
-function bcActiveCraftIds(){
-  const ids = [];
-  Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => { const id = c.entityId || c.entity_id; if (id) ids.push(String(id)); }));
-  return [...new Set(ids)].slice(0, 80);
+// ── Live active-craft progress — direct from the relay WebSocket (progressive_action_state) ──
+// While viewing the Crafts tab (Active), we hold one persistent subscription per region, scoped to the
+// tracked owners crafting there, and patch each card as the game streams progress ticks (~1-2/sec while
+// someone works a station). Browser↔relay is direct, so unlike the old SSE→live.bitjita path this costs
+// our host nothing. The relay firehose proved it pushes these deltas in real time.
+let bcCraftConns = [], bcCraftIdsKey = '', bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
+// progressive_action_state row (fixed 53B): entity u64, building u64, function i32, progress i32,
+// recipe i32, craft_count i32, last_crit i32, owner u64, lock_expiration i64(micros), preparation bool.
+function readProgRow(r){
+  const entityId = r.u64();
+  r.u64(); r.i32();                      // building_entity_id, function_type
+  const progress = r.i32();
+  r.i32(); r.i32(); r.i32();             // recipe_id, craft_count, last_crit_outcome
+  const owner = r.u64();
+  return { entityId: entityId.toString(), progress, ownerId: owner.toString() };
+}
+// A TransactionUpdate (tag 4) carries, per table, a delete list then an insert list. Progress only ever
+// climbs within a craft, so taking the max across both lists per entity gives the current value without
+// having to reason about delete/insert ordering (verified against the live firehose).
+function relayDecodeDelta(b, rowFn){
+  const r = bsRead(b); r.o = 2; r.u32(); r.u32();
+  const nT = r.u32(); const rows = [];
+  for (let t=0;t<nT;t++){
+    r.str();                             // table name
+    const nUpd = r.u32();
+    for (let u=0;u<nUpd;u++){
+      r.u8();                            // CompressableQueryUpdate tag (0 = uncompressed)
+      for (let L=0;L<2;L++){             // deletes, then inserts
+        const hint = r.u8(); let fixed = 0, offsets = null;
+        if (hint === 0) fixed = r.u16(); else { const n = r.u32(); offsets = []; for (let i=0;i<n;i++) offsets.push(Number(r.u64())); }
+        const data = r.sub(r.u32());
+        const starts = offsets || (fixed ? Array.from({length:Math.floor(data.length/fixed)},(_,i)=>i*fixed) : []);
+        for (let i=0;i<starts.length;i++){ const end=(i+1<starts.length)?starts[i+1]:data.length; try{ rows.push(rowFn(bsRead(data.subarray(starts[i],end)))); }catch(e){} }
+      }
+    }
+  }
+  const latest = {};                     // entityId -> highest-progress row seen this frame
+  rows.forEach(x => { const c = latest[x.entityId]; if (!c || x.progress > c.progress) latest[x.entityId] = x; });
+  return Object.values(latest);
 }
 function startCraftLive(){
   if (craftTabActive === 'passive' || currentTab !== 'crafting'){ stopCraftLive(); return; }
-  const ids = bcActiveCraftIds();
-  const key = ids.join(',');
-  if (bcCraftES && key === bcCraftIdsKey && bcCraftES.readyState !== 2) return;   // already streaming this set
+  // Group tracked owners by the region their craft row physically lives in (that's where the mirror has it).
+  const byRegion = {}, keyParts = [];
+  Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => {
+    const cid = String(c.entityId || c.entity_id || ''), owner = String(c.ownerEntityId || c.owner_entity_id || '');
+    if (!cid || !owner) return;
+    const region = regionOfEntity(cid); if (region == null) return;
+    (byRegion[region] = byRegion[region] || new Set()).add(owner);
+    keyParts.push(region + ':' + owner);
+  }));
+  const key = [...new Set(keyParts)].sort().join(',');
+  if (key === bcCraftIdsKey && bcCraftConns.length) return;   // same owner set already streaming
   stopCraftLive();
   bcCraftIdsKey = key;
-  if (!ids.length) return;
-  try {
-    bcCraftES = new EventSource(API + '/live?crafts=' + encodeURIComponent(key));
-    bcCraftES.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch(_){ return; } if ((m.channel||'').indexOf('progressive_action_state') === 0) onLiveCraftProgress(m.data || m.payload || m); };
-    bcCraftES.onerror = () => {};   // EventSource auto-reconnects
-  } catch(e){}
+  Object.entries(byRegion).forEach(([region, owners]) => {
+    const sqls = [...owners].slice(0, 40).map(o => `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${o}`);
+    bcCraftConns.push(craftLiveConn(+region, sqls));
+  });
 }
-function stopCraftLive(){ if (bcCraftES){ try { bcCraftES.close(); } catch(_){} bcCraftES = null; } bcCraftIdsKey = ''; bcCraftRate = {}; }
+// One self-reconnecting relay subscription for a region. Stays open while the Active crafts tab is shown.
+function craftLiveConn(region, sqls){
+  const conn = { closed:false, ws:null };
+  const feed = row => onLiveCraftProgress({ entity_id: row.entityId, progress: row.progress });
+  const open = () => {
+    if (conn.closed) return;
+    let ws;
+    try { ws = new WebSocket(`wss://relay.bitcraftsync.app:${3000+region}/v1/database/relay-mirror-bc${region}/subscribe?compression=None`, ['v2.bsatn.spacetimedb']); }
+    catch(e){ return schedule(); }
+    conn.ws = ws; ws.binaryType = 'arraybuffer'; let first = true;
+    ws.onmessage = ev => { const b = new Uint8Array(ev.data);
+      if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){} return; }
+      try { if (b[1] === 1) relayDecodeRows(b, readProgRow).forEach(feed);          // initial snapshot
+            else if (b[1] === 4) relayDecodeDelta(b, readProgRow).forEach(feed); }  // live delta
+      catch(e){}
+    };
+    ws.onclose = () => { conn.ws = null; schedule(); };
+    ws.onerror = () => { try { ws.close(); } catch(_){} };
+  };
+  const schedule = () => { if (!conn.closed) setTimeout(open, 2000); };   // reconnect on drop
+  open();
+  return conn;
+}
+function stopCraftLive(){ bcCraftConns.forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} }); bcCraftConns = []; bcCraftIdsKey = ''; bcCraftRate = {}; }
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
 // tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
 function craftIsBeingWorked(c){
