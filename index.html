@@ -2433,18 +2433,23 @@ function readClosedListing(r){
   if (r.u8() === 0) r.i32();                       // durability = some(i32)
   return { kind:'closed', entityId, ownerId, claimId, itemId, quantity, itemType, tsMicros: r.u64().toString() };
 }
-async function fetchPlayerMarketRelay(id){
+// Orders/collections for MANY players at once: 13 connections total (all players OR'd per region), not
+// 13 per player. Returns { playerId: {sellOrders, buyOrders, collections} }. Throws only if every mirror
+// was unreachable. Claim names ride along via a join, so there's no separate name-resolution pass.
+async function fetchMarketRelayMulti(ids){
+  ids = ids.map(String);
   const defs = await loadGameItemDefs();
+  const owner = ids.map(id => `owner_entity_id = ${id}`).join(' OR ');
+  // The join subscription needs an index on the filtered column, which an OR defeats — so emit ONE join
+  // per owner per table (all single-owner, all bundled into the same round-trip) instead of OR-ing them.
+  const claimJoins = t => ids.map(id => `SELECT claim_state.* FROM claim_state JOIN ${t} ON claim_state.entity_id = ${t}.claim_entity_id WHERE ${t}.owner_entity_id = ${id}`);
   let ok = 0;
-  // One round-trip per region: the orders/collections AND their claim names together. The claim rows
-  // ride along via a join on owner_entity_id, so there's no separate name-resolution pass.
-  const claimJoin = t => `SELECT claim_state.* FROM claim_state JOIN ${t} ON claim_state.entity_id = ${t}.claim_entity_id WHERE ${t}.owner_entity_id = ${id}`;
   const per = await Promise.all(BC_REGIONS.map(rg =>
     relayQuery(rg, [
-      `SELECT * FROM sell_order_state WHERE owner_entity_id = ${id}`,
-      `SELECT * FROM buy_order_state WHERE owner_entity_id = ${id}`,
-      `SELECT * FROM closed_listing_state WHERE owner_entity_id = ${id}`,
-      claimJoin('sell_order_state'), claimJoin('buy_order_state'), claimJoin('closed_listing_state')
+      `SELECT * FROM sell_order_state WHERE ${owner}`,
+      `SELECT * FROM buy_order_state WHERE ${owner}`,
+      `SELECT * FROM closed_listing_state WHERE ${owner}`,
+      ...claimJoins('sell_order_state'), ...claimJoins('buy_order_state'), ...claimJoins('closed_listing_state')
     ], (r, table) => {
       if (table === 'sell_order_state') return readOrderRow('sell')(r);
       if (table === 'buy_order_state') return readOrderRow('buy')(r);
@@ -2474,24 +2479,31 @@ async function fetchPlayerMarketRelay(id){
       rarityStr: meta.rarityStr || '', tag: meta.tag || '', iconAssetName: meta.iconAssetName || '',
       quantity: String(r.quantity), timestamp: r.tsMicros };
   };
-  const sellOrders = [], buyOrders = [], collections = [];
+  const out = {}; ids.forEach(id => out[id] = { sellOrders: [], buyOrders: [], collections: [] });
   per.forEach(({ rows }) => rows.forEach(r => {
-    if (r.kind === 'closed') collections.push(shape(r));
+    const bucket = out[r.ownerId]; if (!bucket) return;
+    if (r.kind === 'closed') bucket.collections.push(shape(r));
     else if (r.kind === 'sell' || r.kind === 'buy'){
       const o = { ...shape(r), priceThreshold: String(r.price), storedCoins: String(r.storedCoins) };
-      (r.kind === 'sell' ? sellOrders : buyOrders).push(o);
+      (r.kind === 'sell' ? bucket.sellOrders : bucket.buyOrders).push(o);
     }
   }));
-  return { sellOrders, buyOrders, collections };
+  return out;
 }
-async function fetchPlayerMarket(id){
-  try { return await fetchPlayerMarketRelay(id); }
-  catch(e){ /* every mirror unreachable → fall back to bitjita */ }
+async function fetchPlayerMarketRelay(id){   // single-player wrapper
+  return (await fetchMarketRelayMulti([id]))[String(id)] || { sellOrders: [], buyOrders: [], collections: [] };
+}
+async function fetchPlayerMarketBitjita(id){
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
     apiFetch(`/api/players/${id}/market-collections`).catch(() => ({ collections: [] })),
   ]);
   return { sellOrders: m.sellOrders || [], buyOrders: m.buyOrders || [], collections: c.collections || [] };
+}
+async function fetchPlayerMarket(id){
+  try { return await fetchPlayerMarketRelay(id); }
+  catch(e){ /* every mirror unreachable → fall back to bitjita */ }
+  return fetchPlayerMarketBitjita(id);
 }
 function ordersContentHtml(data, playerId){
   const hist = playerId ? ordersHistoryBlock(playerId) : '';
@@ -2729,12 +2741,24 @@ async function renderOrdersTab(silent){
       <div id="orders-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-orders-' + p.entityId)).join('')}</div>`;
     updateLiveBtns();
   }
-  await Promise.all(trackedPlayers.map(async p => {
-    if (silent && isPlayerPaused(p.entityId) && ordersByPlayer[p.entityId]) return;
-    try { ordersByPlayer[p.entityId] = await fetchPlayerMarket(p.entityId); }
-    catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[] }; }
-    fillPlayerOrdersCached(p.entityId);
-  }));
+  // Batched relay pass for all tracked players (13 connections total, not per player); per-player
+  // bitjita fallback only if every mirror is unreachable.
+  const toLoad = trackedPlayers.filter(p => !(silent && isPlayerPaused(p.entityId) && ordersByPlayer[p.entityId]));
+  let batched = false;
+  if (toLoad.length){
+    try {
+      const multi = await fetchMarketRelayMulti(toLoad.map(p => p.entityId));
+      toLoad.forEach(p => { ordersByPlayer[p.entityId] = multi[String(p.entityId)] || { sellOrders:[], buyOrders:[], collections:[] }; fillPlayerOrdersCached(p.entityId); });
+      batched = true;
+    } catch(e){ /* relay down → bitjita per player */ }
+  }
+  if (!batched){
+    await Promise.all(toLoad.map(async p => {
+      try { ordersByPlayer[p.entityId] = await fetchPlayerMarketBitjita(p.entityId); }
+      catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
+      fillPlayerOrdersCached(p.entityId);
+    }));
+  }
   startLiveRefresh('orders');
 }
 
@@ -3224,19 +3248,22 @@ function readBuildingState(r){
   const entityId = r.u64().toString(), claimId = r.u64().toString();
   r.i32(); return { entityId, claimId, descId: r.i32() };
 }
-// One region: every craft the player owns there, plus which of them are public.
-async function relayRegionCrafts(region, playerId){
+// One region: every craft owned by ANY of the given players there, plus which are public. Batching all
+// tracked players into one OR'd query per region is essential — the browser throttles hard past ~13
+// simultaneous WebSockets, so one connection per region (not per region PER PLAYER) keeps us under the cliff.
+async function relayRegionCrafts(region, playerIds){
+  const owner = playerIds.map(id => `owner_entity_id = ${id}`).join(' OR ');
   const rows = await relayQuery(region, [
-    `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${playerId}`,
-    `SELECT * FROM passive_craft_state WHERE owner_entity_id = ${playerId}`,
-    `SELECT * FROM public_progressive_action_state WHERE owner_entity_id = ${playerId}`
+    `SELECT * FROM progressive_action_state WHERE ${owner}`,
+    `SELECT * FROM passive_craft_state WHERE ${owner}`,
+    `SELECT * FROM public_progressive_action_state WHERE ${owner}`
   ], (r, table) => {
     if (table === 'progressive_action_state') return readProgFull(r);
     if (table === 'passive_craft_state') return readPassiveRow(r);
     if (table === 'public_progressive_action_state') return { kind:'public', entityId: r.u64().toString() };
     return null;
   }, 9000);
-  return rows.filter(Boolean);
+  const out = rows.filter(Boolean); out.ok = rows.ok; return out;   // carry the answered flag through the filter
 }
 // Resolve the buildings/claims we haven't seen before. Buildings don't move and claims rarely rename,
 // so both are cached for the session — after the first load a refresh only pays for the craft scan.
@@ -3263,11 +3290,16 @@ async function relayResolvePlaces(region, buildingIds){
   rows.forEach(x => { if (x && x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name; });
   unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
 }
-async function fetchPlayerCraftsRelay(id){
+// Fetch crafts for MANY players in one pass: 13 connections total (one per region, all players OR'd in),
+// not 13 per player. Returns { playerId: {active, done, passive, itemMap} }. Throws only if every mirror
+// was unreachable, so the caller can fall back to bitjita.
+async function fetchCraftsRelayMulti(ids){
+  ids = ids.map(String);
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
-  const perRegion = await Promise.all(BC_REGIONS.map(rg => relayRegionCrafts(rg, id).then(rows => ({ rg, rows })).catch(() => ({ rg, rows: [] }))));
+  const perRegion = await Promise.all(BC_REGIONS.map(rg =>
+    relayRegionCrafts(rg, ids).then(rows => ({ rg, rows, ok: rows.ok })).catch(() => ({ rg, rows: [], ok: false }))));
+  if (!perRegion.some(x => x.ok)) throw new Error('relay unreachable');
   const hits = perRegion.filter(x => x.rows.length);
-  if (!hits.length) return { active: [], done: [], passive: [], itemMap: {} };
   // resolve place names region by region (cached, so this is a no-op on later refreshes)
   await Promise.all(hits.map(({ rg, rows }) => {
     const bIds = [...new Set(rows.filter(r => r.buildingId && r.buildingId !== '0').map(r => r.buildingId))];
@@ -3275,7 +3307,7 @@ async function fetchPlayerCraftsRelay(id){
   }));
   const recipes = (craftingData && craftingData.recipesById) || {};
   const defs = gameItemDefs || { items:{}, cargos:{}, buildings:{} };
-  const itemMap = {};
+  const out = {}; ids.forEach(id => out[id] = { active: [], done: [], passive: [], itemMap: {} });
   const place = r => {
     const b = relayBuildingInfo[r.buildingId] || { claimId:'0', descId:0, nickname:'' };
     const claimId = b.claimId && b.claimId !== '0' ? b.claimId : null;
@@ -3287,42 +3319,41 @@ async function fetchPlayerCraftsRelay(id){
       regionId: regionOfEntity(claimId || r.entityId)
     };
   };
-  const outputsOf = recipeId => {
+  const outputsOf = (recipeId, itemMap) => {
     const rec = recipes[recipeId];
     const outs = (rec && rec.outputs) || [];
     outs.forEach(o => { const m = defs.items[o.itemId] || defs.cargos[o.itemId]; if (m) itemMap[o.itemId] = m; });
     return outs.map(o => ({ item_id: o.itemId, quantity: o.quantity, item_type: 0 }));
   };
-  const active = [], passive = [];
   perRegion.forEach(({ rows }) => {
     const pub = new Set(rows.filter(r => r.kind === 'public').map(r => r.entityId));
     rows.forEach(r => {
+      const bucket = out[r.ownerId]; if (!bucket) return;   // guard: OR shouldn't return untracked owners
       if (r.kind === 'active'){
         const rec = recipes[r.recipeId] || {};
         const perItem = rec.actionsRequired || 0;
-        active.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
+        bucket.active.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
           progress: r.progress, recipeId: r.recipeId, recipeName: rec.name || '',
           craftCount: r.craftCount,
           actionsRequiredPerItem: perItem,
           totalActionsRequired: perItem * (r.craftCount || 1),
-          craftedItem: outputsOf(r.recipeId),
+          craftedItem: outputsOf(r.recipeId, bucket.itemMap),
           lockExpiration: r.lockMs ? new Date(r.lockMs).toISOString() : null,
           isPublic: pub.has(r.entityId), completed: false, ...place(r) });
       } else if (r.kind === 'passive'){
-        passive.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
+        bucket.passive.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
           recipeId: r.recipeId, recipeName: (recipes[r.recipeId]||{}).name || '',
           status: r.status, timestamp: new Date(r.startMs).toISOString(),
-          craftedItem: outputsOf(r.recipeId), ...place(r) });
+          craftedItem: outputsOf(r.recipeId, bucket.itemMap), ...place(r) });
       }
     });
   });
-  return { active, done: [], passive, itemMap };
+  return out;
 }
-async function fetchPlayerCrafts(id) {
-  try {
-    const r = await fetchPlayerCraftsRelay(id);
-    if (r.active.length || r.passive.length) return r;
-  } catch(e){ /* relay unreachable → fall back to bitjita below */ }
+async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
+  return (await fetchCraftsRelayMulti([id]))[String(id)] || { active: [], done: [], passive: [], itemMap: {} };
+}
+async function fetchPlayerCraftsBitjita(id){
   const [acData, pcData] = await Promise.all([
     apiFetch(`/api/players/${id}/crafts?completed=all`),
     apiFetch(`/api/players/${id}/passive-crafts?status=all`),
@@ -3336,6 +3367,13 @@ async function fetchPlayerCrafts(id) {
   const active = rawCrafts.filter(c => !isCraftDone(c)), done = rawCrafts.filter(c => isCraftDone(c));
   const passive = pcData.craftResults || pcData.passiveCrafts || pcData.crafts || pcData.results || (Array.isArray(pcData) ? pcData : []);
   return { active, done, passive, itemMap };
+}
+async function fetchPlayerCrafts(id) {
+  try {
+    const r = await fetchPlayerCraftsRelay(id);
+    if (r.active.length || r.passive.length) return r;
+  } catch(e){ /* relay unreachable → fall back to bitjita below */ }
+  return fetchPlayerCraftsBitjita(id);
 }
 function fillPlayerCraftCached(entityId) {
   const b = document.getElementById('psec-craft-' + entityId);
@@ -3511,12 +3549,24 @@ async function renderCraftingTab(silent) {
       <div id="craft-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId)).join('')}</div>`;
     updateLiveBtns();
   }
-  await Promise.all(trackedPlayers.map(async p => {
-    if (silent && isPlayerPaused(p.entityId) && craftByPlayer[p.entityId]) return;
-    try { craftByPlayer[p.entityId] = await fetchPlayerCrafts(p.entityId); }
-    catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
-    fillPlayerCraftCached(p.entityId);
-  }));
+  // Load every tracked player in ONE batched relay pass (13 connections total, not 13 per player —
+  // see the WebSocket cliff). Fall back to per-player bitjita only if every mirror is unreachable.
+  const toLoad = trackedPlayers.filter(p => !(silent && isPlayerPaused(p.entityId) && craftByPlayer[p.entityId]));
+  let batched = false;
+  if (toLoad.length){
+    try {
+      const multi = await fetchCraftsRelayMulti(toLoad.map(p => p.entityId));
+      toLoad.forEach(p => { craftByPlayer[p.entityId] = multi[String(p.entityId)] || { active:[], done:[], passive:[], itemMap:{} }; fillPlayerCraftCached(p.entityId); });
+      batched = true;
+    } catch(e){ /* relay down → bitjita per player */ }
+  }
+  if (!batched){
+    await Promise.all(toLoad.map(async p => {
+      try { craftByPlayer[p.entityId] = await fetchPlayerCraftsBitjita(p.entityId); }
+      catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
+      fillPlayerCraftCached(p.entityId);
+    }));
+  }
   // Live by default: active-craft progress streams over the websocket (startCraftLive) and the full list
   // auto-refreshes on the tab poll (startLiveRefresh — tab-scoped, stopped by stopLiveRefresh on leaving).
   // The Refresh button forces an immediate reload. startLiveRefresh() clears the passive countdown timer,
