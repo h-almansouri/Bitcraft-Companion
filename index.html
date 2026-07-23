@@ -2245,18 +2245,16 @@ function equipmentSectionHtml(data, pfx){
     </div>
   </div>`;
   };
-  // What's actually worn = the preset the game flags `active` — that flag is authoritative for the badge.
-  // The live equipment_state can differ from it (it lags on the relay after a loadout switch), so we still
-  // show it as its own "Currently worn" card when it isn't one of the presets — nothing gets hidden — but
-  // the green EQUIPPED badge follows the active preset (or the equipment_state card if no preset is active).
+  // The game has three preset SLOTS. The first (available from the start) lives in equipment_state; the
+  // other two are the equipment_preset_state rows. So they're all just Set 1 / Set 2 / Set 3, numbered
+  // sequentially. The `active` flag (only on the equipment_preset_state rows) marks which is equipped —
+  // when none is active, the first slot (equipment_state) is the worn one.
   const presets = eq.presets || [];
   const activeIdx = presets.findIndex(p => p.active);
-  const sig = slots => (slots||[]).map(s => s.slot + ':' + s.itemId).sort().join('|');
-  const curSig = sig(eq.current);
-  const curIsPreset = (eq.current||[]).length && presets.some(p => sig(p.slots) === curSig);
   const cards = [];
-  if ((eq.current||[]).length && !curIsPreset) cards.push(card('Currently worn', eq.current, activeIdx < 0));
-  presets.forEach((p, i) => cards.push(card('Set ' + p.index, p.slots, i === activeIdx)));
+  let n = 0;
+  if ((eq.current||[]).length) cards.push(card('Set ' + (++n), eq.current, activeIdx < 0));
+  presets.forEach((p, i) => cards.push(card('Set ' + (++n), p.slots, i === activeIdx)));
   const total = cards.length;
   return `<div class="inv-group">
     <div class="inv-group-header" onclick="toggleInvSection('${secKey}')">
