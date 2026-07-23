@@ -35,6 +35,7 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .sidebar-logo-icon{width:28px;height:28px;background:var(--teal-dim);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--teal-light);font-size:15px;flex-shrink:0}
 .sidebar-logo-text{font-size:14px;font-weight:600;color:var(--teal-light)}
 .sidebar-logo-text span{color:var(--text2);font-weight:400}
+.logo-wip{font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--amber-light);background:rgba(186,117,23,.16);border:1px solid rgba(186,117,23,.3);border-radius:4px;padding:1px 5px;line-height:1.4}
 
 .player-section{padding:.75rem 1rem;border-bottom:1px solid var(--border)}
 .search-wrap{position:relative}
@@ -77,6 +78,16 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .notif-hdr{display:flex;align-items:center;justify-content:space-between;padding:.6rem .8rem;border-bottom:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text2);position:sticky;top:0;background:var(--bg2);z-index:1}
 .notif-clear{background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:0}
 .notif-clear:hover{color:var(--red)}
+.notif-settings{background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:0;margin-right:.7rem;display:inline-flex;align-items:center;gap:.25rem}
+.notif-settings:hover{color:var(--teal-light)}
+/* alert settings modal */
+.al-modal{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 1rem;overflow-y:auto}
+.al-modal-box{background:var(--bg);border:1px solid var(--border2);border-radius:12px;width:100%;max-width:820px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.al-modal-hdr{display:flex;align-items:center;gap:.5rem;padding:.85rem 1.1rem;border-bottom:1px solid var(--border);font-size:15px;color:var(--text)}
+.al-modal-hdr>i{color:var(--teal-light)}
+.al-modal-x{background:none;border:none;color:var(--text3);font-size:18px;cursor:pointer;display:flex;padding:0}
+.al-modal-x:hover{color:var(--text)}
+#alerts-content{padding:1rem 1.1rem 1.2rem}
 .notif-row{display:flex;align-items:center;gap:.6rem;padding:.5rem .8rem;border-bottom:1px solid var(--border);font-size:12px}
 .notif-row:last-child{border-bottom:none}
 .notif-row>i{color:var(--teal-light);font-size:15px;flex-shrink:0}
@@ -262,69 +273,6 @@ main.planner-mode{max-width:none;padding:1rem}
 .tcb-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem}
 .tcb-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .55rem;font-size:11px;color:var(--text2)}
 .tcb-chip b{color:var(--text);font-weight:700}
-/* effort profit */
-.eff-intro{font-size:12px;color:var(--text3);margin-bottom:1rem;line-height:1.55;max-width:760px}
-.eff-intro b{color:var(--text2)}
-.eff-tools{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}
-.eff-tool-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .6rem;font-size:11px;color:var(--text3);display:flex;align-items:center;gap:.4rem}
-.eff-tool-chip b{color:var(--text2)}
-.eff-players{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-bottom:.7rem;font-size:12px;color:var(--text3)}
-.eff-player-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.25rem .7rem;font-size:12px;cursor:pointer;transition:all .12s}
-.eff-player-btn:hover{border-color:var(--border2);color:var(--text)}
-.eff-player-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
-.eff-controls{display:flex;flex-wrap:wrap;align-items:center;gap:.6rem;margin-bottom:.8rem}
-.eff-search{flex:1;min-width:180px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.45rem .7rem;font-size:13px}
-.eff-search:focus{outline:none;border-color:var(--teal)}
-.eff-sorts{display:flex;align-items:center;gap:.3rem}
-.eff-sort-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.25rem .7rem;font-size:12px;cursor:pointer;transition:all .12s}
-.eff-sort-btn:hover{border-color:var(--border2);color:var(--text)}
-.eff-sort-btn.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--teal-light);font-weight:600}
-.eff-meta{font-size:11px;color:var(--text3);margin-left:auto}
-.eff-mx-meta{font-size:11px;color:var(--text3);margin-bottom:.6rem}
-.eff-mx-blocked-k{color:var(--amber-light)}
-.eff-mx-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px}
-table.eff-mx{border-collapse:collapse;width:100%;font-size:12px;min-width:640px}
-table.eff-mx th,table.eff-mx td{padding:.45rem .3rem;text-align:center;border-bottom:1px solid var(--border);border-right:1px solid var(--border)}
-table.eff-mx tr:last-child td,table.eff-mx tr:last-child th{border-bottom:none}
-table.eff-mx td:last-child,table.eff-mx th:last-child{border-right:none}
-table.eff-mx thead th,table.eff-mx tr:first-child th{color:var(--text3);font-weight:600;font-size:11px}
-table.eff-mx th.eff-mx-fam{text-align:left;color:var(--text2);font-weight:600;white-space:nowrap;padding-left:.5rem;position:sticky;left:0;background:var(--bg2);z-index:1}
-.eff-mx-x{background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;line-height:1;padding:0 .35rem 0 0;vertical-align:middle;transition:color .12s}
-.eff-mx-x:hover{color:var(--red-light)}
-table.eff-mx td{color:var(--text);font-variant-numeric:tabular-nums}
-table.eff-mx td.eff-mx-empty{color:var(--border2)}
-table.eff-mx td.eff-mx-blocked{color:var(--amber-light);opacity:.55}
-.eff-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:.55rem;overflow:hidden}
-.eff-hdr{display:flex;align-items:center;gap:.85rem;padding:.7rem .9rem;cursor:pointer}
-.eff-hdr:hover{background:var(--bg3)}
-.eff-name{flex:1;font-weight:600;color:var(--text);display:flex;align-items:center;gap:.5rem;min-width:0}
-.eff-hpe{font-size:20px;font-weight:800;color:var(--green-light);font-variant-numeric:tabular-nums;line-height:1}
-.eff-hpe-lbl{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;text-align:right;margin-top:2px}
-.eff-sub{font-size:11px;color:var(--text3);text-align:right;white-space:nowrap;line-height:1.5}
-.eff-breakdown{border-top:1px solid var(--border);padding:.5rem .9rem;background:var(--bg)}
-.eff-node{display:flex;align-items:center;gap:.5rem;padding:2px 0;font-size:12px;color:var(--text2)}
-.eff-node .eff-eff{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums;min-width:46px}
-.eff-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;border-radius:4px;padding:1px 5px;white-space:nowrap}
-.eff-b-gather{background:rgba(108,200,74,.15);color:var(--green-light)}
-.eff-b-craft{background:rgba(29,158,117,.16);color:var(--teal-light)}
-.eff-b-passive{background:rgba(111,92,240,.17);color:#b0a4f0}
-.eff-b-raw{background:var(--bg4);color:var(--text3)}
-.eff-qty{color:var(--text3);font-weight:600}
-.eff-clickable{cursor:pointer}
-table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
-.eff-det{margin-top:1rem;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:.85rem 1rem}
-.eff-det-hdr{display:flex;align-items:center;font-size:14px;color:var(--text);margin-bottom:.6rem}
-.eff-det-x{cursor:pointer;color:var(--text3);font-size:16px}
-.eff-det-x:hover{color:var(--text)}
-.eff-det-tbl{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:.7rem}
-.eff-det-tbl td{padding:.35rem .2rem;border-bottom:1px solid var(--border);color:var(--text2)}
-.eff-det-tbl td.eff-det-num{text-align:right;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:.75rem}
-.eff-det-tbl tr.eff-det-total td{border-bottom:none;color:var(--text);font-weight:600;padding-top:.5rem}
-.eff-det-tbl tr.eff-det-total td.eff-det-num{color:var(--teal-light);font-size:14px}
-.eff-det-dim{color:var(--text3);font-weight:400}
-.eff-det-sub{font-size:11px;color:var(--text3);margin:.3rem 0 .45rem}
-.eff-det-tree{background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:.5rem .7rem}
-.eff-det-note{font-size:11px;color:var(--text3);margin-top:.6rem;line-height:1.45}
 /* alerts / notifications */
 .al-wrap{max-width:760px}
 .al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
@@ -408,9 +356,10 @@ table.eff-mx td.eff-sel{outline:2px solid var(--teal-light);outline-offset:-2px}
 .eq-slot-lbl{width:78px;flex-shrink:0;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em}
 .eq-slot-main{flex:1;min-width:0}
 .eq-slot-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
-.eq-slot-stats{font-size:10px;color:var(--text3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.eq-totals{border-top:1px solid var(--border);padding:.4rem .7rem;font-size:10px;color:var(--text3);line-height:1.6}
-.eq-totals b{color:var(--teal-light);font-weight:600}
+.eq-slot-stats{margin-top:3px;display:flex;flex-wrap:wrap;gap:3px}
+.eq-totals{border-top:1px solid var(--border);padding:.45rem .7rem;font-size:10px;color:var(--text3);display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.eq-totals b{color:var(--teal-light);font-weight:600;margin-right:.15rem}
+.eq-stat{display:inline-block;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:10px;color:var(--text2);white-space:nowrap;font-variant-numeric:tabular-nums}
 .eq-empty{padding:.5rem .7rem;font-size:11px;color:var(--text3)}
 .inv-toggle{display:flex;gap:.4rem;margin-bottom:.75rem}
 .inv-toggle button{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:5px;padding:4px 12px;font-size:12px;cursor:pointer;transition:all .15s}
@@ -834,6 +783,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
   <div class="sidebar-logo">
     <div class="sidebar-logo-icon"><i class="ti ti-hexagon"></i></div>
     <div class="sidebar-logo-text">Bitcraft <span>Companion</span></div>
+    <span class="logo-wip" title="This app is a work in progress">WIP</span>
   </div>
 
   <div class="player-section">
@@ -856,15 +806,15 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     <div class="nav-item" data-tab="orders" onclick="switchTab('orders')"><i class="ti ti-receipt-2"></i> Orders</div>
     <div class="nav-item" data-tab="jsn" onclick="switchTab('jsn')"><i class="ti ti-wallet"></i> Networth</div>
     <div class="nav-label" style="margin-top:.5rem">General</div>
-    <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts <span class="nav-wip">WIP</span></div>
+    <div class="nav-item" data-tab="opencrafts" onclick="switchTab('opencrafts')"><i class="ti ti-building-factory-2"></i> Open Crafts</div>
     <div class="nav-item" data-tab="market" onclick="switchTab('market')"><i class="ti ti-building-store"></i> Market</div>
     <div class="nav-item" data-tab="deals" onclick="switchTab('deals')"><i class="ti ti-trending-up"></i> Deals</div>
     <div class="nav-item" data-tab="shopping" onclick="switchTab('shopping')"><i class="ti ti-shopping-cart"></i> Shopping List</div>
     <div class="nav-item" data-tab="map" onclick="switchTab('map')"><i class="ti ti-map-2"></i> Map</div>
     <div class="nav-item" data-tab="planner" onclick="switchTab('planner')"><i class="ti ti-tool"></i> Planner</div>
-    <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting <span class="nav-wip">WIP</span></div>
-    <div class="nav-item" data-tab="effort" onclick="switchTab('effort')"><i class="ti ti-coins"></i> Effort Profit <span class="nav-wip">WIP</span></div>
-    <div class="nav-item" data-tab="alerts" onclick="switchTab('alerts')"><i class="ti ti-bell"></i> Alerts</div>
+    <div class="nav-item" data-tab="tools" onclick="switchTab('tools')"><i class="ti ti-tools"></i> Tool Crafting</div>
+    <div class="nav-label" style="margin-top:.5rem">Groups</div>
+    <div class="nav-item" data-tab="groupcraft" onclick="switchTab('groupcraft')"><i class="ti ti-users-group"></i> Group Craft</div>
   </div>
 </aside>
 
@@ -894,9 +844,16 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
     <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
-    <div id="tab-effort" style="display:none"><div id="effort-content"></div></div>
-    <div id="tab-alerts" style="display:none"><div id="alerts-content"></div></div>
+    <div id="tab-groupcraft" style="display:none"><div id="groupcraft-content"><div class="empty" style="padding:2rem"><i class="ti ti-users-group"></i><span>Group Craft — coming soon</span></div></div></div>
   </main>
+</div>
+
+<!-- Alert settings modal (opened from the notification bell) -->
+<div id="alerts-modal" class="al-modal" style="display:none" onclick="if(event.target===this)closeAlertSettings()">
+  <div class="al-modal-box">
+    <div class="al-modal-hdr"><i class="ti ti-bell-cog"></i> <b>Alert settings</b><span style="flex:1"></span><button class="al-modal-x" onclick="closeAlertSettings()" title="Close"><i class="ti ti-x"></i></button></div>
+    <div id="alerts-content"></div>
+  </div>
 </div>
 
 </div><!-- .layout -->
@@ -1406,7 +1363,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',effort:'Effort Profit',alerts:'Alerts'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft'};
 function switchTab(tab) {
   stopLiveRefresh();
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
@@ -1443,8 +1400,6 @@ function switchTab(tab) {
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
   else if (tab === 'tools') renderToolCrafting();
-  else if (tab === 'effort') renderEffort();
-  else if (tab === 'alerts') renderAlerts();
   else if (tab === 'opencrafts') renderOpenCraftsTab();
   else if (tab === 'orders') renderOrdersTab();
   else if (tab === 'jsn') renderJsnTab();
@@ -1605,7 +1560,7 @@ function refreshPlayerTabs() {
     renderPlannerInventory();
     if (plannerInvOpen && trackedPlayers.length) loadPlannerInventory().then(() => { computePlannerInvMap(); renderPlannerInventory(); renderPlanPanel(); renderBuildingSteps(); });
   }
-  else if (currentTab === 'alerts') renderAlerts();
+  if (isAlertSettingsOpen()) renderAlerts();   // refresh the per-player rows if the settings modal is open
   if (typeof restartAlerts === 'function') restartAlerts(); // roster changed → reset alert baselines
   if (typeof startLive === 'function') startLive();          // re-subscribe live feed to the new roster
 }
@@ -2243,14 +2198,14 @@ function mergeInvSlots(slots){
 // Worn gear + saved loadouts, as a collapsible block at the top of the Inventory tab. The set that's
 // actually on the player (equipment_state) is accented green and badged — the presets' own `active`
 // flag can't be trusted for that.
-const eqSetCollapsed = {};   // key → false once opened; absent/true = collapsed (the default)
-function toggleEqSet(key){
-  const body = document.getElementById('eq-body-' + key), chev = document.getElementById('eq-chev-' + key);
-  if (!body) return;
-  const open = eqSetCollapsed[key] === false;
-  eqSetCollapsed[key] = open;                                  // true = now collapsed
-  body.style.display = open ? 'none' : '';
-  if (chev) chev.style.transform = open ? 'rotate(-90deg)' : '';
+// The sets share ONE collapse state per player (keyed by pfx) — expanding any header expands them all,
+// which reads far clearer than each toggling independently.
+const eqSetCollapsed = {};   // pfx → false once opened; absent/true = all sets collapsed (the default)
+function toggleEqSet(pfx){
+  const open = eqSetCollapsed[pfx] === false;                 // currently open → collapse all
+  eqSetCollapsed[pfx] = open;
+  document.querySelectorAll(`.eq-body[data-eqpfx="${pfx}"]`).forEach(b => b.style.display = open ? 'none' : '');
+  document.querySelectorAll(`.eq-chev[data-eqpfx="${pfx}"]`).forEach(c => c.style.transform = open ? 'rotate(-90deg)' : '');
 }
 function equipmentSectionHtml(data, pfx){
   const eq = data && data.equipment;
@@ -2259,7 +2214,9 @@ function equipmentSectionHtml(data, pfx){
   const equipDefs = (typeof gameItemDefs !== 'undefined' && gameItemDefs && gameItemDefs.equip) || {};
   const secKey = pfx + '|equipment';
   const collapsed = !!invSectionCollapsed[secKey];
+  const shut = eqSetCollapsed[pfx] !== false;                 // all sets share one collapse state (default: collapsed)
   const statText = st => `${fmtStatVal(st.value, st.isPct)} ${statLabel(st.i)}`;
+  const statPills = list => list.map(s => `<span class="eq-stat">${escHtml(s)}</span>`).join('');   // no dots between stats
   const slotRow = it => {
     const meta = (it.itemType === 1 ? cargos : items)[it.itemId] || {};
     const rar = (meta.rarityStr || '').toLowerCase();
@@ -2269,31 +2226,36 @@ function equipmentSectionHtml(data, pfx){
       ${gameIconImg(meta.iconAssetName, 20)}
       <div class="eq-slot-main">
         <div class="eq-slot-name" title="${escHtml(meta.name || '')}">${escHtml(meta.name || ('Item ' + it.itemId))}</div>
-        ${stats.length ? `<div class="eq-slot-stats" title="${escHtml(stats.join(' · '))}">${escHtml(stats.join(' · '))}</div>` : ''}
+        ${stats.length ? `<div class="eq-slot-stats">${statPills(stats)}</div>` : ''}
       </div>
       ${meta.tier > 0 ? `<span class="badge badge-tier" style="font-size:9px;padding:0 4px">T${meta.tier}</span>` : ''}
       ${rar ? `<span class="badge ${rarityClass(rar)}" style="font-size:9px;padding:0 4px">${escHtml(cap(rar))}</span>` : ''}
     </div>`;
   };
-  const card = (title, slots, worn, key) => {
+  const card = (title, slots, worn) => {
     const totals = equipSetStats(slots, equipDefs);
-    const shut = eqSetCollapsed[key] !== false;               // sets start collapsed
     return `<div class="eq-set${worn ? ' eq-set-on' : ''}">
-    <div class="eq-set-hdr" onclick="toggleEqSet('${key}')"><i class="ti ti-${worn ? 'shirt-filled' : 'shirt'}" style="font-size:13px"></i>${escHtml(title)}
+    <div class="eq-set-hdr" onclick="toggleEqSet('${pfx}')"><i class="ti ti-${worn ? 'shirt-filled' : 'shirt'}" style="font-size:13px"></i>${escHtml(title)}
       ${worn ? '<span class="eq-badge">EQUIPPED</span>' : ''}<span style="flex:1"></span>
       <span class="eq-count">${slots.length} piece${slots.length !== 1 ? 's' : ''}</span>
-      <i class="ti ti-chevron-down eq-chev" id="eq-chev-${key}" style="${shut?'transform:rotate(-90deg)':''}"></i></div>
-    <div id="eq-body-${key}"${shut?' style="display:none"':''}>
+      <i class="ti ti-chevron-down eq-chev" data-eqpfx="${pfx}" style="${shut?'transform:rotate(-90deg)':''}"></i></div>
+    <div class="eq-body" data-eqpfx="${pfx}"${shut?' style="display:none"':''}>
       ${slots.length ? `<div class="eq-slots">${EQUIP_ORDER.map(sl => { const it = slots.find(s => s.slot === sl); return it ? slotRow(it) : ''; }).join('')}</div>`
                      : '<div class="eq-empty">Nothing equipped</div>'}
-      ${totals.length ? `<div class="eq-totals"><b>Set totals</b> — ${totals.map(t => escHtml(statText(t))).join(' · ')}</div>` : ''}
+      ${totals.length ? `<div class="eq-totals"><b>Set totals</b> ${statPills(totals.map(statText))}</div>` : ''}
     </div>
   </div>`;
   };
+  // The EQUIPPED badge marks what's actually worn (equipment_state). If the worn gear exactly matches a
+  // saved preset, badge that preset; otherwise the player is wearing a custom mix, shown as its own
+  // "Currently worn" card. (The presets' own `active` flag is unreliable — it stays set on a stale loadout.)
+  const sig = slots => (slots||[]).map(s => s.slot + ':' + s.itemId).sort().join('|');
+  const curSig = sig(eq.current);
+  const matchIdx = (eq.current||[]).length ? (eq.presets||[]).findIndex(p => sig(p.slots) === curSig) : -1;
   const cards = [];
-  if ((eq.current||[]).length) cards.push(card('Currently worn', eq.current, true, pfx + '-eqworn'));
-  (eq.presets||[]).forEach(p => cards.push(card('Set ' + p.index, p.slots, false, pfx + '-eqset' + p.index)));
-  const total = ((eq.current||[]).length ? 1 : 0) + (eq.presets||[]).length;
+  if ((eq.current||[]).length && matchIdx < 0) cards.push(card('Currently worn', eq.current, true));
+  (eq.presets||[]).forEach((p, i) => cards.push(card('Set ' + p.index, p.slots, i === matchIdx)));
+  const total = cards.length;
   return `<div class="inv-group">
     <div class="inv-group-header" onclick="toggleInvSection('${secKey}')">
       <span class="inv-group-name"><i class="ti ti-shirt"></i>Equipment</span>
@@ -9102,13 +9064,23 @@ function renderNotifBell(){
   else badge.style.display = 'none';
 }
 function notifPanelHtml(){
-  if (!notifHistory.length) return '<div class="notif-empty">No notifications yet</div>';
+  const hdr = `<div class="notif-hdr"><span>Notifications</span><span style="flex:1"></span><button class="notif-settings" onclick="openAlertSettings()" title="Alert settings"><i class="ti ti-settings"></i> Settings</button>${notifHistory.length?'<button class="notif-clear" onclick="clearNotifHistory()">Clear</button>':''}</div>`;
+  if (!notifHistory.length) return hdr + '<div class="notif-empty">No notifications yet</div>';
   const rows = notifHistory.map(n => {
     const icon = (ALERT_META[n.type]||{}).icon || 'ti-bell';
     return `<div class="notif-row"><i class="ti ${icon}"></i><div class="notif-row-msg">${escHtml(n.msg)}</div><div class="notif-row-ts">${escHtml(fmtNotifTime(n.ts))}</div></div>`;
   }).join('');
-  return `<div class="notif-hdr"><span>Notifications</span><button class="notif-clear" onclick="clearNotifHistory()">Clear</button></div>${rows}`;
+  return hdr + rows;
 }
+// Alert settings live in a modal opened from the bell (they used to be their own tab). renderAlerts()
+// fills #alerts-content, which now lives inside #alerts-modal.
+function openAlertSettings(){
+  notifPanelOpen = false; const p = document.getElementById('notif-panel'); if (p) p.style.display = 'none';
+  const m = document.getElementById('alerts-modal'); if (!m) return;
+  m.style.display = ''; renderAlerts();
+}
+function closeAlertSettings(){ const m = document.getElementById('alerts-modal'); if (m) m.style.display = 'none'; }
+function isAlertSettingsOpen(){ const m = document.getElementById('alerts-modal'); return !!(m && m.style.display !== 'none'); }
 function toggleNotifPanel(ev){
   if (ev) ev.stopPropagation();
   const panel = document.getElementById('notif-panel'); if (!panel) return;
@@ -9268,7 +9240,7 @@ function renderAlerts(){
     </div>`;
   };
   const _voices = ttsVoices();
-  if (!_voices.length && ('speechSynthesis' in window) && !window.__ttsVoiceBound){ window.__ttsVoiceBound = true; speechSynthesis.onvoiceschanged = () => { if (currentTab === 'alerts') renderAlerts(); }; }
+  if (!_voices.length && ('speechSynthesis' in window) && !window.__ttsVoiceBound){ window.__ttsVoiceBound = true; speechSynthesis.onvoiceschanged = () => { if (isAlertSettingsOpen()) renderAlerts(); }; }
   const _tts = alertSettings.tts, _ttsOk = 'speechSynthesis' in window;
   const _voiceOpts = _voices.map(v => `<option value="${escHtml(v.voiceURI)}"${_tts.voice===v.voiceURI?' selected':''}>${escHtml(v.name.replace(/\s*[-(].*$/,''))}</option>`).join('');
   const _ttsSection = !_ttsOk ? '' : `
@@ -9466,340 +9438,6 @@ function syncSkillActiveStates(id){
     if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
     else if (!active && badge){ badge.remove(); }
   });
-}
-
-// ── EFFORT PROFIT ──  hex earned per unit of effort (actions) to produce & sell an item.
-// Effort = gather actions (nodeHP / your tool power ÷ yield) + active craft actions; passive crafts = 0.
-let effortData = null;
-let effortPriceCache = {};   // craftId -> avg7d hex (null = no data)
-let effortPlayer = null;     // entityId whose toolbelt is assumed for gather effort (persisted)
-const EFFORT_SKIP = /^(package |unpack |recraft |reforge |scrap )/i;
-const EFFORT_CONC = 6;
-let effortMemo = null;       // effort walk memo for the current render
-let effortSeq = 0;           // bumped each render to cancel stale pricing
-let effortToolMapCur = {}, effortSkillsCur = null;   // player context, reused when rows are added/removed
-// ── customizable matrix: material family (row) × tier 1-10 (column), cells = hex/effort ──
-// The family catalog is discovered from item names: strip a leading tier word (a metal name or quality
-// adjective) and group by the remaining "core" (Ingot, Plank, Cloth, Ore Chunk, …). PREFIX maps that
-// leading word to a tier, which is more reliable than the item's own tier field.
-const EFFORT_PREFIX = { Rough:1,Basic:1,Ferralith:1, Simple:2,Pyrelite:2, Sturdy:3,Infused:3,Emarium:3, Fine:4,Elenvar:4, Exquisite:5,Luminite:5, Peerless:6,Rathium:6, Ornate:7,Aurumite:7, Pristine:8,Celestium:8, Magnificent:9,Umbracite:9, Flawless:10,Astralite:10 };
-const EFFORT_CAT_BLOCK = /\b(output|package|deed|blueprint|experiment|products)\b|^recipe:|refined |high quality/i;
-// Some raws are gathered in the data as a generic "T<n> X Output" item, distinct from the tradeable item.
-// Bridge effort from the Output item (keyed by family core), price from the tradeable item.
-const EFFORT_BRIDGES = { 'Berry':/^T\d+ Berry Output$/, 'Sand':/^T\d+ Sand Output$/, 'Clay Lump':/^T\d+ Clay Output$/ };
-const EFFORT_MATRIX_DEFAULT = ['Ingot','Plank','Rope','Leather','Raw Pelt','Wood Log','Berry','Mushroom','Flower','Fish Oil','Sand','Clay Lump'];
-let effortMatrixRows = null;                 // ordered catalog keys shown as rows (persisted)
-let effortCatalog = null, effortCatalogByKey = {};   // discovered families: key -> { key, label, tiers:{t:item} }
-let effortMatrixGrid = [];                   // last-built grid (for the heatmap)
-let effortCellIndex = {};                    // item.id -> cell (for the click-to-expand breakdown)
-let effortDetailOpen = null;                 // item.id of the currently expanded cell
-async function loadEffortData(){
-  if (effortData) return;
-  const d = await apiFetch('/effort-data?v=2');
-  d._passive = new Set(d.passiveRecipeIds || []);
-  effortData = d;
-  loadEffortPriceCache();
-}
-// Persist avg7d prices so re-opening the tab is instant (6h TTL — prices drift slowly).
-const EFFORT_PRICE_TTL = 6 * 3600 * 1000;
-function loadEffortPriceCache(){
-  try { const v = JSON.parse(localStorage.getItem('bc_effort_prices') || 'null'); if (v && v.ts && (Date.now() - v.ts) < EFFORT_PRICE_TTL && v.map) effortPriceCache = v.map; } catch(e){}
-}
-let _effPriceSaveT = null;
-function saveEffortPriceCache(){
-  if (_effPriceSaveT) return;
-  _effPriceSaveT = setTimeout(() => { _effPriceSaveT = null; try { localStorage.setItem('bc_effort_prices', JSON.stringify({ ts: Date.now(), map: effortPriceCache })); } catch(e){} }, 1500);
-}
-// Per tool type, the best power AND best tier the tracked player has (from their inventory/toolbelt).
-// Power drives gather effort (hits to fell a node); tier gates which resources they can harvest at all.
-function effortToolMap(playerId){
-  const map = {};
-  if (invData && effortData){
-    (invData.inventories||[]).forEach(inv => {
-      if (playerId && String(inv._ownerId) !== String(playerId)) return;   // only the chosen player's toolbelt
-      (inv.pockets||[]).forEach(pk => {
-        const s = slotContents(pk); if (!s) return;
-        const t = effortData.tools[s.itemId];
-        if (t && t.power != null){
-          const cur = map[t.type] || { power:0, tier:0 };
-          map[t.type] = { power: Math.max(cur.power, t.power), tier: Math.max(cur.tier, t.tier||0) };
-        }
-      });
-    });
-  }
-  return map;
-}
-function setEffortPlayer(id){ effortPlayer = String(id); try { safeSetItem('bc_effort_player', effortPlayer); } catch(e){} renderEffort(); }
-function effortPowerFor(type, toolMap){ const t = toolMap[type]; return (t && t.power) || effortData.toolTypeMinPower[type] || effortData.toolTypeMinPower[String(type)] || 10; }
-function effortToolTier(type, toolMap){ const t = toolMap[type]; return (t && t.tier) || 0; }
-// Skill levels for a player (skillId -> level). Reuses the Experience tab's data if loaded, else fetches.
-let effortSkillCache = {};
-async function effortSkillLevels(playerId){
-  if (!playerId) return null;                                   // no player selected -> no skill filtering
-  if (effortSkillCache[playerId]) return effortSkillCache[playerId];
-  try { await ensureThresholds(); } catch(e){}          // xpToLevel needs the XP threshold table
-  const levels = {};
-  const cached = skillsByPlayer[playerId];
-  if (cached && cached.skills && cached.skills.length){ cached.skills.forEach(s => levels[s.skillId] = s.level); }
-  else {
-    try { const pd = await apiFetch(`/api/players/${playerId}`); ((pd.player && pd.player.experience) || []).forEach(e => levels[e.skill_id] = xpToLevel(e.quantity)); }
-    catch(e){ return null; }
-  }
-  effortSkillCache[playerId] = levels;
-  return levels;
-}
-// Cheapest gather effort for 1 unit of an item = the DAMAGE you must deal to a node to yield one unit,
-// on average (independent of tool power / how fast you swing — that's speed, not effort). Yield is per
-// damage dealt, so yield/node = dropRate*hp + onDestroy and effort/unit = hp ÷ yield/node. With no
-// on-death bonus the hp cancels → effort = 1/dropRate. skillLevels==null means no player filtering.
-function effortGatherOf(id, toolMap, skillLevels){
-  const srcs = effortData.gather[id]; if (!srcs || !srcs.length) return null;
-  let best = Infinity;
-  for (const s of srcs){
-    if (skillLevels){
-      if (s.skillId && s.skillId !== 1 && (skillLevels[s.skillId]||0) < (s.skillLevel||0)) continue;   // skill gate
-      if (s.toolType && s.toolTier && effortToolTier(s.toolType, toolMap) < s.toolTier) continue;        // tool-tier gate
-    }
-    const yield_ = s.perAction*s.hp + s.onDestroy;                    // units yielded over one node
-    if (yield_ > 0) best = Math.min(best, s.hp / yield_);             // = damage dealt per unit (tool-independent)
-  }
-  return isFinite(best) ? best : null;
-}
-// Recursive min-effort walk. Returns {effort, how, recipe, actions, kids:[{id,qty}]}, or null if the item
-// is UNREACHABLE for the player (every recipe/gather path is blocked by a skill/tool gate).
-function computeEffort(id, toolMap, memo, stack, skillLevels){
-  if (memo.has(id)) return memo.get(id);
-  stack = stack || new Set();
-  const opts = [];
-  let hadCandidate = false, cycleSkipped = false;
-  const srcs = effortData.gather[id];
-  if (srcs && srcs.length){ hadCandidate = true; const g = effortGatherOf(id, toolMap, skillLevels); if (g != null) opts.push({ effort:g, how:'gather' }); }
-  for (const r of (craftingData.recipesByOutput[id] || [])){
-    if (EFFORT_SKIP.test(r.name)) continue;
-    hadCandidate = true;
-    if (skillLevels && r.skillId && r.skillId !== 1 && (skillLevels[r.skillId]||0) < (r.skillLevel||0)) continue;   // skill gate
-    if ((r.inputs||[]).some(i => stack.has(i.itemId))) { cycleSkipped = true; continue; }                            // avoid cycles
-    const ns = new Set(stack); ns.add(id);
-    let ok = true, inEff = 0; const kids = [];
-    for (const inp of (r.inputs||[])){ const e = computeEffort(inp.itemId, toolMap, memo, ns, skillLevels); if (e == null){ ok = false; break; } inEff += e.effort * inp.quantity; kids.push({ id:inp.itemId, qty:inp.quantity }); }
-    if (!ok) continue;
-    const outQty = (r.outputs.find(o=>o.itemId===id)||{}).quantity || 1;
-    const passive = effortData._passive.has(r.id);
-    opts.push({ effort:((passive?0:(r.actionsRequired||0)) + inEff)/outQty, how:passive?'passive':'craft', recipe:r.name, actions:passive?0:(r.actionsRequired||0), outQty, kids });
-  }
-  let res;
-  if (opts.length) res = opts.sort((a,b)=>a.effort-b.effort)[0];
-  else if (hadCandidate && cycleSkipped) return null;   // context-dependent (cycle) -> don't memoize
-  else if (hadCandidate) res = null;                    // genuinely blocked by skill/tool gates
-  else res = { effort:0, how:'raw' };                   // base material with no recipe/gather -> free
-  memo.set(id, res);
-  return res;
-}
-// avg7d market price via bitjita's price-history (cargo ids are stored at craftId+4e9).
-async function effortPrice(id){
-  if (effortPriceCache[id] !== undefined) return effortPriceCache[id];
-  const isCargo = id >= 4000000000, marketId = isCargo ? id - 4000000000 : id, type = isCargo ? 'cargo' : 'items';
-  try { const d = await apiFetch(`/api/market/${type}/${marketId}/price-history?limit=1`); const v = d.priceStats ? (d.priceStats.avg7d != null ? d.priceStats.avg7d : d.priceStats.avg24h) : null; effortPriceCache[id] = v; saveEffortPriceCache(); return v; }
-  catch(e){ effortPriceCache[id] = null; return null; }
-}
-function fmtEffort(n){ if (n>=100) return Math.round(n).toString(); if (n>=1) return (Math.round(n*10)/10).toString(); return (Math.round(n*100)/100).toString(); }
-function effortTreeHtml(id, memo, depth, qty){
-  const e = memo.get(id); if (!e) return '';
-  const it = (craftingData.itemsById[id]) || { name:'#'+id };
-  const B = { gather:'eff-b-gather', craft:'eff-b-craft', passive:'eff-b-passive', raw:'eff-b-raw' }[e.how] || 'eff-b-raw';
-  const tag = e.how==='craft' ? `craft · ${e.actions} act` : (e.how==='passive' ? 'passive · 0 act' : (e.how==='gather' ? 'gather' : 'raw'));
-  const q = (qty && qty !== 1) ? `<span class="eff-qty">${fmtCount(qty)}×</span> ` : '';
-  let html = `<div class="eff-node" style="padding-left:${depth*16}px"><span class="eff-eff">${fmtEffort(e.effort)}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${q}${escHtml(it.name)}</span><span class="eff-badge ${B}">${tag}</span></div>`;
-  if (e.kids && depth < 6) for (const k of e.kids) html += effortTreeHtml(k.id, memo, depth+1, k.qty);
-  return html;
-}
-// Discover the family catalog from item names (once). Group items by "core" after stripping a leading
-// tier word; keep families that span >= 4 tiers.
-function buildEffortCatalog(){
-  if (effortCatalog) return effortCatalog;
-  const cat = {};
-  for (const it of craftingData.items){
-    const n = it.name || ''; const m = n.match(/^(\S+)\s+(.+)$/); if (!m) continue;
-    const t = EFFORT_PREFIX[m[1]]; if (!t) continue;
-    if ((it.tag && /DEVELOPER/i.test(it.tag)) || EFFORT_CAT_BLOCK.test(n)) continue;
-    const core = m[2];
-    const fam = cat[core] || (cat[core] = { key:core, label:core, tiers:{} });
-    const cur = fam.tiers[t];
-    // prefer a plain (non-cargo) item and the shortest name when several map to the same tier
-    if (!cur || (it.id < 4000000000 && cur.id >= 4000000000) || n.length < cur.name.length) fam.tiers[t] = it;
-  }
-  effortCatalog = Object.values(cat).filter(f => Object.keys(f.tiers).length >= 4).sort((a,b) => a.label.localeCompare(b.label));
-  effortCatalogByKey = {}; effortCatalog.forEach(f => effortCatalogByKey[f.key] = f);
-  return effortCatalog;
-}
-function loadEffortMatrixRows(){
-  if (!effortMatrixRows){
-    try { const v = JSON.parse(localStorage.getItem('bc_effort_matrix_rows') || 'null'); if (Array.isArray(v)) effortMatrixRows = v; } catch(e){}
-    if (!effortMatrixRows) effortMatrixRows = EFFORT_MATRIX_DEFAULT.slice();
-    // one-time: 'Animal Hair' has prices but no effort chain (always blank), so retire it for 'Raw Pelt'
-    try {
-      if (!localStorage.getItem('bc_effort_mx_migrated')){
-        effortMatrixRows = effortMatrixRows.map(k => k === 'Animal Hair' ? 'Raw Pelt' : k).filter((k,i,a) => a.indexOf(k) === i);
-        localStorage.setItem('bc_effort_mx_migrated', '1'); saveEffortMatrixRows();
-      }
-    } catch(e){}
-  }
-  effortMatrixRows = effortMatrixRows.filter(k => effortCatalogByKey[k]);   // drop keys not in the catalog
-  return effortMatrixRows;
-}
-function saveEffortMatrixRows(){ try { localStorage.setItem('bc_effort_matrix_rows', JSON.stringify(effortMatrixRows)); } catch(e){} }
-function effortMatrixRemove(key){ effortMatrixRows = effortMatrixRows.filter(k => k !== key); saveEffortMatrixRows(); renderEffort(); }
-function effortMatrixAdd(label){
-  const f = effortCatalog.find(x => x.label.toLowerCase() === (label||'').trim().toLowerCase());
-  if (!f || effortMatrixRows.includes(f.key)) return;
-  effortMatrixRows = effortMatrixRows.concat(f.key); saveEffortMatrixRows();
-  renderEffort();
-}
-async function renderEffort(){
-  const el = document.getElementById('effort-content'); if (!el) return;
-  const seq = ++effortSeq;                                // cancel any in-flight pricing from a prior render
-  el.innerHTML = loading();
-  try { await loadCraftingData(); await loadEffortData(); } catch(e){ el.innerHTML = errBox(e); return; }
-  if (trackedPlayers.length && !invData){ try { await loadPlannerInventory(); } catch(e){} }
-  if (seq !== effortSeq) return;
-  // which player's toolbelt + skills to assume (default: first tracked; persisted)
-  if (effortPlayer == null){ try { effortPlayer = localStorage.getItem('bc_effort_player'); } catch(e){} }
-  let selId = effortPlayer;
-  if (!trackedPlayers.some(p => String(p.entityId) === String(selId))) selId = trackedPlayers[0] ? String(trackedPlayers[0].entityId) : null;
-  effortPlayer = selId;
-  const toolMap = effortToolMap(selId);
-  const skills = await effortSkillLevels(selId);          // null -> no skill filtering
-  effortToolMapCur = toolMap; effortSkillsCur = skills;
-  if (seq !== effortSeq) return;
-  buildEffortCatalog(); loadEffortMatrixRows();
-  effortMemo = new Map();
-
-  const selP = trackedPlayers.find(p => String(p.entityId) === String(selId));
-  const nTypes = Object.keys(toolMap).length;
-  const toolNote = !selId
-    ? 'No player selected — showing every item at the game\'s baseline tools. Track a player to filter to what they can actually make.'
-    : (nTypes ? `Filtered to what <b>${escHtml(playerName(selP))}</b> can gather &amp; craft — their skill levels and tool tiers (${nTypes} tool type${nTypes>1?'s':''}) gate what's reachable. Effort itself is tool-independent.`
-              : `<b>${escHtml(playerName(selP))}</b> has no toolbelt tools found — showing everything at the baseline.`);
-  const picker = trackedPlayers.length ? `<div class="eff-players"><span>Player:</span>${trackedPlayers.map(p => `<button class="eff-player-btn${String(p.entityId)===String(selId)?' active':''}" onclick="setEffortPlayer('${p.entityId}')">${escHtml(playerName(p))}</button>`).join('')}</div>` : '';
-  const shown = new Set(effortMatrixRows);
-  const options = effortCatalog.filter(f => !shown.has(f.key)).map(f => `<option value="${escHtml(f.label)}">`).join('');
-  el.innerHTML = `<div class="eff-intro"><b>Hex per effort</b> = a sale's value ÷ the effort to produce it. <b>Gathering effort</b> = the damage you must deal to a node per unit yielded (= 1 ÷ drop-rate; independent of tool speed). <b>Crafting</b> adds its active action count; <b>passive crafts cost 0</b>. Assumes you gather &amp; craft everything from raw. Value = bitjita 7-day average price. Build your own comparison — add or remove material rows.</div>
-    ${picker}
-    <div class="eff-tools"><span class="eff-tool-chip"><i class="ti ti-tools"></i> ${toolNote}</span></div>
-    <div class="eff-controls">
-      <input id="eff-mx-add" class="eff-search" list="eff-mx-catalog" placeholder="Add a material row… (e.g. Cloth, Brick, Ore Chunk)" onchange="effortMatrixAdd(this.value)">
-      <datalist id="eff-mx-catalog">${options}</datalist>
-    </div>
-    <div id="eff-body"></div>`;
-  renderEffortMatrix(seq);
-}
-function fmtHpe(v){ if (v==null) return '—'; if (v>=1000) return (v/1000).toFixed(1)+'k'; if (v>=100) return Math.round(v).toString(); if (v>=10) return v.toFixed(1); return v.toFixed(2); }
-async function renderEffortMatrix(seq){
-  const body = document.getElementById('eff-body'); if (!body) return;
-  const toolMap = effortToolMapCur, skills = effortSkillsCur, memo = effortMemo || (effortMemo = new Map());
-  const cells = [];                                       // priceable cells to fill in
-  const grid = effortMatrixRows.map(key => {
-    const fam = effortCatalogByKey[key]; if (!fam) return null;
-    const bridge = EFFORT_BRIDGES[key];
-    const row = { key, label: fam.label, tiers:{} };
-    for (let t=1; t<=10; t++){
-      const priceItem = fam.tiers[t];
-      if (!priceItem) continue;                            // no such tier -> blank cell
-      // bridge effort from the gatherable "T<n> X Output" variant (item.tier is unreliable there, so read
-      // the tier from the name); otherwise effort comes from the tradeable item itself.
-      const effItem = bridge ? craftingData.items.find(i => bridge.test(i.name||'') && parseInt((String(i.name).match(/^T(\d+)/)||[])[1], 10) === t) : priceItem;
-      const e = effItem ? computeEffort(effItem.id, toolMap, memo, undefined, skills) : null;
-      if (e == null){ row.tiers[t] = { item:priceItem, blocked:true }; continue; }      // has a path but skill/tool gated
-      if (!(e.effort > 0)){ row.tiers[t] = { item:priceItem, nodata:true }; continue; } // no gather/recipe effort data
-      const c = { item:priceItem, tier:t, e, effId: effItem.id, price: effortPriceCache[priceItem.id], hpe:null };
-      if (c.price != null) c.hpe = c.price / e.effort;
-      row.tiers[t] = c; if (c.price === undefined) cells.push(c);
-    }
-    return row;
-  }).filter(Boolean);
-  effortMatrixGrid = grid;
-  effortDetailOpen = null;   // a fresh matrix render closes any open breakdown
-  effortCellIndex = {}; grid.forEach(r => Object.values(r.tiers).forEach(c => { if (c && c.item && c.e) effortCellIndex[String(c.item.id)] = c; }));
-  const head = `<tr><th class="eff-mx-fam"></th>${Array.from({length:10},(_,i)=>`<th>T${i+1}</th>`).join('')}</tr>`;
-  const bodyRows = grid.map(row => {
-    const tds = Array.from({length:10}, (_, i) => {
-      const c = row.tiers[i+1];
-      if (!c) return '<td class="eff-mx-empty">·</td>';
-      if (c.blocked) return `<td class="eff-mx-blocked" title="${escHtml(c.item.name)} — your skills/tools can't make this yet">✕</td>`;
-      if (c.nodata) return `<td class="eff-mx-empty" title="${escHtml(c.item.name)} — no gather/recipe effort data">—</td>`;
-      const disp = c.hpe!=null ? fmtHpe(c.hpe) : (c.price===undefined ? '·' : '—');
-      return `<td id="eff-mx-${c.item.id}" class="eff-clickable" onclick="effortCellDetail('${c.item.id}')" title="${escHtml(c.item.name)} · ${fmtEffort(c.e.effort)} effort — click for the breakdown">${disp}</td>`;
-    }).join('');
-    return `<tr><th class="eff-mx-fam"><button class="eff-mx-x" title="Remove row" onclick="effortMatrixRemove(&quot;${escHtml(row.key)}&quot;)">×</button>${escHtml(row.label)}</th>${tds}</tr>`;
-  }).join('');
-  const table = grid.length ? `<div class="eff-mx-wrap"><table class="eff-mx">${head}${bodyRows}</table></div>` : '<div class="empty"><span>No rows — add a material above.</span></div>';
-  body.innerHTML = `<div class="eff-mx-meta">Cells = hex / effort for the base material at each tier, greener = better. Click a cell for the math. <span class="eff-mx-blocked-k">✕</span> = your skills/tools can't make it yet · <b>—</b> = no market/effort data · <span style="color:var(--text3)">blank = no such tier</span>. <span id="eff-mx-prog" style="margin-left:.4rem"></span></div>
-    ${table}
-    <div id="eff-mx-detail"></div>`;
-  // price the cells, then colour the grid as a heatmap
-  let done = 0; const total = cells.length; let idx = 0;
-  const prog = () => { const p = document.getElementById('eff-mx-prog'); if (p) p.textContent = done<total ? `pricing ${done}/${total}…` : ''; };
-  async function worker(){
-    while (idx < cells.length){
-      if (seq !== effortSeq) return;
-      const c = cells[idx++];
-      const pr = await effortPrice(c.item.id);
-      if (seq !== effortSeq) return;
-      c.price = pr; c.hpe = (pr!=null && c.e.effort>0) ? pr/c.e.effort : null;
-      const td = document.getElementById('eff-mx-'+c.item.id);
-      if (td){ td.textContent = c.hpe!=null ? fmtHpe(c.hpe) : '—'; td.title = `${c.item.name} · ${fmtEffort(c.e.effort)} effort · ${pr!=null?fmtCoin(Math.round(pr))+' avg7d':'no market data'}`; }
-      done++; prog();
-    }
-  }
-  prog();
-  await Promise.all(Array.from({length:EFFORT_CONC}, () => worker()));
-  if (seq !== effortSeq) return;
-  effortMatrixHeatmap(grid);
-}
-// Click a matrix cell → expand a breakdown of how its hex/effort was computed.
-function effortCellDetail(itemId){
-  itemId = String(itemId);
-  const det = document.getElementById('eff-mx-detail'); if (!det) return;
-  document.querySelectorAll('#eff-body td.eff-sel').forEach(td => td.classList.remove('eff-sel'));
-  if (effortDetailOpen === itemId){ effortDetailOpen = null; det.innerHTML = ''; return; }   // toggle off
-  const c = effortCellIndex[itemId]; if (!c || !c.e) return;
-  effortDetailOpen = itemId;
-  const td = document.getElementById('eff-mx-' + itemId); if (td) td.classList.add('eff-sel');
-  const price = c.price, effort = c.e.effort;
-  const hpe = (price != null && effort > 0) ? price / effort : null;
-  const tierBadge = c.tier ? `<span class="badge badge-tier" style="margin-left:.35rem">T${c.tier}</span>` : '';
-  const priceStr = price === undefined ? 'loading…' : (price == null ? 'no market data'
-    : ((price >= 100 ? Math.round(price).toLocaleString() : String(Math.round(price*100)/100)) + ' ⬡'));  // keep small prices precise so value ÷ effort reads right
-  const method = c.e.how === 'gather' ? 'gathered — damage dealt to a node per unit yielded'
-    : c.e.how === 'craft'   ? `crafted — ${c.e.actions} action${c.e.actions===1?'':'s'}${(c.e.kids&&c.e.kids.length)?' + inputs':''}${c.e.outQty>1?(', ÷ '+c.e.outQty+' output'):''}`
-    : c.e.how === 'passive' ? 'passive craft — 0 active actions + inputs'
-    : 'raw base material';
-  det.innerHTML = `<div class="eff-det">
-    <div class="eff-det-hdr"><b>${escHtml(c.item.name)}</b>${tierBadge}<span style="flex:1"></span><i class="ti ti-x eff-det-x" title="Close" onclick="effortCellClose()"></i></div>
-    <table class="eff-det-tbl">
-      <tr><td>Market value <span class="eff-det-dim">(bitjita 7-day avg)</span></td><td class="eff-det-num">${priceStr}</td></tr>
-      <tr><td>Effort to produce 1 <span class="eff-det-dim">(${escHtml(method)})</span></td><td class="eff-det-num">${fmtEffort(effort)}</td></tr>
-      <tr class="eff-det-total"><td>Hex per effort <span class="eff-det-dim">= value ÷ effort</span></td><td class="eff-det-num">${hpe!=null?fmtHpe(hpe):'—'}</td></tr>
-    </table>
-    <div class="eff-det-sub">Effort breakdown — min-effort path per 1 unit &nbsp;<span class="eff-det-dim">(effort · item · method)</span></div>
-    <div class="eff-det-tree">${effortTreeHtml(c.effId, effortMemo, 0)}</div>
-    <div class="eff-det-note">Effort is the work to make one unit from raw: gather damage + active craft actions (passive crafts cost 0), summed down the recipe tree. It's tool-independent — a better tool is faster, not less effort. Greener cells = more hex per unit of effort.</div>
-  </div>`;
-  det.scrollIntoView({ behavior:'smooth', block:'nearest' });
-}
-function effortCellClose(){ effortDetailOpen = null; const det = document.getElementById('eff-mx-detail'); if (det) det.innerHTML = ''; document.querySelectorAll('#eff-body td.eff-sel').forEach(td => td.classList.remove('eff-sel')); }
-function effortMatrixHeatmap(grid){
-  const vals = [];
-  grid.forEach(r => Object.values(r.tiers).forEach(c => { if (c && c.hpe!=null) vals.push(c.hpe); }));
-  if (!vals.length) return;
-  const max = Math.max(...vals);
-  grid.forEach(r => Object.values(r.tiers).forEach(c => {
-    if (!c || c.hpe==null) return;
-    const td = document.getElementById('eff-mx-'+c.item.id); if (!td) return;
-    const a = Math.min(0.85, Math.sqrt(c.hpe / max) * 0.85);   // sqrt so mid values still read
-    td.style.background = `rgba(29,158,117,${a.toFixed(3)})`;
-    if (a > 0.5) td.style.color = '#fff';
-  }));
 }
 
 (async () => {
