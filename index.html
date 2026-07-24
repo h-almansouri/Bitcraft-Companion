@@ -790,7 +790,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-table{width:100%;border-collapse:collapse;font-size:13px}
 #gc-alloc .gc-table{max-width:900px}
 .gc-table th{text-align:left;color:var(--text3);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:.4rem .55rem;border-bottom:1px solid var(--border2)}
-.gc-table th.gc-num,.gc-table td.gc-num{text-align:right;white-space:nowrap;padding-left:.7rem}
+.gc-table th.gc-num,.gc-table td.gc-num{text-align:center;white-space:nowrap;padding-left:.7rem}
 .gc-cols{display:flex;gap:1.2rem;align-items:flex-start;flex-wrap:wrap;margin-top:1rem}
 .gc-col{flex:1 1 360px;min-width:0;overflow-x:auto}
 .gc-setup-hd{display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none}
@@ -802,7 +802,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-table td{padding:.55rem .55rem;border-bottom:1px solid var(--border);color:var(--text2)}
 .gc-table tr:last-child td{border-bottom:none}
 .gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
-.gc-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.gc-num{text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}
 .gc-item{display:flex;align-items:center;gap:.5rem;color:var(--text)}
 .gc-val{color:var(--text);font-weight:600}
 .gc-price{color:var(--text2)}
@@ -823,7 +823,8 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-bar-lg{height:10px}
 .gc-bar-fill{height:100%;background:var(--teal);border-radius:4px;transition:width .3s}
 .gc-bar-fill.gc-bar-done{background:var(--green-light)}
-.gc-gn-done{color:var(--green-light);font-weight:600}
+.gc-gn-done{display:inline-flex;align-items:center;gap:.22rem;color:var(--green-light);font-weight:700;background:rgba(74,222,128,.16);box-shadow:inset 0 0 0 1px rgba(74,222,128,.4);border-radius:6px;padding:.08rem .42rem}
+.gc-gn-done .ti{font-size:13px}
 .gc-collap-hd{cursor:pointer;user-select:none;display:flex;align-items:center;gap:.35rem}
 .gc-collap-hd .gc-setup-chev{font-size:13px}
 .gc-join{margin-top:1rem;border-top:1px solid var(--border);padding-top:.7rem}
@@ -9760,7 +9761,7 @@ function gcContribHtml(ranked, logCount){
     <td class="gc-num gc-val">${gcPointsTxt(p.points, pool)}</td>
   </tr>`; }).join('');
   return `${title}
-    <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Points</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Points (share)</th></tr></thead><tbody>${rows}</tbody></table>
     ${gcJoinHtml()}`;
 }
 
@@ -9861,7 +9862,7 @@ function gcAllocHtml(){
     inner = `${resultsBlock}
       ${modeBtns}
       <div class="gc-foot-note" style="margin:.1rem 0 .6rem">${help}${settle?' Settlement squares up the leftover hex so everyone gets exactly their share.':''}</div>
-      <table class="gc-table"><thead><tr><th>Contributor</th><th class="gc-num">Points</th><th>Gets</th><th class="gc-num">Value</th>${settle?'<th class="gc-num">Settle</th>':''}</tr></thead><tbody>${rows}</tbody></table>`;
+      <table class="gc-table"><thead><tr><th>Contributor</th><th class="gc-num">Points (share)</th><th>Gets</th><th class="gc-num">Value</th>${settle?'<th class="gc-num">Settle</th>':''}</tr></thead><tbody>${rows}</tbody></table>`;
   }
   return header + `<div style="margin-top:.7rem">${inner}</div>`;
 }
@@ -9962,7 +9963,7 @@ function gcResultsHtml(lines){
       ? `<span class="gc-price">${fmtCount(Math.round(ln.unit))}</span>${ln.kind==='fixed'?' <span class="gc-tag">trader</span>':''}${ln.kind==='seedavg'?' <span class="gc-tag">avg</span>':''}`
       : `<input class="sj-input gc-manual" type="number" min="0" placeholder="set price" value="${gcManualPrice[ln.key]||''}" onchange="gcSetManualPrice('${ln.key}',this.value)">`;
     let needCell = fmtCount(ln.qty);
-    if (haveGathered){ const g = gcGatheredFor(ln), done = g>=ln.qty; needCell = `<span class="gc-gn${done?' gc-gn-done':''}">${fmtCount(g)} / ${fmtCount(ln.qty)}</span>`; }
+    if (haveGathered){ const g = gcGatheredFor(ln), done = g>=ln.qty; needCell = `<span class="gc-gn${done?' gc-gn-done':''}">${done?'<i class="ti ti-check"></i>':''}${fmtCount(g)} / ${fmtCount(ln.qty)}</span>`; }
     return `<tr style="background:${gcTierBg(ln.tierN)}">
       <td class="gc-item" style="border-left:3px solid ${gcTierColor(ln.tierN)}">${ln.icon?gameIconImg(ln.icon,20):''}<span>${escHtml(ln.label)}</span></td>
       <td class="gc-num">${needCell}</td>
