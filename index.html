@@ -787,19 +787,19 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-plan-note{font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.5rem .75rem;margin-bottom:.9rem;line-height:1.5}
 .gc-sec-title{display:flex;align-items:baseline;gap:.6rem;font-size:13px;font-weight:700;color:var(--text);margin:.9rem 0 .45rem}
 .gc-sec-sub{font-size:11px;font-weight:500;color:var(--teal-light)}
-.gc-table{width:auto;border-collapse:collapse;font-size:12px}
-#gc-alloc .gc-table{width:100%;max-width:860px}
-.gc-table th{text-align:left;color:var(--text3);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.03em;padding:.35rem .5rem;border-bottom:1px solid var(--border2)}
+.gc-table{width:100%;border-collapse:collapse;font-size:13px}
+#gc-alloc .gc-table{max-width:900px}
+.gc-table th{text-align:left;color:var(--text3);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:.4rem .55rem;border-bottom:1px solid var(--border2)}
 .gc-table th.gc-num,.gc-table td.gc-num{text-align:right;white-space:nowrap;padding-left:.7rem}
-.gc-cols{display:flex;gap:1.4rem;align-items:flex-start;flex-wrap:wrap;margin-top:1rem}
-.gc-col{flex:1 1 330px;min-width:0;overflow-x:auto}
+.gc-cols{display:flex;gap:1.2rem;align-items:flex-start;flex-wrap:wrap;margin-top:1rem}
+.gc-col{flex:1 1 360px;min-width:0;overflow-x:auto}
 .gc-setup-hd{display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none}
 .gc-setup-chev{font-size:14px;color:var(--text3);transition:transform .2s}
 .gc-setup-title{font-weight:600;font-size:13px;color:var(--text)}
 .gc-setup-summary{font-size:11px;color:var(--text3);margin-left:.3rem}
 .gc-setup-body{margin-top:.7rem}
 .gc-tool-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:12px;color:var(--text3)}
-.gc-table td{padding:.4rem .5rem;border-bottom:1px solid var(--border);color:var(--text2)}
+.gc-table td{padding:.55rem .55rem;border-bottom:1px solid var(--border);color:var(--text2)}
 .gc-table tr:last-child td{border-bottom:none}
 .gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
 .gc-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -9616,7 +9616,7 @@ function gcSetRerollTier(i,v){ gcState.rerolls[i].tier = Math.max(2, Math.min(10
 function gcSetRerollCount(i,v){ gcState.rerolls[i].count = Math.max(0, +v||0); gcSaveState(); gcRecalc(); }
 function gcRemoveReroll(i){ gcState.rerolls.splice(i,1); gcSaveState(); renderGroupCraft(); }
 function gcSetManualPrice(key,v){ const n = parseFloat(v); if (isFinite(n) && n>0) gcManualPrice[key] = n; else delete gcManualPrice[key]; gcRecalc(); }
-function gcToggleSetup(){ gcState.setupCollapsed = !gcState.setupCollapsed; gcSaveState(); renderGroupCraft(); }
+function gcToggleSetup(){ gcState.setupCollapsed = !gcState.setupCollapsed; gcSaveState(); const s = document.querySelector('.gc-setup'); if (s) s.outerHTML = gcSetupHtml(); }   // re-render only the setup — don't touch (or re-tally) the columns below
 function gcToggleResults(){ gcState.resultsCollapsed = !gcState.resultsCollapsed; gcSaveState(); gcRenderAlloc(); }
 
 // ── Contribution tracking (storage logs) ──
