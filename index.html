@@ -787,8 +787,11 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-plan-note{font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.5rem .75rem;margin-bottom:.9rem;line-height:1.5}
 .gc-sec-title{display:flex;align-items:baseline;gap:.6rem;font-size:13px;font-weight:700;color:var(--text);margin:.9rem 0 .45rem}
 .gc-sec-sub{font-size:11px;font-weight:500;color:var(--teal-light)}
-.gc-table{width:100%;border-collapse:collapse;font-size:12px}
+.gc-table{width:100%;max-width:860px;border-collapse:collapse;font-size:12px}
 .gc-table th{text-align:left;color:var(--text3);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.03em;padding:.35rem .5rem;border-bottom:1px solid var(--border2)}
+.gc-table th.gc-num{text-align:right}
+.gc-table td.gc-num,.gc-table th.gc-num{width:96px}
+.gc-table td.gc-item,.gc-table th:first-child:not(.gc-num){width:auto}
 .gc-table td{padding:.4rem .5rem;border-bottom:1px solid var(--border);color:var(--text2)}
 .gc-table tr:last-child td{border-bottom:none}
 .gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
