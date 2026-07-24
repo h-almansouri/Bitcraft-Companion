@@ -9705,7 +9705,6 @@ function gcContribHtml(ranked, logCount){
     <td class="gc-num gc-share-pct">${share.toFixed(share<10?1:0)}%</td>
   </tr>`; }).join('');
   return `${title}
-    <div class="gc-plan-note" style="margin-bottom:.6rem">Deposits since <b>${escHtml(startTxt)}</b> into ${gcState.containers.length} container${gcState.containers.length!==1?'s':''}. Points = 7d value contributed.</div>
     <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Points</th><th class="gc-num">Share</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -9864,12 +9863,27 @@ async function gcRecompute(){
   box.innerHTML = '<div class="empty" style="padding:1.5rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Pricing materials…</span></div>';
   let lines; try { lines = await gcComputeNeeded(); } catch(e){ box.innerHTML = '<div class="empty" style="padding:1.5rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t build the material list.</span></div>'; return; }
   if (seq !== gcSeq) return;   // a newer recompute superseded this one
+  const plan = document.getElementById('gc-plan'); if (plan) plan.innerHTML = gcPlanHtml(lines);   // full-width header, above the two columns
   box.innerHTML = gcResultsHtml(lines);
 }
 function gcTierColor(t){ return (t>0 && typeof TIER_COLORS!=='undefined') ? (TIER_COLORS[Math.min(t, TIER_COLORS.length-1)]||{}).c || 'var(--border2)' : 'var(--border2)'; }
+// The plan summary + overall funding bar. Kept above the two columns so "Tool materials" and
+// "Contributions" line up.
+function gcPlanHtml(lines){
+  const fmt = n => fmtCoin(Math.round(n));
+  const total = lines.reduce((s,l)=>s+(l.value||0),0);
+  const haveGathered = Object.keys(gcGathered).length > 0;
+  const toolSummary = (gcState.tools||[]).filter(t=>t.family).map(t => `${cap(t.family)} T${t.topTier}×${fmtCount(t.qty)}`).join('  ·  ');
+  let fundedBar = '';
+  if (haveGathered && total>0){
+    const funded = lines.reduce((s,l)=>{ if(l.unit==null) return s; return s + Math.min(gcGatheredFor(l), l.qty)*l.unit; }, 0);
+    const pct = Math.min(100, funded/total*100);
+    fundedBar = `<div class="gc-funded"><div class="gc-funded-hd"><span>Materials gathered</span><b>${pct.toFixed(pct>=99.5?0:1)}%</b></div><div class="gc-bar gc-bar-lg"><div class="gc-bar-fill${pct>=100?' gc-bar-done':''}" style="width:${pct}%"></div></div><div class="gc-funded-sub">${fmt(funded)} of ${fmt(total)} by value</div></div>`;
+  }
+  return `<div class="gc-plan-note">${escHtml(toolSummary)||'Add a tool in Event setup'}${gcState.rerolls&&gcState.rerolls.filter(r=>r.count>0).length?`  ·  rerolls: ${gcState.rerolls.filter(r=>r.count>0).map(r=>`${fmtCount(r.count)}×T${r.tier}`).join(', ')}`:''}</div>${fundedBar}`;
+}
 function gcResultsHtml(lines){
   const fmt = n => n==null ? '—' : fmtCoin(Math.round(n));
-  const total = lines.reduce((s,l)=>s+(l.value||0),0);
   const haveGathered = Object.keys(gcGathered).length > 0;
   const row = ln => {
     const priceCell = ln.unit!=null
@@ -9895,18 +9909,8 @@ function gcResultsHtml(lines){
     return `<div class="gc-sec-title">${title} <span class="gc-sec-sub">${fmt(sub)} cost</span></div>
       <table class="gc-table"><thead><tr><th>Material</th><th class="gc-num">Needed</th><th class="gc-num">Pts/unit</th><th class="gc-num">Value</th>${haveGathered?'<th>Gathered</th>':''}</tr></thead><tbody>${rows.map(row).join('')}</tbody></table>`;
   };
-  const toolSummary = (gcState.tools||[]).filter(t=>t.family).map(t => `${cap(t.family)} T${t.topTier}×${fmtCount(t.qty)}`).join('  ·  ');
   const missing = lines.some(l=>l.unit==null);
-  // Overall funding: how much of the needed VALUE has been gathered (capped per mat at what's needed).
-  let fundedBar = '';
-  if (haveGathered && total>0){
-    const funded = lines.reduce((s,l)=>{ if(l.unit==null) return s; return s + Math.min(gcGatheredFor(l), l.qty)*l.unit; }, 0);
-    const pct = Math.min(100, funded/total*100);
-    fundedBar = `<div class="gc-funded"><div class="gc-funded-hd"><span>Materials gathered</span><b>${pct.toFixed(pct>=99.5?0:1)}%</b></div><div class="gc-bar gc-bar-lg"><div class="gc-bar-fill${pct>=100?' gc-bar-done':''}" style="width:${pct}%"></div></div><div class="gc-funded-sub">${fmt(funded)} of ${fmt(total)} by value</div></div>`;
-  }
-  return `<div class="gc-plan-note">${escHtml(toolSummary)||'Add a tool in Event setup'}${gcState.rerolls&&gcState.rerolls.filter(r=>r.count>0).length?`  ·  rerolls: ${gcState.rerolls.filter(r=>r.count>0).map(r=>`${fmtCount(r.count)}×T${r.tier}`).join(', ')}`:''}</div>
-    ${fundedBar}
-    ${section('Tool materials','tools')}
+  return `${section('Tool materials','tools')}
     ${section('Reroll materials','reroll')}
     <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Each material's 7d value is its points-per-unit. ${missing?'Set a price for any material without market data above. ':''}</div>`;
 }
@@ -9914,7 +9918,7 @@ async function renderGroupCraft(){
   const el = document.getElementById('groupcraft-content'); if (!el) return;
   if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
   gcLoadState();
-  el.innerHTML = gcSetupHtml() + '<div class="gc-cols"><div id="gc-results" class="gc-col"></div><div id="gc-contrib" class="gc-col"></div></div><div id="gc-alloc" style="margin-top:1.4rem"></div>';
+  el.innerHTML = gcSetupHtml() + '<div id="gc-plan"></div><div class="gc-cols"><div id="gc-results" class="gc-col"></div><div id="gc-contrib" class="gc-col"></div></div><div id="gc-alloc" style="margin-top:1.4rem"></div>';
   gcRecompute();
   gcTally();
   gcRenderAlloc();
