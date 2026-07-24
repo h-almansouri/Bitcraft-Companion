@@ -772,6 +772,35 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .bc-player-pulse{position:relative;width:12px;height:12px;border-radius:50%;background:var(--pc);border:2px solid #0a0c10;box-shadow:0 0 6px var(--pc)}
 .bc-player-pulse::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:2px solid var(--pc);opacity:.7;animation:bcpulse 1.6s ease-out infinite}
 @keyframes bcpulse{0%{transform:scale(.55);opacity:.7}100%{transform:scale(1.9);opacity:0}}
+/* group craft */
+.gc-setup{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:.9rem 1rem;margin-bottom:1rem}
+.gc-row{display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:.6rem}
+.gc-field{display:flex;flex-direction:column;gap:.25rem;font-size:12px;color:var(--text3)}
+.gc-field>span{font-weight:600;text-transform:uppercase;letter-spacing:.03em;font-size:10px}
+.gc-field .sj-input{min-width:150px}
+.gc-reroll{border-top:1px solid var(--border);padding-top:.7rem}
+.gc-sub{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:.5rem}
+.gc-reroll-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:12px;color:var(--text3)}
+.gc-empty-note{font-size:12px;color:var(--text3);margin-bottom:.3rem}
+.gc-x{background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;display:flex;padding:2px}
+.gc-x:hover{color:var(--red-light)}
+.gc-plan-note{font-size:12px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.5rem .75rem;margin-bottom:.9rem;line-height:1.5}
+.gc-sec-title{display:flex;align-items:baseline;gap:.6rem;font-size:13px;font-weight:700;color:var(--text);margin:.9rem 0 .45rem}
+.gc-sec-sub{font-size:11px;font-weight:500;color:var(--teal-light)}
+.gc-table{width:100%;border-collapse:collapse;font-size:12px}
+.gc-table th{text-align:left;color:var(--text3);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.03em;padding:.35rem .5rem;border-bottom:1px solid var(--border2)}
+.gc-table td{padding:.4rem .5rem;border-bottom:1px solid var(--border);color:var(--text2)}
+.gc-table tr:last-child td{border-bottom:none}
+.gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
+.gc-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.gc-item{display:flex;align-items:center;gap:.5rem;color:var(--text)}
+.gc-val{color:var(--text);font-weight:600}
+.gc-price{color:var(--text2)}
+.gc-tag{font-size:9px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:0 4px;text-transform:uppercase;letter-spacing:.03em}
+.gc-manual{width:110px;padding:.2rem .4rem;font-size:11px}
+.gc-total{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;padding:.7rem .85rem;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:14px;color:var(--text)}
+.gc-total b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
+.gc-foot-note{font-size:11px;color:var(--text3);margin-top:.7rem;line-height:1.5}
 </style>
 </head>
 <body>
@@ -1399,6 +1428,7 @@ function switchTab(tab) {
   else if (tab === 'map') renderMap();
   else if (tab === 'planner') renderPlanner();
   else if (tab === 'tools') renderToolCrafting();
+  else if (tab === 'groupcraft') renderGroupCraft();
   else if (tab === 'opencrafts') renderOpenCraftsTab();
   else if (tab === 'orders') renderOrdersTab();
   else if (tab === 'jsn') renderJsnTab();
@@ -9438,6 +9468,165 @@ function syncSkillActiveStates(id){
     if (active && !badge){ const wrap = card.querySelector('.skill-card-name-wrap'); if (wrap){ badge = document.createElement('span'); badge.className = 'skill-active-badge'; badge.textContent = 'Active'; wrap.appendChild(badge); } }
     else if (!active && badge){ badge.remove(); }
   });
+}
+
+// ── GROUP CRAFT ──────────────────────────────────────────────────────────────
+// Plan a cooperative tool craft: pick a tool family + top tier + quantity (the fixed 2×-per-pair
+// doubling ladder fills the tiers below) plus optional reroll targets, and it expands the full material
+// requirement priced at 7d market value. Contribution tracking (storage logs), the leaderboard and the
+// allocator come in later slices — this first slice is event setup + the needed-materials list.
+const GC_TOOL_WORDS = ['pickaxe','axe','hammer','hoe','machete','saw','chisel','scissors','shears','knife','shovel','scythe','rod','bow','quill','sickle'];
+const GC_STABILIZER_HEX = 75;   // Reforging Stabilizer is trader-only (Rumbagh) with no market listing
+let gcState = { family:'', topTier:6, qty:100, rerolls:[] };   // rerolls: [{tier,count}]
+let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
+let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
+let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
+let gcSeq = 0;
+
+function gcLoadState(){ try { const s = JSON.parse(localStorage.getItem('bc_groupcraft')||'null'); if (s && typeof s==='object') gcState = Object.assign(gcState, s); } catch(e){} }
+function gcSaveState(){ try { localStorage.setItem('bc_groupcraft', JSON.stringify(gcState)); } catch(e){} }
+function gcFamilyOf(name){ const w = (name||'').toLowerCase().match(/(\w+)$/); return (w && GC_TOOL_WORDS.includes(w[1])) ? w[1] : null; }
+// The "Craft X" recipe (not "Recraft", whose inputs include the tool itself)
+function gcCraftRecipe(itemId){ const recs = (craftingData.recipesByOutput||{})[itemId]||[]; return recs.find(r => /^craft /i.test(r.name||'') && !(r.inputs||[]).some(i=>i.itemId===itemId)); }
+// family -> tier -> base craftable METAL tool (recipe has an ingot input, so t1 = Ferralith, not Flint)
+function gcBuildCatalog(){
+  if (gcCatalog) return gcCatalog;
+  const byId = craftingData.itemsById||{}, cat = {};
+  (craftingData.items||[]).forEach(it => {
+    const fam = gcFamilyOf(it.name); if (!fam) return;
+    const r = gcCraftRecipe(it.id); if (!r) return;
+    if (!(r.inputs||[]).some(i => /ingot$/i.test((byId[i.itemId]||{}).name||''))) return;
+    if (it.tier==null || it.tier<1) return;
+    (cat[fam] = cat[fam]||{}); if (!cat[fam][it.tier]) cat[fam][it.tier] = { id:it.id, name:it.name };
+  });
+  gcCatalog = cat; return cat;
+}
+// The raw mats {itemId, qty} for one tool at a tier (ingot/rope/plank/leather — the prev-tier tool is dropped)
+function gcToolMats(family, tier){
+  const tool = (gcBuildCatalog()[family]||{})[tier]; if (!tool) return [];
+  const r = gcCraftRecipe(tool.id); if (!r) return [];
+  const byId = craftingData.itemsById||{};
+  return (r.inputs||[]).filter(i => !gcFamilyOf((byId[i.itemId]||{}).name||'')).map(i => ({ itemId:i.itemId, qty:i.quantity }));
+}
+// Doubling ladder: crafts per tier for a top tier + top-tier quantity (each pair down doubles).
+function gcTierCounts(topTier, qty){ const P = Math.ceil(topTier/2), out = {}; for (let t=1;t<=topTier;t++) out[t] = qty * Math.pow(2, P - Math.ceil(t/2)); return out; }
+function gcSeedItems(tier){ return (craftingData.items||[]).filter(i => i.tier===tier && /(wispweave|embergrain|starbulb)\s+seeds$/i.test(i.name)).map(i=>i.id); }
+function gcFishOilItem(tier){ return (craftingData.items||[]).find(i => i.tier===tier && /fish oil$/i.test(i.name)); }
+let _gcStab;
+function gcStabilizer(){ if (_gcStab===undefined) _gcStab = (craftingData.items||[]).find(i => /^reforging stabilizer$/i.test(i.name))||null; return _gcStab; }
+async function gcPrice(itemId){
+  if (itemId in gcPriceCache) return gcPriceCache[itemId];
+  try { const d = await apiFetch(`/api/market/0/${itemId}/price-history?limit=1`); const s = d.priceStats||{}; const v = s.avg7d!=null ? s.avg7d : (s.avg24h!=null ? s.avg24h : null); gcPriceCache[itemId] = v; return v; }
+  catch(e){ gcPriceCache[itemId] = null; return null; }
+}
+async function gcSeedAvgPrice(ids){ const vals = []; for (const id of ids){ const v = await gcPrice(id); if (v!=null) vals.push(v); } return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null; }
+// Assemble the priced needed-materials list, merged into unique lines.
+async function gcComputeNeeded(){
+  const byId = craftingData.itemsById||{}, counts = gcTierCounts(gcState.topTier, gcState.qty), map = {};
+  const add = (key, ln) => { if (map[key]) map[key].qty += ln.qty; else map[key] = ln; };
+  for (let t=1;t<=gcState.topTier;t++) gcToolMats(gcState.family, t).forEach(m => {
+    const it = byId[m.itemId]||{};
+    add('i'+m.itemId, { section:'tools', tier:t, key:'i'+m.itemId, itemId:m.itemId, label:it.name||('#'+m.itemId), icon:it.iconAssetName, qty:m.qty*counts[t], kind:'market' });
+  });
+  (gcState.rerolls||[]).filter(r => r.tier>=2 && r.count>0).forEach(r => {
+    const seeds = gcSeedItems(r.tier), s0 = byId[seeds[0]]||{};
+    add('seed'+r.tier, { section:'reroll', tier:r.tier, key:'seed'+r.tier, seedIds:seeds, label:'T'+r.tier+' Seeds (any type)', icon:s0.iconAssetName, qty:10*r.count, kind:'seedavg' });
+    const fo = gcFishOilItem(r.tier);
+    if (fo) add('i'+fo.id, { section:'reroll', tier:r.tier, key:'i'+fo.id, itemId:fo.id, label:fo.name, icon:fo.iconAssetName, qty:2*r.count, kind:'market' });
+    const st = gcStabilizer();
+    add('stab', { section:'reroll', tier:0, key:'stab', itemId:st&&st.id, label:'Reforging Stabilizer', icon:st&&st.iconAssetName, qty:r.count, kind:'fixed' });
+  });
+  const lines = Object.values(map);
+  for (const ln of lines){
+    if (ln.kind==='fixed') ln.unit = GC_STABILIZER_HEX;
+    else if (ln.kind==='seedavg') ln.unit = await gcSeedAvgPrice(ln.seedIds);
+    else ln.unit = await gcPrice(ln.itemId);
+    if (ln.unit==null && ln.key in gcManualPrice) ln.unit = gcManualPrice[ln.key];   // manual override for missing 7d
+    ln.value = (ln.unit!=null) ? ln.unit*ln.qty : null;
+  }
+  return lines;
+}
+// setters
+function gcSetFamily(v){ gcState.family = v; gcSaveState(); renderGroupCraft(); }
+function gcSetTopTier(v){ gcState.topTier = Math.max(1, Math.min(10, +v||1)); gcSaveState(); gcRecompute(); }
+function gcSetQty(v){ gcState.qty = Math.max(1, +v||1); gcSaveState(); gcRecompute(); }
+function gcAddReroll(){ (gcState.rerolls = gcState.rerolls||[]).push({ tier:Math.min(gcState.topTier,6), count:50 }); gcSaveState(); renderGroupCraft(); }
+function gcSetRerollTier(i,v){ gcState.rerolls[i].tier = Math.max(2, Math.min(10, +v||2)); gcSaveState(); gcRecompute(); }
+function gcSetRerollCount(i,v){ gcState.rerolls[i].count = Math.max(0, +v||0); gcSaveState(); gcRecompute(); }
+function gcRemoveReroll(i){ gcState.rerolls.splice(i,1); gcSaveState(); renderGroupCraft(); }
+function gcSetManualPrice(key,v){ const n = parseFloat(v); if (isFinite(n) && n>0) gcManualPrice[key] = n; else delete gcManualPrice[key]; gcRecompute(); }
+
+function gcSetupHtml(){
+  const cat = gcBuildCatalog();
+  const fams = Object.keys(cat).sort();
+  if (!gcState.family || !cat[gcState.family]) gcState.family = fams.includes('axe') ? 'axe' : fams[0] || '';
+  const famOpts = fams.map(f => `<option value="${f}"${f===gcState.family?' selected':''}>${cap(f)}</option>`).join('');
+  const maxTier = Math.max(1, ...Object.keys(cat[gcState.family]||{1:1}).map(Number));
+  if (gcState.topTier > maxTier) gcState.topTier = maxTier;
+  const tierOpts = Array.from({length:maxTier},(_,i)=>i+1).map(t => `<option value="${t}"${t===gcState.topTier?' selected':''}>Tier ${t}</option>`).join('');
+  const rerollRows = (gcState.rerolls||[]).map((r,i) => `
+    <div class="gc-reroll-row">
+      <select class="sj-input" style="width:auto" onchange="gcSetRerollTier(${i},this.value)">${Array.from({length:9},(_,k)=>k+2).map(t=>`<option value="${t}"${t===r.tier?' selected':''}>Tier ${t}</option>`).join('')}</select>
+      <input class="sj-input" type="number" min="0" step="10" value="${r.count}" style="width:90px" onchange="gcSetRerollCount(${i},this.value)"> rerolls
+      <button class="gc-x" title="Remove" onclick="gcRemoveReroll(${i})"><i class="ti ti-x"></i></button>
+    </div>`).join('');
+  return `<div class="gc-setup">
+    <div class="gc-row">
+      <label class="gc-field"><span>Tool</span><select class="sj-input" onchange="gcSetFamily(this.value)">${famOpts}</select></label>
+      <label class="gc-field"><span>Top tier</span><select class="sj-input" onchange="gcSetTopTier(this.value)">${tierOpts}</select></label>
+      <label class="gc-field"><span>Quantity (at top tier)</span><input class="sj-input" type="number" min="1" value="${gcState.qty}" onchange="gcSetQty(this.value)"></label>
+    </div>
+    <div class="gc-reroll">
+      <div class="gc-sub">Reroll targets <span style="color:var(--text3);font-weight:400">— seeds + fish oil + stabilizer per reroll (optional)</span></div>
+      ${rerollRows || '<div class="gc-empty-note">No reroll targets.</div>'}
+      <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddReroll()"><i class="ti ti-plus"></i> Add reroll target</button>
+    </div>
+  </div>`;
+}
+async function gcRecompute(){
+  const box = document.getElementById('gc-results'); if (!box) return;
+  const seq = ++gcSeq;
+  box.innerHTML = '<div class="empty" style="padding:1.5rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Pricing materials…</span></div>';
+  let lines; try { lines = await gcComputeNeeded(); } catch(e){ box.innerHTML = '<div class="empty" style="padding:1.5rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t build the material list.</span></div>'; return; }
+  if (seq !== gcSeq) return;   // a newer recompute superseded this one
+  box.innerHTML = gcResultsHtml(lines);
+}
+function gcResultsHtml(lines){
+  const counts = gcTierCounts(gcState.topTier, gcState.qty);
+  const fmt = n => n==null ? '—' : fmtCoin(Math.round(n));
+  const total = lines.reduce((s,l)=>s+(l.value||0),0);
+  const row = ln => {
+    const priceCell = ln.unit!=null
+      ? `<span class="gc-price">${fmt(ln.unit)}</span>${ln.kind==='fixed'?' <span class="gc-tag">trader</span>':''}${ln.kind==='seedavg'?' <span class="gc-tag">avg</span>':''}`
+      : `<input class="sj-input gc-manual" type="number" min="0" placeholder="set price" value="${gcManualPrice[ln.key]||''}" onchange="gcSetManualPrice('${ln.key}',this.value)">`;
+    return `<tr>
+      <td class="gc-item">${ln.icon?gameIconImg(ln.icon,20):''}<span>${escHtml(ln.label)}</span></td>
+      <td class="gc-num">${fmtCount(ln.qty)}</td>
+      <td class="gc-num">${priceCell}</td>
+      <td class="gc-num gc-val">${ln.value!=null?fmt(ln.value):'—'}</td>
+    </tr>`;
+  };
+  const section = (title, secKey) => {
+    const rows = lines.filter(l=>l.section===secKey).sort((a,b)=>(a.tier-b.tier)||a.label.localeCompare(b.label));
+    if (!rows.length) return '';
+    const sub = rows.reduce((s,l)=>s+(l.value||0),0);
+    return `<div class="gc-sec-title">${title}<span class="gc-sec-sub">${fmt(sub)} total</span></div>
+      <table class="gc-table"><thead><tr><th>Material</th><th class="gc-num">Needed</th><th class="gc-num">7d price <span class="gc-th-sub">(pts/unit)</span></th><th class="gc-num">Value</th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table>`;
+  };
+  const ladder = Array.from({length:gcState.topTier},(_,i)=>i+1).map(t=>`T${t}×${fmtCount(counts[t])}`).join('  ');
+  const missing = lines.some(l=>l.unit==null);
+  return `<div class="gc-plan-note">Crafting <b>${escHtml(cap(gcState.family))}</b> — ${ladder}${gcState.rerolls&&gcState.rerolls.length?`  ·  rerolls: ${gcState.rerolls.filter(r=>r.count>0).map(r=>`${fmtCount(r.count)}×T${r.tier}`).join(', ')||'none'}`:''}</div>
+    ${section('Tool materials','tools')}
+    ${section('Reroll materials','reroll')}
+    <div class="gc-total"><span>Total material cost</span><b>${fmt(total)}</b></div>
+    <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Each material's 7d value is its points-per-unit — contributing 1 unit earns that many points. ${missing?'Set a price for any material without market data above. ':''}Contribution tracking &amp; the leaderboard come next.</div>`;
+}
+async function renderGroupCraft(){
+  const el = document.getElementById('groupcraft-content'); if (!el) return;
+  if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
+  gcLoadState();
+  el.innerHTML = gcSetupHtml() + '<div id="gc-results"></div>';
+  gcRecompute();
 }
 
 (async () => {
