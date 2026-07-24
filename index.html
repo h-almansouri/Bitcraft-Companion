@@ -801,6 +801,14 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-total{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;padding:.7rem .85rem;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:14px;color:var(--text)}
 .gc-total b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
 .gc-foot-note{font-size:11px;color:var(--text3);margin-top:.7rem;line-height:1.5}
+.gc-cfind-list{display:flex;flex-direction:column;gap:.25rem;margin:.3rem 0 .5rem;max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:.4rem}
+.gc-cfind-opt{display:flex;align-items:center;gap:.45rem;font-size:12px;color:var(--text2);cursor:pointer;padding:.15rem .2rem}
+.gc-cfind-opt:hover{color:var(--text)}
+.gc-cfind-sub{color:var(--text3);font-size:11px;margin-left:auto;white-space:nowrap}
+.gc-chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.3rem}
+.gc-chip{display:inline-flex;align-items:center;gap:.35rem;background:rgba(29,158,117,.12);border:1px solid var(--teal-dim,var(--border2));color:var(--teal-light);border-radius:14px;padding:.2rem .6rem;font-size:12px}
+.gc-chip i{cursor:pointer;font-size:13px}
+.gc-chip i:hover{color:var(--red-light)}
 </style>
 </head>
 <body>
@@ -9477,11 +9485,12 @@ function syncSkillActiveStates(id){
 // allocator come in later slices — this first slice is event setup + the needed-materials list.
 const GC_TOOL_WORDS = ['pickaxe','axe','hammer','hoe','machete','saw','chisel','scissors','shears','knife','shovel','scythe','rod','bow','quill','sickle'];
 const GC_STABILIZER_HEX = 75;   // Reforging Stabilizer is trader-only (Rumbagh) with no market listing
-let gcState = { family:'', topTier:6, qty:100, rerolls:[] };   // rerolls: [{tier,count}]
+let gcState = { family:'', topTier:6, qty:100, rerolls:[], containers:[], startMs:null };   // rerolls: [{tier,count}]; containers: [{id,name,region}]
 let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
 let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
 let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
-let gcSeq = 0;
+let gcSeq = 0, gcTallySeq = 0;
+let gcFoundContainers = [];  // transient: containers surfaced by the "find" search, for the picker
 
 function gcLoadState(){ try { const s = JSON.parse(localStorage.getItem('bc_groupcraft')||'null'); if (s && typeof s==='object') gcState = Object.assign(gcState, s); } catch(e){} }
 function gcSaveState(){ try { localStorage.setItem('bc_groupcraft', JSON.stringify(gcState)); } catch(e){} }
@@ -9556,6 +9565,88 @@ function gcSetRerollCount(i,v){ gcState.rerolls[i].count = Math.max(0, +v||0); g
 function gcRemoveReroll(i){ gcState.rerolls.splice(i,1); gcSaveState(); renderGroupCraft(); }
 function gcSetManualPrice(key,v){ const n = parseFloat(v); if (isFinite(n) && n>0) gcManualPrice[key] = n; else delete gcManualPrice[key]; gcRecompute(); }
 
+// ── Contribution tracking (storage logs) ──
+// Discover candidate containers by looking at one player's deposit/withdraw history, then let the user
+// pick which container(s) count. Tallying a container reads ALL players' deposits into it, not just this
+// player's — this search is only to surface the container's entity id + name.
+async function gcFindContainers(name){
+  name = (name||'').trim(); const box = document.getElementById('gc-cfind-results'); if (!box) return;
+  if (name.length < 2){ box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="gc-empty-note">Searching…</div>';
+  try {
+    const pd = await apiFetch('/api/players?q=' + encodeURIComponent(name));
+    const p = (pd.players||[])[0]; if (!p){ box.innerHTML = '<div class="gc-empty-note">No player found.</div>'; return; }
+    const j = await (await fetch(`${RELAY_HTTP}/storage-logs?playerId=${p.entityId}`)).json();
+    const seen = {};
+    (j.logs||[]).forEach(l => { const b = l.building||{}; if (b.entity_id && !seen[b.entity_id]) seen[b.entity_id] = { id:String(b.entity_id), name:b.nickname||b.name||'Storage', sub:(b.nickname&&b.name)?b.name:'', region:l.region, claim:l.claim_name }; });
+    gcFoundContainers = Object.values(seen);
+    if (!gcFoundContainers.length){ box.innerHTML = `<div class="gc-empty-note">No container activity for ${escHtml(p.username)} in the last ~15 days.</div>`; return; }
+    box.innerHTML = `<div class="gc-cfind-list">${gcFoundContainers.map(c => {
+      const on = (gcState.containers||[]).some(x=>x.id===c.id);
+      return `<label class="gc-cfind-opt"><input type="checkbox" ${on?'checked':''} onchange="gcToggleContainer('${c.id}')"> <span>${escHtml(c.name)}</span>${c.sub?`<span class="gc-cfind-sub">${escHtml(c.sub)}</span>`:''}<span class="gc-cfind-sub">R${c.region||'?'}${c.claim?' · '+escHtml(c.claim):''}</span></label>`;
+    }).join('')}</div>`;
+  } catch(e){ box.innerHTML = '<div class="gc-empty-note">Search failed.</div>'; }
+}
+function gcToggleContainer(id){
+  const cur = gcState.containers || (gcState.containers = []);
+  const i = cur.findIndex(x=>x.id===id);
+  if (i>=0) cur.splice(i,1);
+  else { const c = gcFoundContainers.find(x=>x.id===id); if (c) cur.push({ id:c.id, name:c.name, region:c.region }); }
+  gcSaveState(); renderGroupCraft();
+}
+function gcSetStart(v){ gcState.startMs = v ? new Date(v).getTime() : null; gcSaveState(); gcTally(); }
+// Tally deposits into the selected container(s) since the start time, valuing each matching mat at its
+// points-per-unit (the same 7d/seed-avg/stabilizer price as the needed list). No cap for v1.
+async function gcTally(){
+  const box = document.getElementById('gc-contrib'); if (!box) return;
+  const containers = gcState.containers || [];
+  if (!containers.length){ box.innerHTML = `<div class="gc-sec-title">Contributions</div><div class="gc-empty-note">Pick the group storage container(s) above to tally who contributed what.</div>`; return; }
+  const seq = ++gcTallySeq;
+  box.innerHTML = `<div class="gc-sec-title">Contributions</div><div class="empty" style="padding:1rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Reading storage logs…</span></div>`;
+  const lines = await gcComputeNeeded();
+  const unitByItem = {};   // item_id -> { unit, label }
+  lines.forEach(ln => { if (ln.unit==null) return;
+    if (ln.kind==='seedavg') (ln.seedIds||[]).forEach(id => unitByItem[id] = { unit:ln.unit, label:ln.label });
+    else if (ln.itemId!=null) unitByItem[ln.itemId] = { unit:ln.unit, label:ln.label }; });
+  const startMs = gcState.startMs || 0;
+  const players = {};   // playerId -> { name, points, units, kinds:Set }
+  let logCount = 0;
+  try {
+    const results = await Promise.all(containers.map(c => fetch(`${RELAY_HTTP}/storage-logs?storageId=${c.id}`).then(r=>r.json()).catch(()=>({logs:[]}))));
+    results.forEach(j => (j.logs||[]).forEach(l => {
+      logCount++;
+      if (l.action !== 'deposit') return;
+      if (new Date(l.timestamp).getTime() < startMs) return;
+      const u = unitByItem[l.item_id]; if (!u) return;
+      const q = +l.quantity || 0; if (q <= 0) return;
+      const p = players[l.player_entity_id] || (players[l.player_entity_id] = { name:l.player_username || ('Player '+l.player_entity_id), points:0, units:0, kinds:new Set() });
+      p.points += q * u.unit; p.units += q; p.kinds.add(u.label);
+    }));
+  } catch(e){ if (seq===gcTallySeq) box.innerHTML = `<div class="gc-sec-title">Contributions</div><div class="gc-empty-note">Couldn't read storage logs.</div>`; return; }
+  if (seq !== gcTallySeq) return;
+  const ranked = Object.values(players).sort((a,b)=>b.points-a.points);
+  box.innerHTML = gcContribHtml(ranked, logCount);
+}
+function gcContribHtml(ranked, logCount){
+  const fmt = n => fmtCoin(Math.round(n));
+  const startTxt = gcState.startMs ? new Date(gcState.startMs).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'the last ~15 days';
+  const title = `<div class="gc-sec-title">Contributions<span class="gc-sec-sub">${ranked.length} contributor${ranked.length!==1?'s':''}</span><button class="btn ctrl-btn" style="margin-left:auto;font-size:11px" onclick="gcTally()"><i class="ti ti-refresh"></i> Refresh</button></div>`;
+  if (!ranked.length) return title + `<div class="gc-empty-note">No matching deposits since ${escHtml(startTxt)}. (Only deposits of the materials above count.)</div>`;
+  const pool = ranked.reduce((s,p)=>s+p.points,0);
+  const rows = ranked.map((p,i) => `<tr>
+    <td class="gc-num" style="width:34px">${i+1}</td>
+    <td class="gc-item"><i class="ti ti-user" style="color:var(--text3)"></i><span>${escHtml(p.name)}</span></td>
+    <td class="gc-num">${fmtCount(p.units)}</td>
+    <td class="gc-num">${p.kinds.size}</td>
+    <td class="gc-num gc-val">${fmt(p.points)}</td>
+    <td class="gc-num">${pool>0?Math.round(p.points/pool*100):0}%</td>
+  </tr>`).join('');
+  return `${title}
+    <div class="gc-plan-note" style="margin-bottom:.6rem">Deposits since <b>${escHtml(startTxt)}</b> into ${gcState.containers.length} container${gcState.containers.length!==1?'s':''}. Points = 7d value contributed.</div>
+    <table class="gc-table"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Mats</th><th class="gc-num">Points</th><th class="gc-num">Share</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="gc-total"><span>Total points pool</span><b>${fmt(pool)}</b></div>`;
+}
+
 function gcSetupHtml(){
   const cat = gcBuildCatalog();
   const fams = Object.keys(cat).sort();
@@ -9581,7 +9672,23 @@ function gcSetupHtml(){
       ${rerollRows || '<div class="gc-empty-note">No reroll targets.</div>'}
       <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddReroll()"><i class="ti ti-plus"></i> Add reroll target</button>
     </div>
+    <div class="gc-reroll">
+      <div class="gc-sub">Group storage <span style="color:var(--text3);font-weight:400">— which container(s) count, and when the event started</span></div>
+      <div class="gc-row" style="margin-bottom:.5rem">
+        <label class="gc-field"><span>Find container (search a player who uses it)</span>
+          <span style="display:flex;gap:.4rem"><input id="gc-cfind" class="sj-input" placeholder="Player name…" onkeydown="if(event.key==='Enter'){event.preventDefault();gcFindContainers(this.value);}"><button class="btn ctrl-btn" onclick="gcFindContainers(document.getElementById('gc-cfind').value)">Find</button></span>
+        </label>
+        <label class="gc-field"><span>Event started</span><input class="sj-input" type="datetime-local" value="${gcStartInputVal()}" onchange="gcSetStart(this.value)"></label>
+      </div>
+      <div id="gc-cfind-results"></div>
+      ${(gcState.containers||[]).length ? `<div class="gc-chips">${gcState.containers.map(c=>`<span class="gc-chip">${escHtml(c.name)} <i class="ti ti-x" onclick="gcToggleContainer('${c.id}')"></i></span>`).join('')}</div>` : '<div class="gc-empty-note">No container selected yet.</div>'}
+    </div>
   </div>`;
+}
+function gcStartInputVal(){
+  if (!gcState.startMs) return '';
+  const d = new Date(gcState.startMs - new Date().getTimezoneOffset()*60000);   // to local for datetime-local
+  return d.toISOString().slice(0,16);
 }
 async function gcRecompute(){
   const box = document.getElementById('gc-results'); if (!box) return;
@@ -9619,14 +9726,15 @@ function gcResultsHtml(lines){
     ${section('Tool materials','tools')}
     ${section('Reroll materials','reroll')}
     <div class="gc-total"><span>Total material cost</span><b>${fmt(total)}</b></div>
-    <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Each material's 7d value is its points-per-unit — contributing 1 unit earns that many points. ${missing?'Set a price for any material without market data above. ':''}Contribution tracking &amp; the leaderboard come next.</div>`;
+    <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Each material's 7d value is its points-per-unit — contributing 1 unit earns that many points. ${missing?'Set a price for any material without market data above. ':''}</div>`;
 }
 async function renderGroupCraft(){
   const el = document.getElementById('groupcraft-content'); if (!el) return;
   if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
   gcLoadState();
-  el.innerHTML = gcSetupHtml() + '<div id="gc-results"></div>';
+  el.innerHTML = gcSetupHtml() + '<div id="gc-results"></div><div id="gc-contrib" style="margin-top:1.4rem"></div>';
   gcRecompute();
+  gcTally();
 }
 
 (async () => {
