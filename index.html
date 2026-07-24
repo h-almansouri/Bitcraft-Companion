@@ -9522,7 +9522,7 @@ function syncSkillActiveStates(id){
 // allocator come in later slices — this first slice is event setup + the needed-materials list.
 const GC_TOOL_WORDS = ['pickaxe','axe','hammer','hoe','machete','saw','chisel','scissors','shears','knife','shovel','scythe','rod','bow','quill','sickle'];
 const GC_STABILIZER_HEX = 75;   // Reforging Stabilizer is trader-only (Rumbagh) with no market listing
-let gcState = { tools:[{family:'',topTier:6,qty:100}], rerolls:[], containers:[], startMs:null, results:[], allocMode:'greedy', settle:true, setupCollapsed:false, resultsCollapsed:false, groups:[], joinCollapsed:true, mcCollapsed:false };   // groups: [{name, ids:[playerId]}] merge one person's characters
+let gcState = { tools:[{family:'',topTier:6,qty:100}], rerolls:[], containers:[], startMs:null, results:[], allocMode:'greedy', settle:true, setupCollapsed:false, resultsCollapsed:false, groups:[], joinCollapsed:true, mcCollapsed:false, allocCollapsed:false };   // groups: [{name, ids:[playerId]}] merge one person's characters
 let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
 let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
 let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
@@ -9619,6 +9619,7 @@ function gcSetManualPrice(key,v){ const n = parseFloat(v); if (isFinite(n) && n>
 function gcToggleSetup(){ gcState.setupCollapsed = !gcState.setupCollapsed; gcSaveState(); const s = document.querySelector('.gc-setup'); if (s) s.outerHTML = gcSetupHtml(); }   // re-render only the setup — don't touch (or re-tally) the columns below
 function gcToggleResults(){ gcState.resultsCollapsed = !gcState.resultsCollapsed; gcSaveState(); gcRenderAlloc(); }
 function gcToggleMC(){ gcState.mcCollapsed = !gcState.mcCollapsed; gcSaveState(); const body = document.getElementById('gc-mc-body'), chev = document.getElementById('gc-mc-chev'); if (body) body.style.display = gcState.mcCollapsed ? 'none' : ''; if (chev) chev.style.transform = gcState.mcCollapsed ? 'rotate(-90deg)' : ''; }   // toggle only — no re-tally
+function gcToggleAlloc(){ gcState.allocCollapsed = !gcState.allocCollapsed; gcSaveState(); gcRenderAlloc(); }   // cheap re-render — no network
 
 // ── Contribution tracking (storage logs) ──
 // Discover candidate containers by looking at one player's deposit/withdraw history, then let the user
@@ -9825,8 +9826,10 @@ function gcAllocHtml(){
     </div>`).join('');
   // Collapse only applies when there ARE results — with none, keep it open so the Add button stays visible.
   const rCol = !!gcState.resultsCollapsed && (gcState.results||[]).length>0;
-  const setup = `<div class="gc-sec-title">Allocation<span class="gc-sec-sub">distribute the crafted results by points</span></div>
-    <div class="gc-reroll" style="border-top:none;padding-top:0">
+  const aCol = !!gcState.allocCollapsed;
+  const header = `<div class="gc-setup-hd" onclick="gcToggleAlloc()"><i class="ti ti-chevron-down gc-setup-chev"${aCol?' style="transform:rotate(-90deg)"':''}></i><span class="gc-setup-title">Allocation</span><span class="gc-sec-sub" style="margin-left:.1rem">distribute the crafted results by points</span></div>`;
+  if (aCol) return header;
+  const resultsBlock = `<div class="gc-reroll" style="border-top:none;padding-top:0">
       <div class="gc-sub gc-collap-hd" onclick="gcToggleResults()"><i class="ti ti-chevron-down gc-setup-chev" style="${rCol?'transform:rotate(-90deg)':''}"></i>Results crafted <span style="color:var(--text3);font-weight:400">— what got made + its hex value each</span></div>
       <div${rCol?' style="display:none"':''}>
         ${resultRows || '<div class="gc-empty-note">Add the crafted results to compute the split.</div>'}
@@ -9834,29 +9837,33 @@ function gcAllocHtml(){
       </div>
     </div>`;
   const res = gcAllocate();
-  if (!gcContributors.length) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Tally contributions above first, then the results will be split by each person's points.</div>`;
-  if (!res) return setup;
-  const settle = !!gcState.settle;
-  const pool = res.contribs.reduce((s,c)=>s+c.points,0);
-  const modeBtns = `<div class="gc-modes">${modes.map(([m,l])=>`<button class="gc-mode${m===mode?' active':''}" onclick="gcSetAllocMode('${m}')">${l}</button>`).join('')}<label class="gc-settle"><input type="checkbox" ${settle?'checked':''} onchange="gcToggleSettle(this.checked)"> Hex settlement</label></div>`;
-  const rows = res.contribs.map((c,i) => {
-    const a = res.alloc[i];
-    const itemsTxt = Object.entries(a.items).sort((x,y)=>y[1]-x[1]).map(([l,n])=>`${fmtCount(n)}× ${escHtml(l)}`).join(', ') || '—';
-    const diff = res.ent[i] - a.value;
-    const settleCell = settle ? `<td class="gc-num gc-settle-cell">${Math.abs(diff)<1?'<span class="gc-even">even</span>':(diff>0?`<span class="gc-owed">+${fmt(diff)}</span>`:`<span class="gc-owe">−${fmt(-diff)}</span>`)}</td>` : '';
-    return `<tr>
-      <td class="gc-item"><i class="ti ti-${(c.ids||[]).length>1?'users-group':'user'}" style="color:var(--text3)"></i><span>${escHtml(c.name)}</span></td>
-      <td class="gc-num gc-val">${gcPointsTxt(c.points, pool)}</td>
-      <td class="gc-alloc-items">${itemsTxt}</td>
-      <td class="gc-num gc-val">${fmt(a.value)}</td>
-      ${settleCell}
-    </tr>`;
-  }).join('');
-  const help = { greedy:'Each result goes to whoever is furthest below their fair share — closest to exact by value.', proportional:'Each result batch’s count is split by points (largest-remainder). Best when the tools are identical.', draft:'Ranked by points; each round the top contributor picks first. Even-ish counts, best picks to the biggest contributors.' }[mode];
-  return `${setup}
-    ${modeBtns}
-    <div class="gc-foot-note" style="margin:.1rem 0 .6rem">${help}${settle?' Settlement squares up the leftover hex so everyone gets exactly their share.':''}</div>
-    <table class="gc-table"><thead><tr><th>Contributor</th><th class="gc-num">Points</th><th>Gets</th><th class="gc-num">Value</th>${settle?'<th class="gc-num">Settle</th>':''}</tr></thead><tbody>${rows}</tbody></table>`;
+  let inner;
+  if (!gcContributors.length) inner = resultsBlock + `<div class="gc-empty-note" style="margin-top:.6rem">Tally contributions above first, then the results will be split by each person's points.</div>`;
+  else if (!res) inner = resultsBlock;
+  else {
+    const settle = !!gcState.settle;
+    const pool = res.contribs.reduce((s,c)=>s+c.points,0);
+    const modeBtns = `<div class="gc-modes">${modes.map(([m,l])=>`<button class="gc-mode${m===mode?' active':''}" onclick="gcSetAllocMode('${m}')">${l}</button>`).join('')}<label class="gc-settle"><input type="checkbox" ${settle?'checked':''} onchange="gcToggleSettle(this.checked)"> Hex settlement</label></div>`;
+    const rows = res.contribs.map((c,i) => {
+      const a = res.alloc[i];
+      const itemsTxt = Object.entries(a.items).sort((x,y)=>y[1]-x[1]).map(([l,n])=>`${fmtCount(n)}× ${escHtml(l)}`).join(', ') || '—';
+      const diff = res.ent[i] - a.value;
+      const settleCell = settle ? `<td class="gc-num gc-settle-cell">${Math.abs(diff)<1?'<span class="gc-even">even</span>':(diff>0?`<span class="gc-owed">+${fmt(diff)}</span>`:`<span class="gc-owe">−${fmt(-diff)}</span>`)}</td>` : '';
+      return `<tr>
+        <td class="gc-item"><i class="ti ti-${(c.ids||[]).length>1?'users-group':'user'}" style="color:var(--text3)"></i><span>${escHtml(c.name)}</span></td>
+        <td class="gc-num gc-val">${gcPointsTxt(c.points, pool)}</td>
+        <td class="gc-alloc-items">${itemsTxt}</td>
+        <td class="gc-num gc-val">${fmt(a.value)}</td>
+        ${settleCell}
+      </tr>`;
+    }).join('');
+    const help = { greedy:'Each result goes to whoever is furthest below their fair share — closest to exact by value.', proportional:'Each result batch’s count is split by points (largest-remainder). Best when the tools are identical.', draft:'Ranked by points; each round the top contributor picks first. Even-ish counts, best picks to the biggest contributors.' }[mode];
+    inner = `${resultsBlock}
+      ${modeBtns}
+      <div class="gc-foot-note" style="margin:.1rem 0 .6rem">${help}${settle?' Settlement squares up the leftover hex so everyone gets exactly their share.':''}</div>
+      <table class="gc-table"><thead><tr><th>Contributor</th><th class="gc-num">Points</th><th>Gets</th><th class="gc-num">Value</th>${settle?'<th class="gc-num">Settle</th>':''}</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  return header + `<div style="margin-top:.7rem">${inner}</div>`;
 }
 
 function gcSetupHtml(){
@@ -9892,11 +9899,11 @@ function gcSetupHtml(){
     <div class="gc-setup-body"${collapsed?' style="display:none"':''}>
       <div class="gc-sub">Tools <span style="color:var(--text3);font-weight:400">— tool · top tier · quantity</span></div>
       ${toolRows}
-      <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddTool()"><i class="ti ti-plus"></i> Add tool</button>
+      <button class="btn ctrl-btn" style="margin:.4rem 0 .7rem" onclick="gcAddTool()"><i class="ti ti-plus"></i> Add tool</button>
       <div class="gc-reroll">
         <div class="gc-sub">Rerolls <span style="color:var(--text3);font-weight:400">— seeds + fish oil + stabilizer per reroll (optional)</span></div>
         ${rerollRows || '<div class="gc-empty-note">No rerolls.</div>'}
-        <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddReroll()"><i class="ti ti-plus"></i> Add reroll</button>
+        <button class="btn ctrl-btn" style="margin:.4rem 0 .7rem" onclick="gcAddReroll()"><i class="ti ti-plus"></i> Add reroll</button>
       </div>
       <div class="gc-reroll">
         <div class="gc-sub">Group storage <span style="color:var(--text3);font-weight:400">— which container(s) count, and when the event started</span></div>
@@ -9979,9 +9986,11 @@ async function renderGroupCraft(){
   if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
   gcLoadState();
   el.innerHTML = gcSetupHtml()
-    + `<div class="gc-setup-hd" style="margin-top:1.1rem" onclick="gcToggleMC()"><i class="ti ti-chevron-down gc-setup-chev" id="gc-mc-chev"${gcState.mcCollapsed?' style="transform:rotate(-90deg)"':''}"></i><span class="gc-setup-title">Materials &amp; Contributions</span></div>`
-    + `<div id="gc-mc-body"${gcState.mcCollapsed?' style="display:none"':''}><div id="gc-plan"></div><div class="gc-cols"><div id="gc-results" class="gc-col"></div><div id="gc-contrib" class="gc-col"></div></div></div>`
-    + '<div id="gc-alloc" style="margin-top:1.4rem;padding-bottom:3rem"></div>';
+    + `<div class="gc-setup">`
+    +   `<div class="gc-setup-hd" onclick="gcToggleMC()"><i class="ti ti-chevron-down gc-setup-chev" id="gc-mc-chev"${gcState.mcCollapsed?' style="transform:rotate(-90deg)"':''}"></i><span class="gc-setup-title">Materials &amp; Contributions</span></div>`
+    +   `<div id="gc-mc-body" style="margin-top:.7rem${gcState.mcCollapsed?';display:none':''}"><div id="gc-plan"></div><div class="gc-cols"><div id="gc-results" class="gc-col"></div><div id="gc-contrib" class="gc-col"></div></div></div>`
+    + `</div>`
+    + '<div class="gc-setup" id="gc-alloc" style="margin-bottom:3rem"></div>';
   gcRecompute();
   gcTally();
   gcRenderAlloc();
