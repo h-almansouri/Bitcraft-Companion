@@ -824,6 +824,16 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-share{width:150px}
 .gc-share .gc-bar{display:inline-block;width:calc(100% - 42px);vertical-align:middle}
 .gc-share-pct{display:inline-block;width:36px;text-align:right;font-variant-numeric:tabular-nums;color:var(--text2);font-size:11px;margin-left:6px}
+.gc-modes{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.3rem 0 .2rem}
+.gc-mode{background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:14px;padding:.3rem .8rem;font-size:12px;cursor:pointer;transition:all .12s}
+.gc-mode:hover{border-color:var(--border2);color:var(--text)}
+.gc-mode.active{background:rgba(29,158,117,.14);border-color:var(--teal);color:var(--teal-light);font-weight:600}
+.gc-settle{display:inline-flex;align-items:center;gap:.35rem;font-size:12px;color:var(--text3);margin-left:auto;cursor:pointer}
+.gc-settle input{accent-color:var(--teal);cursor:pointer}
+.gc-alloc-items{color:var(--text2);font-size:12px}
+.gc-settle-cell .gc-owed{color:var(--green-light)}
+.gc-settle-cell .gc-owe{color:var(--amber-light)}
+.gc-settle-cell .gc-even{color:var(--text3)}
 </style>
 </head>
 <body>
@@ -9500,7 +9510,7 @@ function syncSkillActiveStates(id){
 // allocator come in later slices — this first slice is event setup + the needed-materials list.
 const GC_TOOL_WORDS = ['pickaxe','axe','hammer','hoe','machete','saw','chisel','scissors','shears','knife','shovel','scythe','rod','bow','quill','sickle'];
 const GC_STABILIZER_HEX = 75;   // Reforging Stabilizer is trader-only (Rumbagh) with no market listing
-let gcState = { family:'', topTier:6, qty:100, rerolls:[], containers:[], startMs:null };   // rerolls: [{tier,count}]; containers: [{id,name,region}]
+let gcState = { family:'', topTier:6, qty:100, rerolls:[], containers:[], startMs:null, results:[], allocMode:'greedy', settle:true };   // rerolls: [{tier,count}]; containers: [{id,name,region}]; results: [{label,value,qty}]
 let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
 let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
 let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
@@ -9646,7 +9656,8 @@ async function gcTally(){
   gcGathered = gathered;
   gcContributors = Object.values(players).sort((a,b)=>b.points-a.points);
   box.innerHTML = gcContribHtml(gcContributors, logCount);
-  gcRecompute();   // refresh the needed list so its gathered/progress bars reflect the new tally
+  gcRecompute();     // refresh the needed list so its gathered/progress bars reflect the new tally
+  gcRenderAlloc();   // the allocator now has contributor points to split by
 }
 // Total qty gathered for a needed line (seed lines sum across the 3 interchangeable seed ids).
 function gcGatheredFor(ln){ return (ln.kind==='seedavg') ? (ln.seedIds||[]).reduce((s,id)=>s+(gcGathered[id]||0),0) : (gcGathered[ln.itemId]||0); }
@@ -9670,6 +9681,97 @@ function gcContribHtml(ranked, logCount){
     <div class="gc-plan-note" style="margin-bottom:.6rem">Deposits since <b>${escHtml(startTxt)}</b> into ${gcState.containers.length} container${gcState.containers.length!==1?'s':''}. Points = 7d value contributed.</div>
     <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Mats</th><th class="gc-num">Points</th><th>Share</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="gc-total"><span>Total points pool</span><b>${fmt(pool)}</b></div>`;
+}
+
+// ── Allocation: distribute the crafted results among contributors by points ──
+// Results are user-entered rows (label + hex value + qty). Three modes + optional hex settlement.
+function gcResultItems(){
+  const items = [];
+  (gcState.results||[]).forEach(r => { const v = +r.value||0, q = Math.max(0, Math.floor(+r.qty||0)); for (let k=0;k<q;k++) items.push({ label:(r.label||'Item').trim()||'Item', value:v }); });
+  return items;
+}
+function gcAllocate(){
+  const contribs = gcContributors || [];
+  const items = gcResultItems();
+  if (!contribs.length || !items.length) return null;
+  const totalPts = contribs.reduce((s,c)=>s+c.points,0) || 1;
+  const totalVal = items.reduce((s,it)=>s+it.value,0);
+  const ent = contribs.map(c => c.points/totalPts*totalVal);   // hex entitlement per contributor
+  const alloc = contribs.map(()=>({ items:{}, value:0 }));
+  const give = (i, it) => { alloc[i].items[it.label] = (alloc[i].items[it.label]||0) + 1; alloc[i].value += it.value; };
+  const mode = gcState.allocMode || 'greedy';
+  if (mode === 'proportional'){
+    // largest-remainder (Hamilton) split of each result ROW's count by points
+    (gcState.results||[]).forEach(r => {
+      const q = Math.max(0, Math.floor(+r.qty||0)), v = +r.value||0, label = (r.label||'Item').trim()||'Item'; if (!q) return;
+      const ideal = contribs.map(c => c.points/totalPts*q), base = ideal.map(x=>Math.floor(x));
+      let left = q - base.reduce((a,b)=>a+b,0);
+      const order = ideal.map((x,i)=>({i,frac:x-Math.floor(x)})).sort((a,b)=>b.frac-a.frac);
+      for (let k=0;k<left && order.length;k++) base[order[k%order.length].i]++;
+      base.forEach((cnt,i)=>{ if (cnt>0){ alloc[i].items[label]=(alloc[i].items[label]||0)+cnt; alloc[i].value += cnt*v; } });
+    });
+  } else if (mode === 'greedy'){
+    // give each item (highest value first) to whoever is furthest under their entitlement
+    const received = contribs.map(()=>0);
+    items.slice().sort((a,b)=>b.value-a.value).forEach(it => {
+      let best=0, bestGap=-Infinity;
+      for (let i=0;i<contribs.length;i++){ const gap = ent[i]-received[i]; if (gap>bestGap){ bestGap=gap; best=i; } }
+      received[best]+=it.value; give(best, it);
+    });
+  } else {
+    // priority draft: rank by points, each round the highest-ranked picks the best remaining item
+    const its = items.slice().sort((a,b)=>b.value-a.value);
+    const order = contribs.map((c,i)=>i).sort((a,b)=>contribs[b].points-contribs[a].points);
+    let k=0; while (k<its.length){ for (const i of order){ if (k>=its.length) break; give(i, its[k++]); } }
+  }
+  return { contribs, ent, alloc, totalVal };
+}
+function gcAddResult(){ (gcState.results = gcState.results||[]).push({ label:'', value:0, qty:1 }); gcSaveState(); gcRenderAlloc(); }
+function gcSetResult(i, field, v){ if (!gcState.results[i]) return; gcState.results[i][field] = (field==='label') ? v : (+v||0); gcSaveState(); gcRenderAlloc(); }
+function gcRemoveResult(i){ gcState.results.splice(i,1); gcSaveState(); gcRenderAlloc(); }
+function gcSetAllocMode(m){ gcState.allocMode = m; gcSaveState(); gcRenderAlloc(); }
+function gcToggleSettle(on){ gcState.settle = !!on; gcSaveState(); gcRenderAlloc(); }
+function gcRenderAlloc(){ const box = document.getElementById('gc-alloc'); if (box) box.innerHTML = gcAllocHtml(); }
+function gcAllocHtml(){
+  const fmt = n => fmtCoin(Math.round(n));
+  const modes = [['greedy','Fair (value)'],['proportional','Proportional (counts)'],['draft','Draft order']];
+  const mode = gcState.allocMode || 'greedy';
+  const resultRows = (gcState.results||[]).map((r,i) => `
+    <div class="gc-reroll-row">
+      <input class="sj-input" placeholder="Result (e.g. T4 Axe)" value="${escHtml(r.label||'')}" style="flex:1;min-width:120px" onchange="gcSetResult(${i},'label',this.value)">
+      <input class="sj-input" type="number" min="0" value="${r.value||''}" placeholder="hex each" style="width:100px" onchange="gcSetResult(${i},'value',this.value)"> hex
+      <input class="sj-input" type="number" min="1" value="${r.qty||1}" style="width:80px" onchange="gcSetResult(${i},'qty',this.value)"> ×
+      <button class="gc-x" title="Remove" onclick="gcRemoveResult(${i})"><i class="ti ti-x"></i></button>
+    </div>`).join('');
+  const setup = `<div class="gc-sec-title">Allocation<span class="gc-sec-sub">distribute the crafted results by points</span></div>
+    <div class="gc-reroll" style="border-top:none;padding-top:0">
+      <div class="gc-sub">Results crafted <span style="color:var(--text3);font-weight:400">— what got made + its hex value each</span></div>
+      ${resultRows || '<div class="gc-empty-note">Add the crafted results to allocate.</div>'}
+      <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddResult()"><i class="ti ti-plus"></i> Add result</button>
+    </div>`;
+  const res = gcAllocate();
+  if (!gcContributors.length) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Tally contributions above first, then the results will be split by each person's points.</div>`;
+  if (!res) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Add at least one crafted result (with a hex value) to compute the split.</div>`;
+  const settle = !!gcState.settle;
+  const modeBtns = `<div class="gc-modes">${modes.map(([m,l])=>`<button class="gc-mode${m===mode?' active':''}" onclick="gcSetAllocMode('${m}')">${l}</button>`).join('')}<label class="gc-settle"><input type="checkbox" ${settle?'checked':''} onchange="gcToggleSettle(this.checked)"> Hex settlement</label></div>`;
+  const rows = res.contribs.map((c,i) => {
+    const a = res.alloc[i];
+    const itemsTxt = Object.entries(a.items).sort((x,y)=>y[1]-x[1]).map(([l,n])=>`${fmtCount(n)}× ${escHtml(l)}`).join(', ') || '—';
+    const diff = res.ent[i] - a.value;
+    const settleCell = settle ? `<td class="gc-num gc-settle-cell">${Math.abs(diff)<1?'<span class="gc-even">even</span>':(diff>0?`<span class="gc-owed">+${fmt(diff)}</span>`:`<span class="gc-owe">−${fmt(-diff)}</span>`)}</td>` : '';
+    return `<tr>
+      <td class="gc-num gc-rank"><span${i<3?` style="color:${['#e8b923','#b9c2cc','#c9803e'][i]}"`:''}>${i+1}</span></td>
+      <td class="gc-item"><i class="ti ti-user" style="color:var(--text3)"></i><span>${escHtml(c.name)}</span></td>
+      <td class="gc-alloc-items">${itemsTxt}</td>
+      <td class="gc-num gc-val">${fmt(a.value)}</td>
+      ${settleCell}
+    </tr>`;
+  }).join('');
+  const help = { greedy:'Each result goes to whoever is furthest below their fair share — closest to exact by value.', proportional:'Each result batch’s count is split by points (largest-remainder). Best when the tools are identical.', draft:'Ranked by points; each round the top contributor picks first. Even-ish counts, best picks to the biggest contributors.' }[mode];
+  return `${setup}
+    ${modeBtns}
+    <div class="gc-foot-note" style="margin:.1rem 0 .6rem">${help}${settle?' Settlement squares up the leftover hex so everyone gets exactly their share.':''}</div>
+    <table class="gc-table"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th>Gets</th><th class="gc-num">Value</th>${settle?'<th class="gc-num">Settle</th>':''}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function gcSetupHtml(){
@@ -9772,9 +9874,10 @@ async function renderGroupCraft(){
   const el = document.getElementById('groupcraft-content'); if (!el) return;
   if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
   gcLoadState();
-  el.innerHTML = gcSetupHtml() + '<div id="gc-results"></div><div id="gc-contrib" style="margin-top:1.4rem"></div>';
+  el.innerHTML = gcSetupHtml() + '<div id="gc-results"></div><div id="gc-contrib" style="margin-top:1.4rem"></div><div id="gc-alloc" style="margin-top:1.4rem"></div>';
   gcRecompute();
   gcTally();
+  gcRenderAlloc();
 }
 
 (async () => {
