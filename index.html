@@ -9823,18 +9823,19 @@ function gcAllocHtml(){
       <input class="sj-input" type="number" min="1" value="${r.qty||1}" style="width:80px" onchange="gcSetResult(${i},'qty',this.value)"> ×
       <button class="gc-x" title="Remove" onclick="gcRemoveResult(${i})"><i class="ti ti-x"></i></button>
     </div>`).join('');
-  const rCol = !!gcState.resultsCollapsed;
+  // Collapse only applies when there ARE results — with none, keep it open so the Add button stays visible.
+  const rCol = !!gcState.resultsCollapsed && (gcState.results||[]).length>0;
   const setup = `<div class="gc-sec-title">Allocation<span class="gc-sec-sub">distribute the crafted results by points</span></div>
     <div class="gc-reroll" style="border-top:none;padding-top:0">
       <div class="gc-sub gc-collap-hd" onclick="gcToggleResults()"><i class="ti ti-chevron-down gc-setup-chev" style="${rCol?'transform:rotate(-90deg)':''}"></i>Results crafted <span style="color:var(--text3);font-weight:400">— what got made + its hex value each</span></div>
       <div${rCol?' style="display:none"':''}>
-        ${resultRows || '<div class="gc-empty-note">Add the crafted results to allocate.</div>'}
+        ${resultRows || '<div class="gc-empty-note">Add the crafted results to compute the split.</div>'}
         <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddResult()"><i class="ti ti-plus"></i> Add result</button>
       </div>
     </div>`;
   const res = gcAllocate();
   if (!gcContributors.length) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Tally contributions above first, then the results will be split by each person's points.</div>`;
-  if (!res) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Add at least one crafted result (with a hex value) to compute the split.</div>`;
+  if (!res) return setup;
   const settle = !!gcState.settle;
   const modeBtns = `<div class="gc-modes">${modes.map(([m,l])=>`<button class="gc-mode${m===mode?' active':''}" onclick="gcSetAllocMode('${m}')">${l}</button>`).join('')}<label class="gc-settle"><input type="checkbox" ${settle?'checked':''} onchange="gcToggleSettle(this.checked)"> Hex settlement</label></div>`;
   const rows = res.contribs.map((c,i) => {
@@ -9925,6 +9926,9 @@ async function gcRecompute(){
   box.innerHTML = gcResultsHtml(lines);
 }
 function gcTierColor(t){ return (t>0 && typeof TIER_COLORS!=='undefined') ? (TIER_COLORS[Math.min(t, TIER_COLORS.length-1)]||{}).c || 'var(--border2)' : 'var(--border2)'; }
+function gcTierBg(t){ return (t>0 && typeof TIER_COLORS!=='undefined') ? (TIER_COLORS[Math.min(t, TIER_COLORS.length-1)]||{}).bg || 'transparent' : 'transparent'; }
+// Order mats within a tier: ingot → plank → leather → rope, then anything else alphabetical.
+function gcMatRank(label){ const n = (label||'').toLowerCase(); return /ingot/.test(n)?0 : /plank/.test(n)?1 : /leather/.test(n)?2 : /rope/.test(n)?3 : 8; }
 // The plan summary + overall funding bar. Kept above the two columns so "Tool materials" and
 // "Contributions" line up.
 function gcPlanHtml(lines){
@@ -9949,14 +9953,14 @@ function gcResultsHtml(lines){
       : `<input class="sj-input gc-manual" type="number" min="0" placeholder="set price" value="${gcManualPrice[ln.key]||''}" onchange="gcSetManualPrice('${ln.key}',this.value)">`;
     let needCell = fmtCount(ln.qty);
     if (haveGathered){ const g = gcGatheredFor(ln), done = g>=ln.qty; needCell = `<span class="gc-gn${done?' gc-gn-done':''}">${fmtCount(g)} / ${fmtCount(ln.qty)}</span>`; }
-    return `<tr>
+    return `<tr style="background:${gcTierBg(ln.tierN)}">
       <td class="gc-item" style="border-left:3px solid ${gcTierColor(ln.tierN)}">${ln.icon?gameIconImg(ln.icon,20):''}<span>${escHtml(ln.label)}</span></td>
       <td class="gc-num">${needCell}</td>
       <td class="gc-num">${ptsCell}</td>
     </tr>`;
   };
   const section = (title, secKey) => {
-    const rows = lines.filter(l=>l.section===secKey).sort((a,b)=>(a.tier-b.tier)||a.label.localeCompare(b.label));
+    const rows = lines.filter(l=>l.section===secKey).sort((a,b)=>(a.tier-b.tier)||(gcMatRank(a.label)-gcMatRank(b.label))||a.label.localeCompare(b.label));
     if (!rows.length) return '';
     const sub = rows.reduce((s,l)=>s+(l.value||0),0);
     return `<div class="gc-sec-title">${title} <span class="gc-sec-sub">${fmt(sub)} cost</span></div>
