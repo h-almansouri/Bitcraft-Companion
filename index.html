@@ -798,8 +798,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-setup-title{font-weight:600;font-size:13px;color:var(--text)}
 .gc-setup-summary{font-size:11px;color:var(--text3);margin-left:.3rem}
 .gc-setup-body{margin-top:.7rem}
-.gc-tool-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:12px;color:var(--text3);flex-wrap:wrap}
-.gc-tool-row .sj-input:first-child{min-width:130px}
+.gc-tool-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:12px;color:var(--text3)}
 .gc-table td{padding:.4rem .5rem;border-bottom:1px solid var(--border);color:var(--text2)}
 .gc-table tr:last-child td{border-bottom:none}
 .gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
@@ -824,9 +823,13 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-bar-lg{height:10px}
 .gc-bar-fill{height:100%;background:var(--teal);border-radius:4px;transition:width .3s}
 .gc-bar-fill.gc-bar-done{background:var(--green-light)}
-.gc-gath{width:130px}
-.gc-gath-txt{display:block;font-size:10px;color:var(--text3);margin-top:2px;text-align:right;font-variant-numeric:tabular-nums}
-.gc-gath-done{color:var(--green-light)}
+.gc-gn-done{color:var(--green-light);font-weight:600}
+.gc-collap-hd{cursor:pointer;user-select:none;display:flex;align-items:center;gap:.35rem}
+.gc-collap-hd .gc-setup-chev{font-size:13px}
+.gc-join{margin-top:1rem;border-top:1px solid var(--border);padding-top:.7rem}
+.gc-join-opts{display:flex;flex-wrap:wrap;gap:.45rem .9rem;margin-top:.3rem}
+.gc-join-opt{display:inline-flex;align-items:center;gap:.35rem;font-size:12px;color:var(--text2);cursor:pointer}
+.gc-join-opt input{accent-color:var(--teal);cursor:pointer}
 .gc-funded{background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:.7rem .9rem;margin-bottom:1rem}
 .gc-funded-hd{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--text);margin-bottom:.4rem}
 .gc-funded-hd b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
@@ -9519,14 +9522,15 @@ function syncSkillActiveStates(id){
 // allocator come in later slices — this first slice is event setup + the needed-materials list.
 const GC_TOOL_WORDS = ['pickaxe','axe','hammer','hoe','machete','saw','chisel','scissors','shears','knife','shovel','scythe','rod','bow','quill','sickle'];
 const GC_STABILIZER_HEX = 75;   // Reforging Stabilizer is trader-only (Rumbagh) with no market listing
-let gcState = { tools:[{family:'',topTier:6,qty:100}], rerolls:[], containers:[], startMs:null, results:[], allocMode:'greedy', settle:true, setupCollapsed:false };   // tools/rerolls/containers/results are lists
+let gcState = { tools:[{family:'',topTier:6,qty:100}], rerolls:[], containers:[], startMs:null, results:[], allocMode:'greedy', settle:true, setupCollapsed:false, resultsCollapsed:false, groups:[], joinCollapsed:true };   // groups: [{name, ids:[playerId]}] merge one person's characters
 let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
 let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
 let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
 let gcSeq = 0, gcTallySeq = 0;
 let gcFoundContainers = [];  // transient: containers surfaced by the "find" search, for the picker
 let gcGathered = {};         // item_id -> total qty deposited (from the last tally) — drives the progress bars
-let gcContributors = [];     // ranked [{name,points,units,kinds}] from the last tally
+let gcContributors = [];     // ranked [{name,points,units,kinds,ids}] AFTER account-joining — used by the leaderboard + allocator
+let gcRawPlayers = [];       // ranked per-character [{id,name,points,units,kinds}] BEFORE joining — used by the join manager
 
 function gcLoadState(){
   try { const s = JSON.parse(localStorage.getItem('bc_groupcraft')||'null');
@@ -9613,6 +9617,7 @@ function gcSetRerollCount(i,v){ gcState.rerolls[i].count = Math.max(0, +v||0); g
 function gcRemoveReroll(i){ gcState.rerolls.splice(i,1); gcSaveState(); renderGroupCraft(); }
 function gcSetManualPrice(key,v){ const n = parseFloat(v); if (isFinite(n) && n>0) gcManualPrice[key] = n; else delete gcManualPrice[key]; gcRecalc(); }
 function gcToggleSetup(){ gcState.setupCollapsed = !gcState.setupCollapsed; gcSaveState(); renderGroupCraft(); }
+function gcToggleResults(){ gcState.resultsCollapsed = !gcState.resultsCollapsed; gcSaveState(); gcRenderAlloc(); }
 
 // ── Contribution tracking (storage logs) ──
 // Discover candidate containers by looking at one player's deposit/withdraw history, then let the user
@@ -9678,16 +9683,65 @@ async function gcTally(){
       const u = unitByItem[l.item_id]; if (!u) return;
       const q = +l.quantity || 0; if (q <= 0) return;
       gathered[l.item_id] = (gathered[l.item_id]||0) + q;
-      const p = players[l.player_entity_id] || (players[l.player_entity_id] = { name:l.player_username || ('Player '+l.player_entity_id), points:0, units:0, kinds:new Set() });
+      const id = String(l.player_entity_id);
+      const p = players[id] || (players[id] = { id, name:l.player_username || ('Player '+id), points:0, units:0, kinds:new Set() });
       p.points += q * u.unit; p.units += q; p.kinds.add(u.label);
     }));
   } catch(e){ if (seq===gcTallySeq) box.innerHTML = `<div class="gc-sec-title">Contributions</div><div class="gc-empty-note">Couldn't read storage logs.</div>`; return; }
   if (seq !== gcTallySeq) return;
   gcGathered = gathered;
-  gcContributors = Object.values(players).sort((a,b)=>b.points-a.points);
+  gcRawPlayers = Object.values(players).sort((a,b)=>b.points-a.points);
+  gcContributors = gcApplyGroups(gcRawPlayers);
   box.innerHTML = gcContribHtml(gcContributors, logCount);
   gcRecompute();     // refresh the needed list so its gathered/progress bars reflect the new tally
   gcRenderAlloc();   // the allocator now has contributor points to split by
+}
+// Merge each player into their joined group (if any); ungrouped players stay as themselves.
+function gcApplyGroups(raw){
+  const idGroup = {}; (gcState.groups||[]).forEach((g,gi)=>(g.ids||[]).forEach(id=>idGroup[String(id)]=gi));
+  const out = {};
+  raw.forEach(p => {
+    const gi = idGroup[p.id];
+    const key = gi!=null ? 'g'+gi : 'p'+p.id;
+    const name = gi!=null ? gcState.groups[gi].name : p.name;
+    const e = out[key] || (out[key] = { name, points:0, units:0, kinds:new Set(), ids:[] });
+    e.points += p.points; e.units += p.units; p.kinds.forEach(k=>e.kinds.add(k)); e.ids.push(p.id);
+  });
+  return Object.values(out).sort((a,b)=>b.points-a.points);
+}
+function gcPlayerName(id){ const p = gcRawPlayers.find(x=>x.id===String(id)); return p ? p.name : ('Player '+id); }
+function gcCreateGroup(){
+  const body = document.getElementById('gc-join-body'); if (!body) return;
+  const ids = [...body.querySelectorAll('.gc-join-opts input:checked')].map(cb=>cb.value);
+  if (ids.length < 2) return;
+  const name = ((document.getElementById('gc-join-name')||{}).value||'').trim() || gcPlayerName(ids[0]);
+  (gcState.groups = gcState.groups || []).push({ name, ids });
+  gcSaveState();
+  gcContributors = gcApplyGroups(gcRawPlayers);
+  const box = document.getElementById('gc-contrib'); if (box) box.innerHTML = gcContribHtml(gcContributors);
+  gcRenderAlloc();
+}
+function gcRemoveGroup(i){
+  (gcState.groups||[]).splice(i,1); gcSaveState();
+  gcContributors = gcApplyGroups(gcRawPlayers);
+  const box = document.getElementById('gc-contrib'); if (box) box.innerHTML = gcContribHtml(gcContributors);
+  gcRenderAlloc();
+}
+function gcToggleJoin(){ gcState.joinCollapsed = !gcState.joinCollapsed; gcSaveState(); const box = document.getElementById('gc-contrib'); if (box) box.innerHTML = gcContribHtml(gcContributors); }
+function gcJoinHtml(){
+  if (!gcRawPlayers.length) return '';
+  const grouped = new Set(); (gcState.groups||[]).forEach(g=>(g.ids||[]).forEach(id=>grouped.add(String(id))));
+  const groupChips = (gcState.groups||[]).map((g,i)=>`<span class="gc-chip">${escHtml(g.name)}: ${g.ids.map(id=>escHtml(gcPlayerName(id))).join(' + ')} <i class="ti ti-x" onclick="gcRemoveGroup(${i})"></i></span>`).join('');
+  const opts = gcRawPlayers.filter(p=>!grouped.has(p.id)).map(p=>`<label class="gc-join-opt"><input type="checkbox" value="${p.id}"> ${escHtml(p.name)}</label>`).join('');
+  const col = !!gcState.joinCollapsed;
+  return `<div class="gc-join">
+    <div class="gc-sub gc-collap-hd" onclick="gcToggleJoin()"><i class="ti ti-chevron-down gc-setup-chev" style="${col?'transform:rotate(-90deg)':''}"></i>Join accounts <span style="color:var(--text3);font-weight:400">— merge one person's characters into one contributor</span></div>
+    <div id="gc-join-body"${col?' style="display:none"':''}>
+      ${groupChips ? `<div class="gc-chips" style="margin:.4rem 0">${groupChips}</div>` : ''}
+      ${opts ? `<div class="gc-join-opts">${opts}</div>
+      <div style="display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap"><input id="gc-join-name" class="sj-input" placeholder="Joined name…" style="width:170px"><button class="btn ctrl-btn" onclick="gcCreateGroup()"><i class="ti ti-users-group"></i> Join selected</button></div>` : '<div class="gc-empty-note">All characters are already joined.</div>'}
+    </div>
+  </div>`;
 }
 // Total qty gathered for a needed line (seed lines sum across the 3 interchangeable seed ids).
 function gcGatheredFor(ln){ return (ln.kind==='seedavg') ? (ln.seedIds||[]).reduce((s,id)=>s+(gcGathered[id]||0),0) : (gcGathered[ln.itemId]||0); }
@@ -9697,15 +9751,16 @@ function gcContribHtml(ranked, logCount){
   if (!ranked.length) return title + `<div class="gc-empty-note">No matching deposits since ${escHtml(startTxt)}. (Only deposits of the materials above count.)</div>`;
   const pool = ranked.reduce((s,p)=>s+p.points,0);
   const medal = ['#e8b923','#b9c2cc','#c9803e'];
-  const rows = ranked.map((p,i) => { const share = pool>0?p.points/pool*100:0; return `<tr>
+  const rows = ranked.map((p,i) => { const share = pool>0?p.points/pool*100:0; const joined = (p.ids||[]).length>1; return `<tr>
     <td class="gc-num gc-rank"><span${i<3?` style="color:${medal[i]}"`:''}>${i+1}</span></td>
-    <td class="gc-item"><i class="ti ti-user" style="color:var(--text3)"></i><span>${escHtml(p.name)}</span></td>
+    <td class="gc-item"><i class="ti ti-${joined?'users-group':'user'}" style="color:var(--text3)"></i><span>${escHtml(p.name)}</span>${joined?' <span class="gc-tag">joined</span>':''}</td>
     <td class="gc-num">${fmtCount(p.units)}</td>
     <td class="gc-num gc-val">${fmtNum(Math.round(p.points))}</td>
     <td class="gc-num gc-share-pct">${share.toFixed(share<10?1:0)}%</td>
   </tr>`; }).join('');
   return `${title}
-    <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Points</th><th class="gc-num">Share</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table class="gc-table gc-lb"><thead><tr><th class="gc-num">#</th><th>Contributor</th><th class="gc-num">Items</th><th class="gc-num">Points</th><th class="gc-num">Share</th></tr></thead><tbody>${rows}</tbody></table>
+    ${gcJoinHtml()}`;
 }
 
 // ── Allocation: distribute the crafted results among contributors by points ──
@@ -9768,11 +9823,14 @@ function gcAllocHtml(){
       <input class="sj-input" type="number" min="1" value="${r.qty||1}" style="width:80px" onchange="gcSetResult(${i},'qty',this.value)"> ×
       <button class="gc-x" title="Remove" onclick="gcRemoveResult(${i})"><i class="ti ti-x"></i></button>
     </div>`).join('');
+  const rCol = !!gcState.resultsCollapsed;
   const setup = `<div class="gc-sec-title">Allocation<span class="gc-sec-sub">distribute the crafted results by points</span></div>
     <div class="gc-reroll" style="border-top:none;padding-top:0">
-      <div class="gc-sub">Results crafted <span style="color:var(--text3);font-weight:400">— what got made + its hex value each</span></div>
-      ${resultRows || '<div class="gc-empty-note">Add the crafted results to allocate.</div>'}
-      <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddResult()"><i class="ti ti-plus"></i> Add result</button>
+      <div class="gc-sub gc-collap-hd" onclick="gcToggleResults()"><i class="ti ti-chevron-down gc-setup-chev" style="${rCol?'transform:rotate(-90deg)':''}"></i>Results crafted <span style="color:var(--text3);font-weight:400">— what got made + its hex value each</span></div>
+      <div${rCol?' style="display:none"':''}>
+        ${resultRows || '<div class="gc-empty-note">Add the crafted results to allocate.</div>'}
+        <button class="btn ctrl-btn" style="margin-top:.4rem" onclick="gcAddResult()"><i class="ti ti-plus"></i> Add result</button>
+      </div>
     </div>`;
   const res = gcAllocate();
   if (!gcContributors.length) return setup + `<div class="gc-empty-note" style="margin-top:.6rem">Tally contributions above first, then the results will be split by each person's points.</div>`;
@@ -9809,9 +9867,9 @@ function gcSetupHtml(){
     if (tool.topTier > maxTier) tool.topTier = maxTier;
     const tierOpts = Array.from({length:maxTier},(_,k)=>k+1).map(t => `<option value="${t}"${t===tool.topTier?' selected':''}>Tier ${t}</option>`).join('');
     return `<div class="gc-tool-row">
-      <select class="sj-input" onchange="gcSetToolFamily(${i},this.value)">${famOpts}</select>
+      <select class="sj-input" style="width:auto" onchange="gcSetToolFamily(${i},this.value)">${famOpts}</select>
       <select class="sj-input" style="width:auto" onchange="gcSetToolTier(${i},this.value)">${tierOpts}</select>
-      <input class="sj-input" type="number" min="1" value="${tool.qty}" style="width:90px" onchange="gcSetToolQty(${i},this.value)"> ×
+      <input class="sj-input" type="number" min="1" value="${tool.qty}" style="width:80px" onchange="gcSetToolQty(${i},this.value)"> ×
       ${(gcState.tools||[]).length>1 ? `<button class="gc-x" title="Remove" onclick="gcRemoveTool(${i})"><i class="ti ti-x"></i></button>` : ''}
     </div>`;
   }).join('');
@@ -9878,7 +9936,7 @@ function gcPlanHtml(lines){
   if (haveGathered && total>0){
     const funded = lines.reduce((s,l)=>{ if(l.unit==null) return s; return s + Math.min(gcGatheredFor(l), l.qty)*l.unit; }, 0);
     const pct = Math.min(100, funded/total*100);
-    fundedBar = `<div class="gc-funded"><div class="gc-funded-hd"><span>Materials gathered</span><b>${pct.toFixed(pct>=99.5?0:1)}%</b></div><div class="gc-bar gc-bar-lg"><div class="gc-bar-fill${pct>=100?' gc-bar-done':''}" style="width:${pct}%"></div></div><div class="gc-funded-sub">${fmt(funded)} of ${fmt(total)} by value</div></div>`;
+    fundedBar = `<div class="gc-funded"><div class="gc-funded-hd"><span>Materials gathered</span><b>${pct.toFixed(pct>=99.5?0:1)}%</b></div><div class="gc-bar gc-bar-lg"><div class="gc-bar-fill${pct>=100?' gc-bar-done':''}" style="width:${pct}%"></div></div></div>`;
   }
   return `<div class="gc-plan-note">${escHtml(toolSummary)||'Add a tool in Event setup'}${gcState.rerolls&&gcState.rerolls.filter(r=>r.count>0).length?`  ·  rerolls: ${gcState.rerolls.filter(r=>r.count>0).map(r=>`${fmtCount(r.count)}×T${r.tier}`).join(', ')}`:''}</div>${fundedBar}`;
 }
@@ -9886,20 +9944,15 @@ function gcResultsHtml(lines){
   const fmt = n => n==null ? '—' : fmtCoin(Math.round(n));
   const haveGathered = Object.keys(gcGathered).length > 0;
   const row = ln => {
-    const priceCell = ln.unit!=null
-      ? `<span class="gc-price">${fmt(ln.unit)}</span>${ln.kind==='fixed'?' <span class="gc-tag">trader</span>':''}${ln.kind==='seedavg'?' <span class="gc-tag">avg</span>':''}`
+    const ptsCell = ln.unit!=null
+      ? `<span class="gc-price">${fmtCount(Math.round(ln.unit))}</span>${ln.kind==='fixed'?' <span class="gc-tag">trader</span>':''}${ln.kind==='seedavg'?' <span class="gc-tag">avg</span>':''}`
       : `<input class="sj-input gc-manual" type="number" min="0" placeholder="set price" value="${gcManualPrice[ln.key]||''}" onchange="gcSetManualPrice('${ln.key}',this.value)">`;
-    let gCell = '';
-    if (haveGathered){
-      const g = gcGatheredFor(ln), pct = ln.qty>0 ? Math.min(100, g/ln.qty*100) : 0, done = g>=ln.qty;
-      gCell = `<td class="gc-gath"><div class="gc-bar"><div class="gc-bar-fill${done?' gc-bar-done':''}" style="width:${pct.toFixed(1)}%"></div></div><span class="gc-gath-txt${done?' gc-gath-done':''}">${fmtCount(g)} / ${fmtCount(ln.qty)}</span></td>`;
-    }
+    let needCell = fmtCount(ln.qty);
+    if (haveGathered){ const g = gcGatheredFor(ln), done = g>=ln.qty; needCell = `<span class="gc-gn${done?' gc-gn-done':''}">${fmtCount(g)} / ${fmtCount(ln.qty)}</span>`; }
     return `<tr>
       <td class="gc-item" style="border-left:3px solid ${gcTierColor(ln.tierN)}">${ln.icon?gameIconImg(ln.icon,20):''}<span>${escHtml(ln.label)}</span></td>
-      <td class="gc-num">${fmtCount(ln.qty)}</td>
-      <td class="gc-num">${priceCell}</td>
-      <td class="gc-num gc-val">${ln.value!=null?fmt(ln.value):'—'}</td>
-      ${gCell}
+      <td class="gc-num">${needCell}</td>
+      <td class="gc-num">${ptsCell}</td>
     </tr>`;
   };
   const section = (title, secKey) => {
@@ -9907,12 +9960,12 @@ function gcResultsHtml(lines){
     if (!rows.length) return '';
     const sub = rows.reduce((s,l)=>s+(l.value||0),0);
     return `<div class="gc-sec-title">${title} <span class="gc-sec-sub">${fmt(sub)} cost</span></div>
-      <table class="gc-table"><thead><tr><th>Material</th><th class="gc-num">Needed</th><th class="gc-num">Pts/unit</th><th class="gc-num">Value</th>${haveGathered?'<th>Gathered</th>':''}</tr></thead><tbody>${rows.map(row).join('')}</tbody></table>`;
+      <table class="gc-table"><thead><tr><th>Material</th><th class="gc-num">${haveGathered?'Gathered / Needed':'Needed'}</th><th class="gc-num">Pts/Unit</th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table>`;
   };
   const missing = lines.some(l=>l.unit==null);
   return `${section('Tool materials','tools')}
     ${section('Reroll materials','reroll')}
-    <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Each material's 7d value is its points-per-unit. ${missing?'Set a price for any material without market data above. ':''}</div>`;
+    <div class="gc-foot-note"><i class="ti ti-info-circle"></i> Points/Unit is based on the material's 7d average market value. ${missing?'Set a price for any material without market data above. ':''}</div>`;
 }
 async function renderGroupCraft(){
   const el = document.getElementById('groupcraft-content'); if (!el) return;
