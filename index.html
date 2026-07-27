@@ -8474,6 +8474,23 @@ function packageMap(){
   }
   return (_bcPackageMap = m);
 }
+// The same package recipes keyed by the cargo's RAW game id → the item it unpacks into. Feeds anything
+// reading the relay (storage logs, inventory rows), which reports raw cargo ids, whereas crafting data
+// namespaces cargo above GAME_CARGO_ID_BASE — item ids themselves are identical in both spaces.
+const GAME_CARGO_ID_BASE = 4000000000;
+let _bcPackageById = null;
+function packageByCargoId(){
+  if (_bcPackageById) return _bcPackageById;
+  if (!craftingData || !craftingData.recipes) return {};   // not loaded yet — don't cache empty
+  const m = {};
+  for (const r of craftingData.recipes){
+    if (!/^package /i.test(r.name)) continue;
+    const out = (r.outputs||[])[0], inp = (r.inputs||[])[0];
+    if (!out || !inp || out.itemId < GAME_CARGO_ID_BASE) continue;
+    m[out.itemId - GAME_CARGO_ID_BASE] = { itemId: inp.itemId, per: (inp.quantity||1) / (out.quantity||1) };
+  }
+  return (_bcPackageById = m);
+}
 // Pool item counts (by lowercase name) across the selected merged inventories. Packaged cargo is also
 // credited as its contents, so e.g. a Rough Rope Package counts toward the "Rough Rope" a recipe needs.
 function poolInvByIndices(trackedSet) {
@@ -9757,16 +9774,22 @@ async function gcTally(){
   let logCount = 0;
   try {
     const results = await Promise.all(containers.map(c => fetch(`${RELAY_HTTP}/storage-logs?storageId=${c.id}`).then(r=>r.json()).catch(()=>({logs:[]}))));
+    const pkgById = packageByCargoId();
     results.forEach(j => (j.logs||[]).forEach(l => {
       logCount++;
       if (l.action !== 'deposit') return;
       if (new Date(l.timestamp).getTime() < startMs) return;
-      const u = unitByItem[l.item_id]; if (!u) return;
       const q = +l.quantity || 0; if (q <= 0) return;
-      gathered[l.item_id] = (gathered[l.item_id]||0) + q;
+      // Packaged cargo counts as what it unpacks into (1 Ferralith Ingot Package = 100 Ferralith
+      // Ingots), the same expansion the Tool crafting tab does — hauling in bulk shouldn't cost points.
+      const pkg = (l.item_type === 'Cargo') ? pkgById[l.item_id] : null;
+      const itemId = pkg ? pkg.itemId : l.item_id;
+      const units = pkg ? q * pkg.per : q;
+      const u = unitByItem[itemId]; if (!u) return;
+      gathered[itemId] = (gathered[itemId]||0) + units;
       const id = String(l.player_entity_id);
       const p = players[id] || (players[id] = { id, name:l.player_username || ('Player '+id), points:0, units:0, kinds:new Set() });
-      p.points += q * u.unit; p.units += q; p.kinds.add(u.label);
+      p.points += units * u.unit; p.units += units; p.kinds.add(u.label);
     }));
   } catch(e){ if (seq===gcTallySeq) box.innerHTML = `<div class="gc-sec-title">Contributions</div><div class="gc-empty-note">Couldn't read storage logs.</div>`; return; }
   if (seq !== gcTallySeq) return;
@@ -9829,7 +9852,7 @@ function gcGatheredFor(ln){ return (ln.kind==='seedavg') ? (ln.seedIds||[]).redu
 function gcContribHtml(ranked, logCount){
   const startTxt = gcState.startMs ? new Date(gcState.startMs).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'the last ~15 days';
   const title = `<div class="gc-sec-title">Contributions<span class="gc-sec-sub">${ranked.length} contributor${ranked.length!==1?'s':''}</span><button class="btn ctrl-btn" style="margin-left:auto;font-size:11px" onclick="gcTally()"><i class="ti ti-refresh"></i> Refresh</button></div>`;
-  if (!ranked.length) return title + `<div class="gc-empty-note">No matching deposits since ${escHtml(startTxt)}. (Only deposits of the materials above count.)</div>`;
+  if (!ranked.length) return title + `<div class="gc-empty-note">No matching deposits since ${escHtml(startTxt)}. (Only deposits of the materials above count — packaged cargo counts as the items it unpacks into.)</div>`;
   const pool = ranked.reduce((s,p)=>s+p.points,0);
   const medal = ['#e8b923','#b9c2cc','#c9803e'];
   const rows = ranked.map((p,i) => { const joined = (p.ids||[]).length>1; return `<tr>
