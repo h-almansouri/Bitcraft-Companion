@@ -285,8 +285,10 @@ main.planner-mode{max-width:none;padding:1rem}
 .al-section-title{font-size:12px;font-weight:700;color:var(--text2);margin:1.1rem 0 .55rem}
 .al-pcards{display:flex;flex-direction:column;gap:.6rem}
 .al-pcard{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem}
-.al-pcard-muted{opacity:.6}
+.al-pcard-muted .al-pchips{opacity:.45}
 .al-pcard-hdr{font-size:13px;color:var(--text);margin-bottom:.55rem;display:flex;align-items:center;gap:.4rem}
+.al-pmute{font-size:11px}
+.al-pmute.on{background:rgba(217,160,60,.16);border-color:var(--amber-light);color:var(--amber-light)}
 .al-pchips{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
 .al-pchip-wrap{display:flex;align-items:center;gap:.35rem}
 .al-pchip{display:inline-flex;align-items:center;gap:.35rem;font-size:12px;padding:4px 9px;border-radius:8px;background:var(--bg4);border:1px solid var(--border2);color:var(--text2);cursor:pointer;white-space:nowrap}
@@ -811,10 +813,19 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-total{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;padding:.7rem .85rem;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:14px;color:var(--text)}
 .gc-total b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
 .gc-foot-note{font-size:11px;color:var(--text3);margin-top:.7rem;line-height:1.5}
-.gc-cfind-list{display:flex;flex-direction:column;gap:.25rem;margin:.3rem 0 .5rem;max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:.4rem}
+.gc-cfind-list{display:flex;flex-direction:column;gap:.25rem;margin:.3rem 0 .5rem;max-height:230px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:.4rem}
 .gc-cfind-opt{display:flex;align-items:center;gap:.45rem;font-size:12px;color:var(--text2);cursor:pointer;padding:.15rem .2rem}
 .gc-cfind-opt:hover{color:var(--text)}
 .gc-cfind-sub{color:var(--text3);font-size:11px;margin-left:auto;white-space:nowrap}
+.gc-psearch{display:block;position:relative;min-width:220px}
+.gc-psearch input{width:100%;background:var(--bg4);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 8px 5px 27px;font-size:12px;outline:none;box-sizing:border-box}
+.gc-psearch input:focus{border-color:var(--teal)}
+.gc-psearch .si{position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:13px;pointer-events:none}
+.gc-cfind-q{margin:.3rem 0 0}
+.gc-cfind-cat{display:flex;align-items:center;gap:.35rem;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);padding:.3rem .2rem .1rem;cursor:pointer;user-select:none;border-top:1px solid var(--border);margin-top:.2rem}
+.gc-cfind-cat:first-child{border-top:none;margin-top:0}
+.gc-cfind-cat:hover{color:var(--text2)}
+.gc-cfind-n{margin-left:auto;font-weight:600}
 .gc-chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.3rem}
 .gc-chip{display:inline-flex;align-items:center;gap:.35rem;background:rgba(29,158,117,.12);border:1px solid var(--teal-dim,var(--border2));color:var(--teal-light);border-radius:14px;padding:.2rem .6rem;font-size:12px}
 .gc-chip i{cursor:pointer;font-size:13px}
@@ -1674,7 +1685,7 @@ function playerSection(p, innerHtml, bodyId){
       <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
       <span class="badge psec-paused" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
       <span style="flex:1"></span>
-      <i class="ti ti-${muted?'bell-off':'bell'} psec-alerts" title="${muted?'Alerts muted — click to enable':'Mute alerts for this player'}" onclick="event.stopPropagation();togglePlayerAlerts('${id}', this)" style="color:${muted?'var(--amber-light)':'var(--text3)'};font-size:15px;cursor:pointer"></i>
+      <i class="ti ti-${muted?'bell-off':'bell'} psec-alerts" data-alerts-bell="${id}" title="${muted?'Alerts muted — click to enable':'Mute alerts for this player'}" onclick="event.stopPropagation();togglePlayerAlerts('${id}')" style="color:${muted?'var(--amber-light)':'var(--text3)'};font-size:15px;cursor:pointer"></i>
       <i class="ti ti-${paused?'player-play':'player-pause'} psec-mon" title="${paused?'Resume monitoring':'Stop monitoring (pause live refresh)'}" onclick="event.stopPropagation();togglePlayerMonitor('${id}', this)" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
     </div>
     <div id="${bodyId}" style="display:${collapsed?'none':''};padding:.65rem .75rem">${innerHtml}</div>
@@ -1706,16 +1717,21 @@ function togglePlayerMonitor(id, iconEl){
   if (typeof startLive === 'function') startLive();   // paused players drop out of the live feed
 }
 // Mute/unmute sound + notification alerts for one player, without pausing their live tracking.
-function togglePlayerAlerts(id, iconEl){
+// Mute/unmute every alert for one player. Callable from the per-player section header on any tab AND
+// from the Alerts settings, so it repaints every bell icon for that player rather than just the clicked
+// one, and re-renders the settings panel when it's open.
+function togglePlayerAlerts(id){
   id = String(id);
   const nowMuted = !playerAlertsMuted.has(id);
   if (nowMuted) playerAlertsMuted.add(id); else playerAlertsMuted.delete(id);
   savePlayerAlertsMuted();
   delete alertState[id];   // drop stale baselines so unmuting doesn't fire on the first poll
-  if (!iconEl) return;
-  iconEl.className = 'ti ti-'+(nowMuted?'bell-off':'bell')+' psec-alerts';
-  iconEl.title = nowMuted ? 'Alerts muted — click to enable' : 'Mute alerts for this player';
-  iconEl.style.color = nowMuted ? 'var(--amber-light)' : 'var(--text3)';
+  document.querySelectorAll(`[data-alerts-bell="${id}"]`).forEach(el => {
+    el.className = 'ti ti-'+(nowMuted?'bell-off':'bell')+' psec-alerts';
+    el.title = nowMuted ? 'Alerts muted — click to enable' : 'Mute alerts for this player';
+    el.style.color = nowMuted ? 'var(--amber-light)' : 'var(--text3)';
+  });
+  if (typeof isAlertSettingsOpen === 'function' && isAlertSettingsOpen()) renderAlerts();
 }
 
 // ── XP / LEVEL HELPERS ──
@@ -9340,7 +9356,10 @@ function renderAlerts(){
       return `<div class="al-pchip-wrap"><label class="al-pchip${on?' on':''}"><input type="checkbox" ${on?'checked':''} onchange="setPlayerAlert('${id}','${key}',this.checked)"> <i class="ti ${meta.icon}"></i> ${meta.label}</label>${extra}</div>`;
     }).join('');
     return `<div class="al-pcard${muted?' al-pcard-muted':''}">
-      <div class="al-pcard-hdr"><i class="ti ti-user"></i> <b>${escHtml(playerName(p))}</b>${muted?' <span class="badge" style="font-size:10px">muted</span>':''}</div>
+      <div class="al-pcard-hdr"><i class="ti ti-user"></i> <b>${escHtml(playerName(p))}</b>${muted?' <span class="badge" style="font-size:10px">muted</span>':''}
+        <span style="flex:1"></span>
+        <button class="btn ctrl-btn al-pmute${muted?' on':''}" onclick="togglePlayerAlerts('${id}')" title="${muted?'Every alert for this player is silenced — click to unmute':'Silence every alert for this player without unticking each one'}"><i class="ti ti-${muted?'bell-off':'bell'}"></i> ${muted?'Muted':'Mute all'}</button>
+      </div>
       <div class="al-pchips">${chips}</div>
     </div>`;
   };
@@ -9626,23 +9645,80 @@ function gcToggleAlloc(){ gcState.allocCollapsed = !gcState.allocCollapsed; gcSa
 // Discover candidate containers by looking at one player's deposit/withdraw history, then let the user
 // pick which container(s) count. Tallying a container reads ALL players' deposits into it, not just this
 // player's — this search is only to surface the container's entity id + name.
-async function gcFindContainers(name){
-  name = (name||'').trim(); const box = document.getElementById('gc-cfind-results'); if (!box) return;
-  if (name.length < 2){ box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="gc-empty-note">Searching…</div>';
+let gcSearchTimer = null;          // debounce for the player-name dropdown
+let gcContainerFilter = '';        // filter text for the container picker
+let gcCatCollapsed = {};           // category -> collapsed (transient; the filter always expands)
+let gcCfindDocBound = false;
+const GC_CAT_META = { personal:{label:'Personal',icon:'ti-user'}, housing:{label:'Housing',icon:'ti-home'}, bank:{label:'Town Banks',icon:'ti-building-bank'}, claim:{label:'Claim Storage',icon:'ti-box'} };
+const GC_CAT_ORDER = ['personal','housing','bank','claim'];
+
+// Live player-name dropdown — same debounce/markup as the sidebar's player search.
+function gcPlayerSearchInput(q){
+  clearTimeout(gcSearchTimer);
+  q = (q||'').trim();
+  if (q.length < 2){ gcHidePlayerResults(); return; }
+  gcSearchTimer = setTimeout(() => gcPlayerSearch(q), 400);
+}
+function gcHidePlayerResults(){ const el = document.getElementById('gc-psearch-results'); if (el) el.style.display = 'none'; }
+async function gcPlayerSearch(q){
+  const el = document.getElementById('gc-psearch-results'); if (!el) return;
+  el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">Searching…</div>'; el.style.display = 'block';
+  let players;
+  try { players = (await apiFetch('/api/players?q=' + encodeURIComponent(q))).players || []; }
+  catch(e){ el.innerHTML = '<div class="search-result-item" style="color:#f09595">Search failed</div>'; return; }
+  if (!players.length){ el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">No players found</div>'; return; }
+  el.innerHTML = players.slice(0,6).map(p => {
+    const nm = p.username || p.userName || 'Unknown';
+    return `<div class="search-result-item" onclick='gcPickPlayerRaw(${JSON.stringify(JSON.stringify({ id:String(p.entityId), name:nm }))})'>${escHtml(nm)}<small>${p.entityId}</small></div>`;
+  }).join('');
+  el.style.display = 'block';
+}
+function gcPickPlayerRaw(s){ const p = JSON.parse(s); gcHidePlayerResults(); const inp = document.getElementById('gc-cfind'); if (inp) inp.value = p.name; gcFindContainers(p.id, p.name); }
+// Pull every container this player deposited into / withdrew from, and label each one personal /
+// housing / bank / claim so the picker groups them the way the inventory dropdowns do. The housing
+// call is what makes "housing" separable — storage logs alone only carry a claim name (null at home).
+async function gcFindContainers(playerId, playerName){
+  const box = document.getElementById('gc-cfind-results'); if (!box) return;
+  box.innerHTML = '<div class="gc-empty-note">Reading storage logs…</div>';
   try {
-    const pd = await apiFetch('/api/players?q=' + encodeURIComponent(name));
-    const p = (pd.players||[])[0]; if (!p){ box.innerHTML = '<div class="gc-empty-note">No player found.</div>'; return; }
-    const j = await (await fetch(`${RELAY_HTTP}/storage-logs?playerId=${p.entityId}`)).json();
+    const [j, hj] = await Promise.all([
+      fetch(`${RELAY_HTTP}/storage-logs?playerId=${playerId}`).then(r=>r.json()),
+      fetch(`${RELAY_HTTP}/player/${playerId}/housing`).then(r=>r.json()).catch(()=>({}))
+    ]);
+    const houseIds = new Set(((hj||{}).buildings||[]).map(b => String(b.entity_id)));
     const seen = {};
-    (j.logs||[]).forEach(l => { const b = l.building||{}; if (b.entity_id && !seen[b.entity_id]) seen[b.entity_id] = { id:String(b.entity_id), name:b.nickname||b.name||'Storage', sub:(b.nickname&&b.name)?b.name:'', region:l.region, claim:l.claim_name }; });
+    (j.logs||[]).forEach(l => {
+      const b = l.building||{}; if (!b.entity_id || seen[b.entity_id]) return;
+      const id = String(b.entity_id);
+      const cat = houseIds.has(id) ? 'housing' : (/bank/i.test(b.name||'') ? 'bank' : (l.claim_name ? 'claim' : 'personal'));
+      seen[id] = { id, name:b.nickname||b.name||'Storage', sub:(b.nickname&&b.name)?b.name:'', region:l.region, claim:l.claim_name||'', cat };
+    });
     gcFoundContainers = Object.values(seen);
-    if (!gcFoundContainers.length){ box.innerHTML = `<div class="gc-empty-note">No container activity for ${escHtml(p.username)} in the last ~15 days.</div>`; return; }
-    box.innerHTML = `<div class="gc-cfind-list">${gcFoundContainers.map(c => {
-      const on = (gcState.containers||[]).some(x=>x.id===c.id);
-      return `<label class="gc-cfind-opt"><input type="checkbox" ${on?'checked':''} onchange="gcToggleContainer('${c.id}')"> <span>${escHtml(c.name)}</span>${c.sub?`<span class="gc-cfind-sub">${escHtml(c.sub)}</span>`:''}<span class="gc-cfind-sub">R${c.region||'?'}${c.claim?' · '+escHtml(c.claim):''}</span></label>`;
-    }).join('')}</div>`;
+    gcContainerFilter = '';
+    if (!gcFoundContainers.length){ box.innerHTML = `<div class="gc-empty-note">No container activity for ${escHtml(playerName||'that player')} in the last ~15 days.</div>`; return; }
+    box.innerHTML = gcCfindBoxHtml();
   } catch(e){ box.innerHTML = '<div class="gc-empty-note">Search failed.</div>'; }
+}
+function gcFilterContainers(v){ gcContainerFilter = (v||'').toLowerCase(); gcRenderCfindList(); }
+function gcToggleCat(cat){ gcCatCollapsed[cat] = !gcCatCollapsed[cat]; gcRenderCfindList(); }
+function gcRenderCfindList(){ const l = document.getElementById('gc-cfind-list'); if (l) l.innerHTML = gcCfindListHtml(); }
+function gcCfindBoxHtml(){
+  return `<input class="sj-input gc-cfind-q" placeholder="Filter containers…" value="${escHtml(gcContainerFilter)}" oninput="gcFilterContainers(this.value)">
+    <div class="gc-cfind-list" id="gc-cfind-list">${gcCfindListHtml()}</div>`;
+}
+function gcCfindListHtml(){
+  const q = gcContainerFilter;
+  const hits = gcFoundContainers.filter(c => !q || (c.name+' '+c.sub+' '+c.claim).toLowerCase().includes(q));
+  if (!hits.length) return '<div class="gc-empty-note" style="margin:.3rem .2rem 0">No container matches.</div>';
+  return GC_CAT_ORDER.map(cat => {
+    const rows = hits.filter(c => c.cat===cat); if (!rows.length) return '';
+    const m = GC_CAT_META[cat], col = !!gcCatCollapsed[cat] && !q;   // filtering always expands
+    const opts = col ? '' : rows.map(c => {
+      const on = (gcState.containers||[]).some(x=>x.id===c.id);
+      return `<label class="gc-cfind-opt"><input type="checkbox" data-cid="${c.id}" ${on?'checked':''} onchange="gcToggleContainer('${c.id}')"> <span>${escHtml(c.name)}</span>${c.sub?`<span class="gc-cfind-sub">${escHtml(c.sub)}</span>`:''}<span class="gc-cfind-sub">R${c.region||'?'}${c.claim?' · '+escHtml(c.claim):''}</span></label>`;
+    }).join('');
+    return `<div class="gc-cfind-cat" onclick="gcToggleCat('${cat}')"><i class="ti ti-chevron-down" style="font-size:11px;transition:transform .15s${col?';transform:rotate(-90deg)':''}"></i><i class="ti ${m.icon}"></i>${m.label}<span class="gc-cfind-n">${rows.length}</span></div>${opts}`;
+  }).join('');
 }
 function gcToggleContainer(id){
   const cur = gcState.containers || (gcState.containers = []);
@@ -9650,8 +9726,10 @@ function gcToggleContainer(id){
   if (i>=0) cur.splice(i,1);
   else { const c = gcFoundContainers.find(x=>x.id===id); if (c) cur.push({ id:c.id, name:c.name, region:c.region }); }
   gcSaveState();
-  // Update just the selected-chips row + re-tally, so the search results stay open for picking more.
+  // Update just the selected-chips row + the matching checkbox, so the picker keeps its scroll
+  // position and stays open for multi-select. Then re-tally.
   const chips = document.getElementById('gc-container-chips'); if (chips) chips.innerHTML = gcContainerChipsHtml();
+  document.querySelectorAll(`#gc-cfind-list input[data-cid="${id}"]`).forEach(cb => cb.checked = i < 0);
   gcTally();
 }
 function gcContainerChipsHtml(){
@@ -9910,7 +9988,11 @@ function gcSetupHtml(){
         <div class="gc-sub">Group storage <span style="color:var(--text3);font-weight:400">— which container(s) count, and when the event started</span></div>
         <div class="gc-row" style="margin-bottom:.5rem">
           <label class="gc-field"><span>Find container (search a player who uses it)</span>
-            <span style="display:flex;gap:.4rem"><input id="gc-cfind" class="sj-input" placeholder="Player name…" onkeydown="if(event.key==='Enter'){event.preventDefault();gcFindContainers(this.value);}"><button class="btn ctrl-btn" onclick="gcFindContainers(document.getElementById('gc-cfind').value)">Find</button></span>
+            <span class="gc-psearch">
+              <i class="ti ti-search si"></i>
+              <input type="text" id="gc-cfind" placeholder="Search player…" autocomplete="off" oninput="gcPlayerSearchInput(this.value)">
+              <div class="search-results" id="gc-psearch-results" style="display:none"></div>
+            </span>
           </label>
           <label class="gc-field"><span>Event started</span><input class="sj-input" type="datetime-local" value="${gcStartInputVal()}" onchange="gcSetStart(this.value)"></label>
         </div>
@@ -9986,6 +10068,12 @@ async function renderGroupCraft(){
   const el = document.getElementById('groupcraft-content'); if (!el) return;
   if (typeof craftingData==='undefined' || !craftingData){ el.innerHTML = '<div class="empty" style="padding:2rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.4rem"></i><span>Loading crafting data…</span></div>'; try { await loadCraftingData(); } catch(e){ el.innerHTML='<div class="empty" style="padding:2rem"><i class="ti ti-alert-triangle"></i><span>Couldn\'t load crafting data.</span></div>'; return; } }
   gcLoadState();
+  // The setup markup is rebuilt on every render, so its input listeners are fresh; the document-level
+  // close listener for the player dropdown must bind only ONCE or it stacks on every render.
+  if (!gcCfindDocBound){
+    gcCfindDocBound = true;
+    document.addEventListener('click', e => { if (!e.target.closest('.gc-psearch')) gcHidePlayerResults(); });
+  }
   el.innerHTML = gcSetupHtml()
     + `<div class="gc-setup">`
     +   `<div class="gc-setup-hd" onclick="gcToggleMC()"><i class="ti ti-chevron-down gc-setup-chev" id="gc-mc-chev"${gcState.mcCollapsed?' style="transform:rotate(-90deg)"':''}"></i><span class="gc-setup-title">Materials &amp; Contributions</span></div>`
