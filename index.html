@@ -826,6 +826,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .gc-cfind-cat:first-child{border-top:none;margin-top:0}
 .gc-cfind-cat:hover{color:var(--text2)}
 .gc-cfind-n{margin-left:auto;font-weight:600}
+.gc-cfind-note{display:flex;align-items:flex-start;gap:.35rem;font-size:11px;color:var(--text3);line-height:1.45;margin:-.2rem 0 .4rem}
 .gc-chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.3rem}
 .gc-chip{display:inline-flex;align-items:center;gap:.35rem;background:rgba(29,158,117,.12);border:1px solid var(--teal-dim,var(--border2));color:var(--teal-light);border-radius:14px;padding:.2rem .6rem;font-size:12px}
 .gc-chip i{cursor:pointer;font-size:13px}
@@ -9691,28 +9692,50 @@ async function gcPlayerSearch(q){
   el.style.display = 'block';
 }
 function gcPickPlayerRaw(s){ const p = JSON.parse(s); gcHidePlayerResults(); const inp = document.getElementById('gc-cfind'); if (inp) inp.value = p.name; gcFindContainers(p.id, p.name); }
-// Pull every container this player deposited into / withdrew from, and label each one personal /
-// housing / bank / claim so the picker groups them the way the inventory dropdowns do. The housing
-// call is what makes "housing" separable — storage logs alone only carry a claim name (null at home).
+// Every container the player can point us at, from three sources, because the storage-log history
+// alone is an incomplete and lagging view: it only shows containers they happened to touch in the
+// last ~15 days, so a chest made FOR the event (no history yet) never appeared.
+//   1. /player/<id>/housing  — every storage/cargo container in their house
+//   2. /storage-logs         — anything else they've used (other people's storage, unclaimed buildings)
+//   3. /claim/<id>/inventory — every shared container in each claim they've used
+// Only storage BUILDINGS are listed. Personal inventory, toolbelt, wallet, cache, wagons, deployables
+// and Town Banks are deliberately absent: the game logs no transfers for them (verified — every one of
+// those entity ids returns an empty /storage-logs), so they could never be tallied. gcCfindNote() says so.
+const GC_MAX_CLAIM_FETCH = 6;   // a claim inventory is ~90KB; players realistically use 1–2
+let gcClaimsSkipped = 0;
 async function gcFindContainers(playerId, playerName){
   const box = document.getElementById('gc-cfind-results'); if (!box) return;
-  box.innerHTML = '<div class="gc-empty-note">Reading storage logs…</div>';
+  box.innerHTML = '<div class="gc-empty-note">Loading containers…</div>';
   try {
     const [j, hj] = await Promise.all([
       fetch(`${RELAY_HTTP}/storage-logs?playerId=${playerId}`).then(r=>r.json()),
       fetch(`${RELAY_HTTP}/player/${playerId}/housing`).then(r=>r.json()).catch(()=>({}))
     ]);
-    const houseIds = new Set(((hj||{}).buildings||[]).map(b => String(b.entity_id)));
     const seen = {};
+    // First writer wins, so the richest source describes each container (housing > logs > claim).
+    const put = (id, o) => { id = String(id); if (!id || id === '0' || seen[id]) return; seen[id] = Object.assign({ id }, o); };
+    const label = b => ({ name:b.nickname||b.name||'Storage', sub:(b.nickname&&b.name)?b.name:'' });
+    const house = (hj||{}).house || {};
+    ((hj||{}).buildings||[]).forEach(b => put(b.entity_id, { ...label(b), region:house.region, claim:'', cat:'housing' }));
+    const claimNames = {};
     (j.logs||[]).forEach(l => {
-      const b = l.building||{}; if (!b.entity_id || seen[b.entity_id]) return;
-      const id = String(b.entity_id);
-      const cat = houseIds.has(id) ? 'housing' : (/bank/i.test(b.name||'') ? 'bank' : (l.claim_name ? 'claim' : 'personal'));
-      seen[id] = { id, name:b.nickname||b.name||'Storage', sub:(b.nickname&&b.name)?b.name:'', region:l.region, claim:l.claim_name||'', cat };
+      const b = l.building||{}; if (!b.entity_id) return;
+      if (l.claim_entity_id && l.claim_entity_id !== '0' && l.claim_name) claimNames[l.claim_entity_id] = l.claim_name;
+      put(b.entity_id, { ...label(b), region:l.region, claim:l.claim_name||'',
+                         cat: /bank/i.test(b.name||'') ? 'bank' : (l.claim_name ? 'claim' : 'personal') });
     });
-    gcFoundContainers = Object.values(seen);
+    const cids = Object.keys(claimNames);
+    gcClaimsSkipped = Math.max(0, cids.length - GC_MAX_CLAIM_FETCH);
+    const claims = await Promise.all(cids.slice(0, GC_MAX_CLAIM_FETCH).map(cid =>
+      fetch(`${RELAY_HTTP}/claim/${cid}/inventory`).then(r=>r.json()).catch(()=>null)));
+    claims.forEach(cj => { if (!cj) return; const cl = cj.claim||{};
+      (cj.dimensions||[]).forEach(d => (d.buildings||[]).forEach(b =>
+        put(b.entity_id, { ...label(b), region:cl.region, claim:cl.name||'',
+                           cat: /bank/i.test(b.name||'') ? 'bank' : 'claim' })));
+    });
+    gcFoundContainers = Object.values(seen).sort((a,b) => (a.name||'').localeCompare(b.name||''));
     gcContainerFilter = '';
-    if (!gcFoundContainers.length){ box.innerHTML = `<div class="gc-empty-note">No container activity for ${escHtml(playerName||'that player')} in the last ~15 days.</div>`; return; }
+    if (!gcFoundContainers.length){ box.innerHTML = `<div class="gc-empty-note">No containers found for ${escHtml(playerName||'that player')}.</div>`; return; }
     box.innerHTML = gcCfindBoxHtml();
   } catch(e){ box.innerHTML = '<div class="gc-empty-note">Search failed.</div>'; }
 }
@@ -9721,7 +9744,14 @@ function gcToggleCat(cat){ gcCatCollapsed[cat] = !gcCatCollapsed[cat]; gcRenderC
 function gcRenderCfindList(){ const l = document.getElementById('gc-cfind-list'); if (l) l.innerHTML = gcCfindListHtml(); }
 function gcCfindBoxHtml(){
   return `<input class="sj-input gc-cfind-q" placeholder="Filter containers…" value="${escHtml(gcContainerFilter)}" oninput="gcFilterContainers(this.value)">
-    <div class="gc-cfind-list" id="gc-cfind-list">${gcCfindListHtml()}</div>`;
+    <div class="gc-cfind-list" id="gc-cfind-list">${gcCfindListHtml()}</div>
+    <div class="gc-cfind-note"><i class="ti ti-info-circle"></i> <span>${gcCfindNote()}</span></div>`;
+}
+// Answers the obvious "where's my personal inventory?" in place, rather than leaving dead entries in
+// the list that would always tally zero.
+function gcCfindNote(){
+  const skipped = gcClaimsSkipped ? ` Only the first ${GC_MAX_CLAIM_FETCH} claims were loaded (${gcClaimsSkipped} more skipped) — search from a player in the missing claim to reach it.` : '';
+  return `Storage buildings only. Personal inventory, toolbelt, cache, wagons and Town Banks can't be counted — the game records no deposit history for them.${skipped}`;
 }
 function gcCfindListHtml(){
   const q = gcContainerFilter;
