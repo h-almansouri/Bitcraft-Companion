@@ -4423,30 +4423,83 @@ function noteRelayResult(answered){
   if (answered){ relayFailStreak = 0; relayDownUntil = 0; return; }
   if (++relayFailStreak >= RELAY_TRIP_AFTER) relayDownUntil = Date.now() + RELAY_COOLDOWN_MS;
 }
-// Run one subscription (possibly several query strings) against a region mirror and decode its rows.
-function relayQuery(region, sqls, rowFn, timeoutMs=12000){
-  if (!relayTakeSlot()){ const rows = []; rows.ok = false; return Promise.resolve(rows); }   // fail instantly → caller falls back
-  return new Promise(resolve => {
-    let ws, done = false, rows = [], idle = null, answered = false;
-    // `rows.ok` tells callers the mirror actually answered — an empty result is otherwise
-    // indistinguishable from an unreachable relay, which would silently skip a bitjita fallback.
-    const fin = v => { if (!done){ done = true; clearTimeout(t); clearTimeout(idle); try{ ws && ws.close(); }catch(_){} try { v.ok = answered; } catch(_){} noteRelayResult(answered); resolve(v); } };
-    const t = setTimeout(() => fin(rows), timeoutMs);
+// ── Relay connection pool ──
+// Measured: a lone socket connects+answers in ~338ms, but a tab load opens all 13 regions at once and
+// they degrade to 1357-2355ms contending on TLS handshakes. A SECOND subscribe on an already-open
+// socket answers in ~80ms. So the handshake is nearly the whole cost, and the cure is to stop paying
+// it — hold one socket per region and multiplex subscribes over it, routing replies by request id
+// (SubscribeApplied echoes `req`/`query_set`, verified: sent qs=1 and qs=2, got req=1 and req=2 back).
+// Sockets idle-close so we don't sit on 13 open connections to a community-run box indefinitely.
+const RELAY_IDLE_MS = 90000;
+const relayPool = {};   // region -> { ws, greeted, opening, pending:Map(reqId->handler), nextId, idleTimer }
+function relayIdleReap(c){
+  clearTimeout(c.idleTimer);
+  if (c.pending.size) return;
+  c.idleTimer = setTimeout(() => { if (!c.pending.size){ try { c.ws && c.ws.close(); } catch(_){} } }, RELAY_IDLE_MS);
+}
+function relayConnect(region){
+  const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1 });
+  if (c.greeted && c.ws && c.ws.readyState === 1) return Promise.resolve(c);
+  if (c.opening) return c.opening;
+  c.opening = new Promise((resolve, reject) => {
+    let ws;
     try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
-    catch(e){ clearTimeout(t); return fin([]); }
-    ws.binaryType = 'arraybuffer';
-    let first = true;
+    catch(e){ c.opening = null; return reject(e); }
+    ws.binaryType = 'arraybuffer'; c.ws = ws; c.greeted = false;
+    const t = setTimeout(() => { try { ws.close(); } catch(_){} }, 12000);   // onclose does the teardown
     ws.onmessage = ev => {
       const b = new Uint8Array(ev.data);
-      if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){ clearTimeout(t); fin([]); } return; }
-      // The relay bundles a whole multi-query subscribe into ONE SubscribeApplied frame (verified), so
-      // we can settle almost immediately once it lands. A short grace still catches the rare straggler
-      // without paying a fixed half-second on every round-trip — that wait dominated cold-load latency.
-      if (b[1] === 1){ answered = true; try { rows = rows.concat(relayDecodeRows(b, rowFn)); } catch(e){} }
-      clearTimeout(idle); idle = setTimeout(() => fin(rows), 60);
+      if (!c.greeted){ c.greeted = true; clearTimeout(t); c.opening = null; resolve(c); return; }
+      let req = 0; try { const r = bsRead(b); r.o = 2; req = r.u32(); } catch(e){ return; }
+      const h = c.pending.get(req); if (h) h.frame(b);
     };
-    ws.onerror = () => fin(rows);
-    ws.onclose = () => fin(rows);      // the server may hang up once it has answered — keep what arrived
+    ws.onerror = () => { try { ws.close(); } catch(_){} };
+    ws.onclose = () => {
+      clearTimeout(t);
+      const wasOpening = c.opening; c.opening = null; c.greeted = false; c.ws = null;
+      c.pending.forEach(h => h.dropped()); c.pending.clear();   // in-flight callers settle as unanswered
+      if (wasOpening) reject(new Error('relay connect failed'));
+    };
+  });
+  return c.opening;
+}
+// Open the pool in the background so the first tab click lands on warm sockets. Staggered, because
+// firing all 13 at once is precisely the contention that makes a cold load slow.
+function relayPrewarm(regions){
+  (regions || BC_REGIONS).forEach((rg, i) => setTimeout(() => { relayConnect(rg).catch(()=>{}); }, i * 60));
+}
+// Run one subscription (possibly several query strings) against a region mirror and decode its rows.
+async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
+  const fail = () => { const rows = []; rows.ok = false; return rows; };
+  if (!relayTakeSlot()) return fail();                       // breaker open → caller falls back at once
+  let c;
+  try { c = await relayConnect(region); }
+  catch(e){ noteRelayResult(false); return fail(); }
+  return new Promise(resolve => {
+    const id = c.nextId++;
+    let rows = [], answered = false, idle = null, done = false;
+    // `rows.ok` tells callers the mirror actually answered — an empty result is otherwise
+    // indistinguishable from an unreachable relay, which would silently skip a bitjita fallback.
+    const fin = () => {
+      if (done) return; done = true;
+      clearTimeout(t); clearTimeout(idle); c.pending.delete(id);
+      rows.ok = answered; noteRelayResult(answered); relayIdleReap(c); resolve(rows);
+    };
+    const t = setTimeout(fin, timeoutMs);
+    c.pending.set(id, {
+      // The relay answers a whole subscribe — however many queries — with exactly ONE SubscribeApplied
+      // frame, so settle the moment it lands. Re-verified here at 1/3/6/36 queries: always one frame,
+      // ~85ms. The old 60ms "straggler grace" was pure latency on every round-trip, and worse, it put a
+      // setTimeout on the critical path — background-tab throttling stretched that 60ms to ~585ms.
+      frame: b => {
+        if (b[1] !== 1) return;                                    // ignore anything that isn't SubscribeApplied
+        answered = true;
+        try { rows = rows.concat(relayDecodeRows(b, rowFn)); } catch(e){}
+        fin();
+      },
+      dropped: fin      // socket died under us — settle as unanswered so the caller can fall back
+    });
+    try { c.ws.send(relayEncSubscribe(sqls, id, id)); } catch(e){ fin(); }
   });
 }
 // Which region mirror to ask about a player. The region encoded in their entity id is only where the
@@ -10297,6 +10350,7 @@ async function renderGroupCraft(){
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
   hydrateTabCaches();            // last session's Orders/Crafts data → the saved tab paints instantly, then revalidates
+  if (trackedPlayers.length) relayPrewarm();   // warm the region sockets in the background so the first tab click is ~80ms, not ~1400ms
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
