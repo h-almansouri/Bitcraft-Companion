@@ -4393,7 +4393,12 @@ function relayDecodeRows(b, rowFn){
 // ONE probe — if it fails the breaker re-trips immediately and the other 12 short-circuit; if it
 // succeeds everything resets. Costs ~250ms per 2 min while down, instead of 5-10s per tab load.
 let relayFailStreak = 0, relayDownUntil = 0, relayProbing = false;
-const RELAY_TRIP_AFTER = 6, RELAY_COOLDOWN_MS = 2 * 60 * 1000;
+// Trip only on a WHOLE sweep's worth of consecutive misses with no answer in between. A tab load queries
+// every region at once, so a couple of flaky/empty regions must never disable the relay — that would
+// silently cost the Inventory tab its vehicle and equipment rows (relayQuery serves those too) and push
+// crafts/orders onto bitjita for no reason. Healthy-but-empty regions still answer, so they reset the
+// streak; only a genuinely unreachable relay produces 13 misses in a row.
+const RELAY_TRIP_AFTER = BC_REGIONS.length, RELAY_COOLDOWN_MS = 60 * 1000;
 function relayIsDown(){ return Date.now() < relayDownUntil; }
 // A tab load fires all 13 regions through Promise.all, so they'd all read the breaker as "closed" in the
 // same tick and dial together — turning each cooldown lapse back into a full 5s sweep. Once we're in
