@@ -3342,6 +3342,13 @@ let craftByPlayer = {}; // entityId -> {active, done, passive, itemMap}
 // ourselves: one subscription per region, all 13 in parallel (~1s, ~25KB). Recipe names, durations and
 // outputs come from /crafting-data, which is already loaded and keyed by the same game recipe ids.
 const BC_REGIONS = [3,7,8,9,11,12,13,14,15,17,18,19,23];
+// ⚠️ The relay RENAMED its mirror databases from `relay-mirror-bc<N>` to `bitcraft-live-<N>`. The old
+// name now returns `HTTP 404 \`relay-mirror-bc19\` not found` on the WebSocket upgrade, which browsers
+// surface only as a bare close code 1006 with no open event — indistinguishable from "relay is down".
+// The authoritative list is /health (`sources[].database` + `.port`); the relay's own explorer reads it
+// from there at runtime, which is why the explorer kept working while we broke. Their docs still say
+// relay-mirror-bcN, so trust /health over the tutorial. One helper so a future rename is a one-line fix.
+const relayWsUrl = region => `wss://relay.bitcraftsync.app:${3000+region}/v1/database/bitcraft-live-${region}/subscribe?compression=None`;
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
 // Buildings never move and claims rarely rename, so the building→claim→name maps are worth keeping
@@ -3588,7 +3595,7 @@ function craftLiveConn(region, sqls){
     if (conn.closed) return;
     if (relayIsDown()) return schedule();   // don't add to the pile-up while the relay is known down
     let ws;
-    try { ws = new WebSocket(`wss://relay.bitcraftsync.app:${3000+region}/v1/database/relay-mirror-bc${region}/subscribe?compression=None`, ['v2.bsatn.spacetimedb']); }
+    try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
     catch(e){ return schedule(); }
     conn.ws = ws; ws.binaryType = 'arraybuffer'; let first = true;
     ws.onmessage = ev => { const b = new Uint8Array(ev.data);
@@ -4425,7 +4432,7 @@ function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     // indistinguishable from an unreachable relay, which would silently skip a bitjita fallback.
     const fin = v => { if (!done){ done = true; clearTimeout(t); clearTimeout(idle); try{ ws && ws.close(); }catch(_){} try { v.ok = answered; } catch(_){} noteRelayResult(answered); resolve(v); } };
     const t = setTimeout(() => fin(rows), timeoutMs);
-    try { ws = new WebSocket(`wss://${'relay.bitcraftsync.app'}:${3000+region}/v1/database/relay-mirror-bc${region}/subscribe?compression=None`, ['v2.bsatn.spacetimedb']); }
+    try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
     catch(e){ clearTimeout(t); return fin([]); }
     ws.binaryType = 'arraybuffer';
     let first = true;
