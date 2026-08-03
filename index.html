@@ -2465,6 +2465,33 @@ async function renderInventoryTab(silent) {
 const TAB_STALE_MS = 60000;
 let ordersFetchedAt = 0, craftFetchedAt = 0;
 let ordersRunId = 0, craftRunId = 0;   // a superseded background revalidate must not overwrite newer data
+// The same caches persisted across sessions, so a page LOAD paints instantly too — the in-memory cache
+// above only helps once you've already visited the tab. Same trick bcRelayPlaces uses for place names.
+// Deliberately does NOT restore the fetched-at stamps: a reload always revalidates, it just isn't
+// staring at a spinner while it does. Payloads are small (~2-4KB/player) but a player with hundreds of
+// passive crafts could grow, and this app has hit the localStorage quota before (see _mktCache), so
+// oversized payloads are skipped rather than risking every other setItem silently failing.
+const TAB_CACHE_KEY = 'bcTabCache', TAB_CACHE_TTL = 24*60*60*1000, TAB_CACHE_MAX = 300*1024;
+let _tabCacheSaveTimer = null;
+function hydrateTabCaches(){
+  try {
+    const d = JSON.parse(localStorage.getItem(TAB_CACHE_KEY) || 'null');
+    if (!d || !d.ts || (Date.now() - d.ts) > TAB_CACHE_TTL) return;
+    const known = new Set(trackedPlayers.map(p => String(p.entityId)));   // drop players no longer tracked
+    Object.entries(d.crafts || {}).forEach(([id, v]) => { if (known.has(id)) craftByPlayer[id] = v; });
+    Object.entries(d.orders || {}).forEach(([id, v]) => { if (known.has(id)) ordersByPlayer[id] = v; });
+  } catch(e){ /* corrupt or absent — just start cold */ }
+}
+function saveTabCaches(){
+  clearTimeout(_tabCacheSaveTimer);
+  _tabCacheSaveTimer = setTimeout(() => {
+    try {
+      const s = JSON.stringify({ ts: Date.now(), crafts: craftByPlayer, orders: ordersByPlayer });
+      if (s.length <= TAB_CACHE_MAX) safeSetItem(TAB_CACHE_KEY, s);
+      else localStorage.removeItem(TAB_CACHE_KEY);   // too big to persist — don't leave a stale copy behind
+    } catch(e){}
+  }, 1000);
+}
 // Small "Updating…" hint in a tab's toolbar, so a background revalidate is visible but not disruptive.
 function setTabBusy(tab, on){
   const el = document.getElementById(tab + '-busy');
@@ -2847,6 +2874,7 @@ async function renderOrdersTab(silent, force){
     if (myRun !== ordersRunId) return;
   }
   ordersFetchedAt = Date.now();
+  saveTabCaches();
   setTabBusy('orders', false);
   startLiveRefresh('orders');
 }
@@ -3705,6 +3733,7 @@ async function renderCraftingTab(silent, force) {
       if (myRun !== craftRunId) return;
     }
     craftFetchedAt = Date.now();
+    saveTabCaches();
     setTabBusy('craft', false);
   }
   // Live by default: active-craft progress streams over the websocket (startCraftLive) and the full list
@@ -10218,6 +10247,7 @@ async function renderGroupCraft(){
   openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
+  hydrateTabCaches();            // last session's Orders/Crafts data → the saved tab paints instantly, then revalidates
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
