@@ -3586,6 +3586,7 @@ function craftLiveConn(region, sqls){
   const feed = (row, isDelta) => onLiveCraftProgress({ entity_id: row.entityId, progress: row.progress }, isDelta);
   const open = () => {
     if (conn.closed) return;
+    if (relayIsDown()) return schedule();   // don't add to the pile-up while the relay is known down
     let ws;
     try { ws = new WebSocket(`wss://relay.bitcraftsync.app:${3000+region}/v1/database/relay-mirror-bc${region}/subscribe?compression=None`, ['v2.bsatn.spacetimedb']); }
     catch(e){ return schedule(); }
@@ -3596,10 +3597,18 @@ function craftLiveConn(region, sqls){
             else if (b[1] === 4) relayDecodeDelta(b, readProgRow).forEach(r => feed(r, true)); }   // live delta
       catch(e){}
     };
+    ws.onopen = () => { conn.backoff = 2000; };   // a real connection resets the backoff
     ws.onclose = () => { conn.ws = null; schedule(); };
     ws.onerror = () => { try { ws.close(); } catch(_){} };
   };
-  const schedule = () => { if (!conn.closed) setTimeout(open, 2000); };   // reconnect on drop
+  // Reconnect on drop, backing off 2s → 60s. A fixed 2s retry meant that while the relay was down we
+  // dialled it every 2s forever, which kept the browser's per-host connection throttle permanently
+  // engaged and made every OTHER relay call (the 13-region tab sweeps) far slower than it needed to be.
+  const schedule = () => {
+    if (conn.closed) return;
+    const wait = conn.backoff = Math.min((conn.backoff || 2000) * 2, 60000);
+    setTimeout(open, wait);
+  };
   open();
   return conn;
 }
@@ -4375,13 +4384,41 @@ function relayDecodeRows(b, rowFn){
   }
   return rows;
 }
+// ── Relay circuit breaker ──
+// A refused WebSocket only costs ~250ms on its own, but a tab load dials all 13 regions at once; once
+// they're failing, the browser throttles further connections to that host and a whole sweep degrades to
+// 5-10s. Meanwhile the bitjita fallback answers in ~180ms. So the relay being DOWN was costing far more
+// than the relay being slow ever did. Once it looks down, stop dialling and let callers fall back at once.
+// Self-healing: the streak is deliberately NOT reset when the cooldown lapses, so the next sweep sends
+// ONE probe — if it fails the breaker re-trips immediately and the other 12 short-circuit; if it
+// succeeds everything resets. Costs ~250ms per 2 min while down, instead of 5-10s per tab load.
+let relayFailStreak = 0, relayDownUntil = 0, relayProbing = false;
+const RELAY_TRIP_AFTER = 6, RELAY_COOLDOWN_MS = 2 * 60 * 1000;
+function relayIsDown(){ return Date.now() < relayDownUntil; }
+// A tab load fires all 13 regions through Promise.all, so they'd all read the breaker as "closed" in the
+// same tick and dial together — turning each cooldown lapse back into a full 5s sweep. Once we're in
+// probe mode (a trip has happened), let exactly ONE call through and make the rest wait for its verdict.
+function relayTakeSlot(){
+  if (relayIsDown()) return false;
+  if (relayFailStreak >= RELAY_TRIP_AFTER){
+    if (relayProbing) return false;
+    relayProbing = true;
+  }
+  return true;
+}
+function noteRelayResult(answered){
+  relayProbing = false;
+  if (answered){ relayFailStreak = 0; relayDownUntil = 0; return; }
+  if (++relayFailStreak >= RELAY_TRIP_AFTER) relayDownUntil = Date.now() + RELAY_COOLDOWN_MS;
+}
 // Run one subscription (possibly several query strings) against a region mirror and decode its rows.
 function relayQuery(region, sqls, rowFn, timeoutMs=12000){
+  if (!relayTakeSlot()){ const rows = []; rows.ok = false; return Promise.resolve(rows); }   // fail instantly → caller falls back
   return new Promise(resolve => {
     let ws, done = false, rows = [], idle = null, answered = false;
     // `rows.ok` tells callers the mirror actually answered — an empty result is otherwise
     // indistinguishable from an unreachable relay, which would silently skip a bitjita fallback.
-    const fin = v => { if (!done){ done = true; clearTimeout(t); clearTimeout(idle); try{ ws && ws.close(); }catch(_){} try { v.ok = answered; } catch(_){} resolve(v); } };
+    const fin = v => { if (!done){ done = true; clearTimeout(t); clearTimeout(idle); try{ ws && ws.close(); }catch(_){} try { v.ok = answered; } catch(_){} noteRelayResult(answered); resolve(v); } };
     const t = setTimeout(() => fin(rows), timeoutMs);
     try { ws = new WebSocket(`wss://${'relay.bitcraftsync.app'}:${3000+region}/v1/database/relay-mirror-bc${region}/subscribe?compression=None`, ['v2.bsatn.spacetimedb']); }
     catch(e){ clearTimeout(t); return fin([]); }
