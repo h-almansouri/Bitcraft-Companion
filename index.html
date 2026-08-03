@@ -1636,6 +1636,7 @@ function refreshPlayerTabs() {
   // The merged inventory shared by Planner + Tool crafting depends on the tracked roster — invalidate
   // it so it reloads; tracked selections re-resolve from their persisted (owner-aware) names.
   invData = null; plannerTrackedInvs = null; toolTrackedInvs = null; plannerInvMap = {};
+  ordersFetchedAt = 0; craftFetchedAt = 0;   // roster changed → the cached tabs must refetch, not short-circuit
   if (!trackedPlayers.length) {
     ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
   }
@@ -2455,6 +2456,21 @@ async function renderInventoryTab(silent) {
 // Per tracked player: /api/players/{id}/market → active { sellOrders, buyOrders }, and
 // /api/players/{id}/market-collections → everything waiting to be picked up (coins earned from sells AND
 // items from filled buy orders), each tagged with its claim + region.
+// ── Cache-first tab rendering ──
+// Orders and Crafts each cost 13 relay connections per load (one per region — see the WebSocket
+// cliff), and latency is per-ROUND-TRIP, not per-query. Re-running that on every tab click was the
+// bulk of the felt slowness. Instead: paint the cached data immediately, then revalidate in the
+// background — and skip the round-trip altogether while the cache is still fresh. The Refresh button
+// and the live poll both force a real fetch, so this only ever short-circuits idle re-entry.
+const TAB_STALE_MS = 60000;
+let ordersFetchedAt = 0, craftFetchedAt = 0;
+let ordersRunId = 0, craftRunId = 0;   // a superseded background revalidate must not overwrite newer data
+// Small "Updating…" hint in a tab's toolbar, so a background revalidate is visible but not disruptive.
+function setTabBusy(tab, on){
+  const el = document.getElementById(tab + '-busy');
+  if (el) el.style.display = on ? '' : 'none';
+}
+const tabBusyHtml = tab => `<span id="${tab}-busy" style="display:none;font-size:11px;color:var(--text3);align-items:center;gap:.3rem"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i>Updating…</span>`;
 let ordersByPlayer = {}; // entityId -> { sellOrders, buyOrders, collections }
 let ordersExpanded = new Set();  // order entityIds whose market order-book is expanded
 let ordersHistoryOpen = new Set();  // playerIds whose completed-trade history panel is open
@@ -2788,36 +2804,50 @@ function ordersExpandHtml(det, ctx){
   const note = ctx.myRegion ? `<div style="padding:.25rem .9rem .45rem;font-size:10px;color:var(--text3)">Listings in your region (R${ctx.myRegion}) are highlighted.</div>` : '';
   return `<div style="background:var(--bg2);border-top:1px solid var(--border);padding:.3rem 0 .5rem">${body}${note}</div>`;
 }
-async function renderOrdersTab(silent){
+async function renderOrdersTab(silent, force){
   const el = document.getElementById('tab-orders'); if (!el) return;
   if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
   if (!silent || !document.getElementById('orders-toolbar')){
     el.innerHTML = `
       <div id="orders-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
         <button id="live-btn-orders" class="btn live-btn" onclick="toggleTabLive('orders')"><i class="ti ti-player-play"></i> Live</button>
-        <button class="btn ctrl-btn" onclick="renderOrdersTab()"><i class="ti ti-refresh"></i> Refresh</button>
+        <button class="btn ctrl-btn" onclick="renderOrdersTab(false,true)"><i class="ti ti-refresh"></i> Refresh</button>
+        ${tabBusyHtml('orders')}
       </div>
       <div id="orders-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-orders-' + p.entityId)).join('')}</div>`;
     updateLiveBtns();
+    // Re-entering the tab: paint what we already have instead of a spinner. Only a first-ever
+    // visit (or a newly tracked player) waits on the network.
+    trackedPlayers.forEach(p => { if (ordersByPlayer[p.entityId]) fillPlayerOrdersCached(p.entityId); });
   }
+  // Still fresh → skip the 13-connection scan entirely. Refresh (force) and the live poll (silent) opt out.
+  if (!force && !silent && ordersFetchedAt && (Date.now() - ordersFetchedAt) < TAB_STALE_MS
+      && trackedPlayers.every(p => ordersByPlayer[p.entityId])){ setTabBusy('orders', false); startLiveRefresh('orders'); return; }
   // Batched relay pass for all tracked players (13 connections total, not per player); per-player
   // bitjita fallback only if every mirror is unreachable.
+  const myRun = ++ordersRunId;
   const toLoad = trackedPlayers.filter(p => !(silent && isPlayerPaused(p.entityId) && ordersByPlayer[p.entityId]));
+  setTabBusy('orders', true);
   let batched = false;
   if (toLoad.length){
     try {
       const multi = await fetchMarketRelayMulti(toLoad.map(p => p.entityId));
+      if (myRun !== ordersRunId) return;                    // a newer load owns the UI now
       toLoad.forEach(p => { ordersByPlayer[p.entityId] = multi[String(p.entityId)] || { sellOrders:[], buyOrders:[], collections:[] }; fillPlayerOrdersCached(p.entityId); });
       batched = true;
     } catch(e){ /* relay down → bitjita per player */ }
   }
+  if (myRun !== ordersRunId) return;
   if (!batched){
     await Promise.all(toLoad.map(async p => {
       try { ordersByPlayer[p.entityId] = await fetchPlayerMarketBitjita(p.entityId); }
       catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
-      fillPlayerOrdersCached(p.entityId);
+      if (myRun === ordersRunId) fillPlayerOrdersCached(p.entityId);
     }));
+    if (myRun !== ordersRunId) return;
   }
+  ordersFetchedAt = Date.now();
+  setTabBusy('orders', false);
   startLiveRefresh('orders');
 }
 
@@ -3624,14 +3654,15 @@ function setCraftTab(t) {
   trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId));
   if (t === 'passive') { startPassiveCraftTimer(); stopCraftLive(); } else { stopPassiveCraftTimer(); startCraftLive(); }
 }
-async function renderCraftingTab(silent) {
+async function renderCraftingTab(silent, force) {
   const el = document.getElementById('tab-crafting');
   if (!el) return;
   if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
   if (!silent || !document.getElementById('craft-toolbar')) {
     el.innerHTML = `
       <div id="craft-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
-        <button class="btn ctrl-btn" onclick="renderCraftingTab()"><i class="ti ti-refresh"></i> Refresh</button>
+        <button class="btn ctrl-btn" onclick="renderCraftingTab(false,true)"><i class="ti ti-refresh"></i> Refresh</button>
+        ${tabBusyHtml('craft')}
         <span style="flex:1"></span>
         <div class="craft-tabs" style="margin:0">
           <div class="craft-tab ${craftTabActive!=='passive'?'active':''}" onclick="setCraftTab('active')"><i class="ti ti-flame"></i> Active</div>
@@ -3640,24 +3671,41 @@ async function renderCraftingTab(silent) {
       </div>
       <div id="craft-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId)).join('')}</div>`;
     updateLiveBtns();
+    // Re-entering the tab: paint what we already have instead of a spinner. Crafts pay TWO sequential
+    // round-trips (region scan, then building/claim resolve), so this is the biggest felt win.
+    trackedPlayers.forEach(p => { if (craftByPlayer[p.entityId]) fillPlayerCraftCached(p.entityId); });
   }
+  // Still fresh → skip the scan. Active-craft PROGRESS keeps ticking regardless: it streams over
+  // startCraftLive below, so a cached list is never visibly stale while you watch it.
+  const stillFresh = !force && !silent && craftFetchedAt && (Date.now() - craftFetchedAt) < TAB_STALE_MS
+      && trackedPlayers.every(p => craftByPlayer[p.entityId]);
   // Load every tracked player in ONE batched relay pass (13 connections total, not 13 per player —
   // see the WebSocket cliff). Fall back to per-player bitjita only if every mirror is unreachable.
-  const toLoad = trackedPlayers.filter(p => !(silent && isPlayerPaused(p.entityId) && craftByPlayer[p.entityId]));
-  let batched = false;
-  if (toLoad.length){
-    try {
-      const multi = await fetchCraftsRelayMulti(toLoad.map(p => p.entityId));
-      toLoad.forEach(p => { craftByPlayer[p.entityId] = multi[String(p.entityId)] || { active:[], done:[], passive:[], itemMap:{} }; fillPlayerCraftCached(p.entityId); });
-      batched = true;
-    } catch(e){ /* relay down → bitjita per player */ }
-  }
-  if (!batched){
-    await Promise.all(toLoad.map(async p => {
-      try { craftByPlayer[p.entityId] = await fetchPlayerCraftsBitjita(p.entityId); }
-      catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
-      fillPlayerCraftCached(p.entityId);
-    }));
+  const myRun = ++craftRunId;
+  if (stillFresh) setTabBusy('craft', false);   // nothing in flight — clear any indicator a superseded run left behind
+  if (!stillFresh){
+    const toLoad = trackedPlayers.filter(p => !(silent && isPlayerPaused(p.entityId) && craftByPlayer[p.entityId]));
+    setTabBusy('craft', true);
+    let batched = false;
+    if (toLoad.length){
+      try {
+        const multi = await fetchCraftsRelayMulti(toLoad.map(p => p.entityId));
+        if (myRun !== craftRunId) return;                   // a newer load owns the UI now
+        toLoad.forEach(p => { craftByPlayer[p.entityId] = multi[String(p.entityId)] || { active:[], done:[], passive:[], itemMap:{} }; fillPlayerCraftCached(p.entityId); });
+        batched = true;
+      } catch(e){ /* relay down → bitjita per player */ }
+    }
+    if (myRun !== craftRunId) return;
+    if (!batched){
+      await Promise.all(toLoad.map(async p => {
+        try { craftByPlayer[p.entityId] = await fetchPlayerCraftsBitjita(p.entityId); }
+        catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
+        if (myRun === craftRunId) fillPlayerCraftCached(p.entityId);
+      }));
+      if (myRun !== craftRunId) return;
+    }
+    craftFetchedAt = Date.now();
+    setTabBusy('craft', false);
   }
   // Live by default: active-craft progress streams over the websocket (startCraftLive) and the full list
   // auto-refreshes on the tab poll (startLiveRefresh — tab-scoped, stopped by stopLiveRefresh on leaving).
