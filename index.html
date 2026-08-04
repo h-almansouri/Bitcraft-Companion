@@ -1636,7 +1636,8 @@ function refreshPlayerTabs() {
   // it so it reloads; tracked selections re-resolve from their persisted (owner-aware) names.
   invData = null; plannerTrackedInvs = null; toolTrackedInvs = null; plannerInvMap = {};
   ordersFetchedAt = 0; craftFetchedAt = 0;   // roster changed → the cached tabs must refetch, not short-circuit
-  if (typeof startRelayFeed === 'function') startRelayFeed();   // re-scope the live feed to the new roster (stops it when empty)
+  if (typeof startRelayFeed === 'function') startRelayFeed();       // re-scope the live feed to the new roster (stops it when empty)
+  if (typeof startRelayKeepWarm === 'function') startRelayKeepWarm();   // a first-tracked player needs the pool warmed now
   if (!trackedPlayers.length) {
     ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
   }
@@ -4502,12 +4503,27 @@ function noteRelayResult(answered){
 // it — hold one socket per region and multiplex subscribes over it, routing replies by request id
 // (SubscribeApplied echoes `req`/`query_set`, verified: sent qs=1 and qs=2, got req=1 and req=2 back).
 // Sockets idle-close so we don't sit on 13 open connections to a community-run box indefinitely.
-const RELAY_IDLE_MS = 90000;
-const relayPool = {};   // region -> { ws, greeted, opening, pending:Map(reqId->handler), nextId, idleTimer }
-function relayIdleReap(c){
-  clearTimeout(c.idleTimer);
-  if (c.pending.size) return;
-  c.idleTimer = setTimeout(() => { if (!c.pending.size){ try { c.ws && c.ws.close(); } catch(_){} } }, RELAY_IDLE_MS);
+const relayPool = {};   // region -> { ws, greeted, opening, pending:Map(reqId->handler), nextId }
+// The pool used to drop its sockets after 90s idle, to avoid sitting on 13 connections to a
+// single-maintainer relay while nobody was using them. The relay's owner has confirmed that's a
+// non-issue at this scale, so they're now held for the session — sitting on Map for two minutes and
+// then opening Crafts was costing 535ms to redial all 13, against 84ms warm, and an intermittent
+// slowdown with no visible cause is worse than a uniformly slower tab.
+let relayKeepTimer = null;
+function relayKeepWarm(){
+  if (!trackedPlayers.length) return;
+  BC_REGIONS.forEach((rg, i) => {
+    const c = relayPool[rg];
+    if (c && c.greeted && c.ws && c.ws.readyState === 1) return;   // already up
+    if (c && c.opening) return;                                     // already on its way
+    setTimeout(() => relayConnect(rg).catch(()=>{}), i * 60);       // staggered — 13 at once is the cliff
+  });
+}
+// Re-warms anything that recycled, dropped, or never came up. Cheap: it's a readyState check per region.
+function startRelayKeepWarm(){
+  relayKeepWarm();
+  if (relayKeepTimer) return;
+  relayKeepTimer = setInterval(relayKeepWarm, 30000);
 }
 // ⚠️ A one-shot query leaves its subscription registered on the connection, and there's no cheap way to
 // retract it: subscriptions are ADDITIVE (verified — a second Subscribe doesn't replace the first, both
@@ -4527,7 +4543,8 @@ const RELAY_MAX_SUBS = 20;
 function relayMaxSubs(region){ return RELAY_MAX_SUBS + (region % 11) * 3; }   // 20..50, distinct per region
 function relayRecycle(c){
   if ((c.subsOnSocket || 0) < relayMaxSubs(c.region) || c.pending.size) return;
-  try { c.ws && c.ws.close(); } catch(_){}      // onclose clears state; the next query opens a fresh socket
+  try { c.ws && c.ws.close(); } catch(_){}      // onclose clears state
+  setTimeout(() => relayConnect(c.region).catch(()=>{}), 50);   // straight back to warm — don't make the next query pay the handshake
 }
 function relayConnect(region){
   const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1, region });
@@ -4563,12 +4580,6 @@ function relayConnect(region){
   });
   return c.opening;
 }
-// Open the pool in the background so the first tab click lands on warm sockets. Staggered, because
-// firing all 13 at once is precisely the contention that makes a cold load slow.
-function relayPrewarm(regions){
-  (regions || BC_REGIONS).forEach((rg, i) => setTimeout(() => { relayConnect(rg).catch(()=>{}); }, i * 60));
-}
-
 // Run one subscription (possibly several query strings) against a region mirror and decode its rows.
 async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
   const fail = () => { const rows = []; rows.ok = false; return rows; };
@@ -4584,7 +4595,7 @@ async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     const fin = () => {
       if (done) return; done = true;
       clearTimeout(t); clearTimeout(idle); c.pending.delete(id);
-      rows.ok = answered; noteRelayResult(answered); relayIdleReap(c); relayRecycle(c); resolve(rows);
+      rows.ok = answered; noteRelayResult(answered); relayRecycle(c); resolve(rows);
     };
     const t = setTimeout(fin, timeoutMs);
     c.pending.set(id, {
@@ -10454,7 +10465,7 @@ async function renderGroupCraft(){
   renderPlayerArea();
   hydrateTabCaches();            // last session's Orders/Crafts data → the saved tab paints instantly, then revalidates
   if (trackedPlayers.length){
-    relayPrewarm();      // warm the query sockets so the first tab click is ~90ms, not ~1400ms
+    startRelayKeepWarm();   // hold the query sockets warm for the session so no click ever pays a redial
     startRelayFeed();    // hold the live feed so new crafts/orders arrive by push, on any tab
   }
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
