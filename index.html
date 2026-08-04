@@ -2560,6 +2560,7 @@ async function fetchMarketRelayMulti(ids){
     }, 9000).then(rows => { if (rows.ok) ok++; return { rg, rows: rows.filter(Boolean) }; }).catch(() => ({ rg, rows: [] }))
   ));
   if (!ok) throw new Error('relay unreachable');
+  noteFeedRegions(per.filter(x => x.rows.length).map(x => x.rg));   // …and wherever their orders are
   per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
   saveRelayPlaces();
   // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
@@ -3446,6 +3447,7 @@ async function fetchCraftsRelayMulti(ids){
     relayRegionCrafts(rg, ids).then(rows => ({ rg, rows, ok: rows.ok })).catch(() => ({ rg, rows: [], ok: false }))));
   if (!perRegion.some(x => x.ok)) throw new Error('relay unreachable');
   const hits = perRegion.filter(x => x.rows.length);
+  noteFeedRegions(hits.map(x => x.rg));   // widen the live feed to wherever this player's crafts actually are
   // resolve place names region by region (cached, so this is a no-op on later refreshes)
   await Promise.all(hits.map(({ rg, rows }) => {
     const bIds = [...new Set(rows.filter(r => r.buildingId && r.buildingId !== '0').map(r => r.buildingId))];
@@ -3658,17 +3660,37 @@ function stopRelayFeed(){
   Object.values(feedConns).forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} });
   feedConns = {}; feedKey = ''; bcCraftRate = {};
 }
-function startRelayFeed(){
+// ⚠️ The feed must NOT watch all 13 regions. Holding 13 feed sockets on top of the 13 pooled query
+// sockets puts 26 connections on one host, and the browser's contention cliff (13 → ~510ms, 26 → ~5s)
+// then starves the queries: measured crafts 82ms → 1396ms, orders 90ms → 1528ms, inventory 503ms →
+// 2858ms. So watch only where the roster actually is.
+// This is NOT the region-narrowing we rejected for FETCHING. Narrowing a fetch risks showing a wrong
+// list — a craft in an unwatched region would silently vanish. Narrowing the FEED only risks a delayed
+// notification: the tab's existing 10s/30s poll still catches anything the feed misses, so the failure
+// mode is "as slow as it used to be", never "wrong".
+// Regions watched = each tracked player's CURRENT region (where they are, so where they'll craft) plus
+// any region a previous fetch actually found their crafts/orders in.
+let feedSeenRegions = new Set();
+// Called with every region a fetch actually found rows in. Restarts the feed ONCE if that widened the
+// scope, rather than per region — otherwise a 13-region sweep would tear the feed down 13 times.
+function noteFeedRegions(list){
+  let added = false;
+  (list || []).forEach(rg => { if (rg != null && !feedSeenRegions.has(rg)){ feedSeenRegions.add(rg); added = true; } });
+  if (added) startRelayFeed();
+}
+async function startRelayFeed(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
-  const key = ids.join(',');
-  if (key === feedKey && Object.keys(feedConns).length) return;   // already streaming this roster
+  if (!ids.length){ stopRelayFeed(); return; }
+  const here = await Promise.all(ids.map(i => relayPlayerRegion(i).catch(() => regionOfEntity(i))));
+  const regions = [...new Set([...here, ...feedSeenRegions].filter(r => r != null && BC_REGIONS.includes(r)))].sort();
+  const key = ids.join(',') + '|' + regions.join(',');
+  if (key === feedKey && Object.keys(feedConns).length) return;   // already streaming this roster+scope
   stopRelayFeed();
-  if (!ids.length) return;
+  if (!regions.length) return;
   feedKey = key;
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
   const sqls = FEED_TABLES.map(t => `SELECT * FROM ${t} WHERE ${owner}`);
-  // Staggered: 13 simultaneous handshakes is the contention that made cold loads slow.
-  BC_REGIONS.forEach((rg, i) => setTimeout(() => { if (feedKey === key && !feedConns[rg]) feedConns[rg] = feedConn(rg, sqls); }, i * 80));
+  regions.forEach((rg, i) => setTimeout(() => { if (feedKey === key && !feedConns[rg]) feedConns[rg] = feedConn(rg, sqls); }, i * 80));
 }
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
 // tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
@@ -4495,9 +4517,16 @@ function relayIdleReap(c){
 // socket it received ZERO — snapshots keep answering, so nothing looks broken. So bound it: retire a
 // socket once it has issued RELAY_MAX_SUBS subscribes. nextId keeps climbing across recycles so a
 // reused connection can never hand out an id that's still in flight; subsOnSocket resets per socket.
+// ⚠️ STAGGER THE THRESHOLD PER REGION. A tab sweep queries all 13 regions once, so every socket's count
+// climbs in lockstep and a flat threshold retires all 13 on the SAME sweep — 13 simultaneous handshakes,
+// the exact contention this pool exists to avoid. Observed as a clean sawtooth: three fast sweeps
+// (85ms), then every socket recycling at once and the next sweep costing 371-1400ms. Spreading the
+// thresholds means at most one or two sockets retire per sweep, and a lone reconnect hides behind the
+// twelve that are still warm.
 const RELAY_MAX_SUBS = 20;
+function relayMaxSubs(region){ return RELAY_MAX_SUBS + (region % 11) * 3; }   // 20..50, distinct per region
 function relayRecycle(c){
-  if ((c.subsOnSocket || 0) < RELAY_MAX_SUBS || c.pending.size) return;
+  if ((c.subsOnSocket || 0) < relayMaxSubs(c.region) || c.pending.size) return;
   try { c.ws && c.ws.close(); } catch(_){}      // onclose clears state; the next query opens a fresh socket
 }
 function relayConnect(region){
@@ -4676,13 +4705,19 @@ async function relayHousingInvs(id){
   }));
 }
 async function fetchPlayerInvRelay(id){
-  const defs = await loadGameItemDefs();
-  const region = await relayPlayerRegion(id);
-  const [res, housing, equipment] = await Promise.all([
-    fetch(`${RELAY_HTTP}/player/${id}/inventory`),
-    relayHousingInvs(id).catch(() => []),
-    region != null ? relayEquipment(id, region).catch(() => null) : Promise.resolve(null)
-  ]);
+  // Nothing here is allowed to block on anything it doesn't actually need. The region lookup used to be
+  // awaited FIRST and cost ~253ms during which nothing else ran — but only equipment and vehicles need
+  // it; the inventory and housing reads don't. Chaining those two off the region promise instead, and
+  // folding vehicles into the same batch rather than running it afterwards, makes the whole thing one
+  // parallel wave bounded by its slowest member instead of 253 + batch + 169.
+  const defsP    = loadGameItemDefs();
+  const regionP  = relayPlayerRegion(id).catch(() => regionOfEntity(id));
+  const invP     = fetch(`${RELAY_HTTP}/player/${id}/inventory`);
+  const housingP = relayHousingInvs(id).catch(() => []);
+  const equipP   = regionP.then(rg => rg != null ? relayEquipment(id, rg).catch(() => null) : null).catch(() => null);
+  const vehP     = regionP.then(rg => rg != null ? relayVehicleInvs(id, rg).catch(() => []) : []).catch(() => []);
+  const [defs, res, housing, equipment, vehicles, region] =
+    await Promise.all([defsP, invP, housingP, equipP, vehP, regionP]);
   if (!res.ok) throw new Error('relay inventory HTTP ' + res.status);
   const j = await res.json();
   // `deployable` = a cart/boat/cache the player owns and carries around. They report the claim they
@@ -4703,15 +4738,11 @@ async function fetchPlayerInvRelay(id){
   housing.forEach(h => inventories.push(h));
   // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
   // (cache/wagon/deployable), so dedupe by entity id or their contents would be counted twice.
-  if (region != null){
-    try {
-      const have = new Set(inventories.map(i => String(i.entityId)));
-      (await relayVehicleInvs(id, region)).forEach(v => {
-        const eid = v.entity_id.toString();
-        if (!have.has(eid)) inventories.push(mk(eid, v.nickname || 'Vehicle', null, v.items, true));
-      });
-    } catch(e){}
-  }
+  const have = new Set(inventories.map(i => String(i.entityId)));
+  (vehicles || []).forEach(v => {
+    const eid = v.entity_id.toString();
+    if (!have.has(eid)) inventories.push(mk(eid, v.nickname || 'Vehicle', null, v.items, true));
+  });
   // Shallow copies: callers may write extra item metadata in, and the defs are shared/cached.
   return { inventories, equipment, items: { ...defs.items }, cargos: { ...defs.cargos } };
 }
