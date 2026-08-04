@@ -2086,9 +2086,27 @@ async function loadSkillsInto(p, silent=false) {
     let pData;
     try { pData = await fetchSkillsRelay(p.entityId); }
     catch(e){ pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
-    const rankData = await rankP;
-    body.innerHTML = skillsSectionHtml(pData, rankData, eid);
+    // Paint as soon as the XP is in, rather than waiting on ranks too. The relay read is ~84ms but the
+    // rankings call is ~557ms cold (971 bytes — it's latency, not size), and blocking on it made the
+    // whole tab five times slower to appear for one small "#12" beside each XP figure. Passing {} here
+    // means skillsSectionHtml falls back to any ranks already cached, so a revisit shows them at once.
+    body.innerHTML = skillsSectionHtml(pData, {}, eid);
     renderJourney(eid);   // re-open the calculator panel (if one was open) with fresh level/rate
+    // …then fill the ranks in when they land. Patched in place, because re-rendering the section would
+    // close the open calculator panel and flicker every card for the sake of a suffix.
+    rankP.then(rankData => {
+      const ranks = (rankData && rankData.rankings) || null;
+      if (!ranks || !Object.keys(ranks).length) return;
+      const store = skillsByPlayer[eid]; if (!store) return;
+      store.rankings = ranks;
+      if (!document.getElementById('psec-skills-' + eid)) return;   // player untracked / tab re-rendered under us
+      store.skills.forEach(sk => {
+        const card = body.querySelector(`.skill-card[data-skill="${sk.skillId}"]`);
+        const xpRow = card && card.querySelector('.skill-xp-row');
+        if (xpRow) xpRow.innerHTML = skillXpRowHtml(sk, ranks[sk.skillId]);
+      });
+      if (openJourney[eid]) renderJourney(eid);   // the calculator panel shows the rank as well
+    }).catch(()=>{});
   } catch(e) { if (!silent) body.innerHTML = errBox(e); }
 }
 function skillsSectionHtml(pData, rankData, entityId) {
