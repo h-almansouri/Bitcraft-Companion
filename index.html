@@ -1454,7 +1454,6 @@ const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'P
 function switchTab(tab) {
   stopLiveRefresh();
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
-  if (currentTab === 'crafting' && tab !== 'crafting') stopCraftLive();           // drop the live-craft stream when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
   document.getElementById('tab-' + tab).style.display = '';
@@ -1637,6 +1636,7 @@ function refreshPlayerTabs() {
   // it so it reloads; tracked selections re-resolve from their persisted (owner-aware) names.
   invData = null; plannerTrackedInvs = null; toolTrackedInvs = null; plannerInvMap = {};
   ordersFetchedAt = 0; craftFetchedAt = 0;   // roster changed → the cached tabs must refetch, not short-circuit
+  if (typeof startRelayFeed === 'function') startRelayFeed();   // re-scope the live feed to the new roster (stops it when empty)
   if (!trackedPlayers.length) {
     ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
   }
@@ -3530,7 +3530,7 @@ function fillPlayerCraftCached(entityId) {
 // tracked owners crafting there, and patch each card as the game streams progress ticks (~1-2/sec while
 // someone works a station). Browser↔relay is direct, so unlike the old SSE→live.bitjita path this costs
 // our host nothing. The relay firehose proved it pushes these deltas in real time.
-let bcCraftConns = [], bcCraftIdsKey = '', bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
+let bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
 // progressive_action_state row (fixed 53B): entity u64, building u64, function i32, progress i32,
 // recipe i32, craft_count i32, last_crit i32, owner u64, lock_expiration i64(micros), preparation bool.
 function readProgRow(r){
@@ -3541,14 +3541,14 @@ function readProgRow(r){
   const owner = r.u64();
   return { entityId: entityId.toString(), progress, ownerId: owner.toString() };
 }
-// A TransactionUpdate (tag 4) carries, per table, a delete list then an insert list. Progress only ever
-// climbs within a craft, so taking the max across both lists per entity gives the current value without
-// having to reason about delete/insert ordering (verified against the live firehose).
+// A TransactionUpdate (tag 4) carries, per table, a delete list then an insert list. Each row gets its
+// own reader, and the table name is passed through like relayDecodeRows does, so one subscription can
+// span several tables — the live feed needs to know WHICH table changed, not just that something did.
 function relayDecodeDelta(b, rowFn){
   const r = bsRead(b); r.o = 2; r.u32(); r.u32();
   const nT = r.u32(); const rows = [];
   for (let t=0;t<nT;t++){
-    r.str();                             // table name
+    const table = r.str();
     const nUpd = r.u32();
     for (let u=0;u<nUpd;u++){
       r.u8();                            // CompressableQueryUpdate tag (0 = uncompressed)
@@ -3557,40 +3557,75 @@ function relayDecodeDelta(b, rowFn){
         if (hint === 0) fixed = r.u16(); else { const n = r.u32(); offsets = []; for (let i=0;i<n;i++) offsets.push(Number(r.u64())); }
         const data = r.sub(r.u32());
         const starts = offsets || (fixed ? Array.from({length:Math.floor(data.length/fixed)},(_,i)=>i*fixed) : []);
-        for (let i=0;i<starts.length;i++){ const end=(i+1<starts.length)?starts[i+1]:data.length; try{ rows.push(rowFn(bsRead(data.subarray(starts[i],end)))); }catch(e){} }
+        for (let i=0;i<starts.length;i++){ const end=(i+1<starts.length)?starts[i+1]:data.length; try{ rows.push(rowFn(bsRead(data.subarray(starts[i],end)), table)); }catch(e){} }
       }
     }
   }
-  const latest = {};                     // entityId -> highest-progress row seen this frame
-  rows.forEach(x => { const c = latest[x.entityId]; if (!c || x.progress > c.progress) latest[x.entityId] = x; });
+  return rows;
+}
+// Progress only ever climbs within a craft, so taking the max across the delete+insert lists per entity
+// gives the current value without reasoning about ordering (verified against the live firehose).
+function craftProgressLatest(rows){
+  const latest = {};
+  rows.forEach(x => { if (!x || x.entityId == null) return; const c = latest[x.entityId]; if (!c || x.progress > c.progress) latest[x.entityId] = x; });
   return Object.values(latest);
 }
-function startCraftLive(){
-  if (craftTabActive === 'passive' || currentTab !== 'crafting'){ stopCraftLive(); return; }
-  // Group tracked owners by the region their craft row physically lives in (that's where the mirror has it).
-  const byRegion = {}, keyParts = [];
-  Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => {
-    const cid = String(c.entityId || c.entity_id || ''), owner = String(c.ownerEntityId || c.owner_entity_id || '');
-    if (!cid || !owner) return;
-    const region = regionOfEntity(cid); if (region == null) return;
-    (byRegion[region] = byRegion[region] || new Set()).add(owner);
-    keyParts.push(region + ':' + owner);
-  }));
-  const key = [...new Set(keyParts)].sort().join(',');
-  if (key === bcCraftIdsKey && bcCraftConns.length) return;   // same owner set already streaming
-  stopCraftLive();
-  bcCraftIdsKey = key;
-  Object.entries(byRegion).forEach(([region, owners]) => {
-    const sqls = [...owners].slice(0, 40).map(o => `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${o}`);
-    bcCraftConns.push(craftLiveConn(+region, sqls));
-  });
+// ── LIVE FEED — one dedicated socket per region, held for the whole session ──
+// Replaces the old per-tab craft-progress stream. Two reasons it gets its own sockets rather than
+// sharing the query pool:
+//   1. A query leaves its subscription registered forever and they accumulate — measured, a socket that
+//      had served 30 queries delivered ZERO further TransactionUpdates while still answering snapshots
+//      perfectly. The pool works around that by recycling sockets (RELAY_MAX_SUBS); a feed sharing them
+//      would be blinded every recycle, and a craft started in that gap would be missed.
+//   2. Nothing is ever queried here, so nothing accumulates and this socket never needs recycling.
+// It also covers MORE than the old stream: passive crafts and market orders, not just active-craft
+// progress, and it runs regardless of which tab you're on — so a started craft appears immediately
+// instead of waiting for the tab's 10s poll (and previously appearing not at all, since the old stream
+// only patched cards that already existed and never even connected for a player with nothing running).
+const FEED_TABLES = ['progressive_action_state','passive_craft_state','sell_order_state','buy_order_state'];
+let feedConns = {}, feedKey = '', _feedTimer = null, _feedWant = { crafts:false, orders:false };
+// Only progress rows need decoding; the rest are pure "something changed" signals. Each row gets its own
+// reader, so returning early without consuming it is safe.
+function feedRow(r, table){
+  if (table === 'progressive_action_state'){ try { return { table, ...readProgRow(r) }; } catch(e){ return { table }; } }
+  return { table };
 }
-// One self-reconnecting relay subscription for a region. Stays open while the Active crafts tab is shown.
-function craftLiveConn(region, sqls){
-  const conn = { closed:false, ws:null };
-  // isDelta distinguishes a live progress tick (someone's working) from the initial snapshot, which just
-  // carries the current state of EVERY in-progress craft — idle ones included — and must not read as Active.
-  const feed = (row, isDelta) => onLiveCraftProgress({ entity_id: row.entityId, progress: row.progress }, isDelta);
+function feedKnownCraftIds(){
+  const s = new Set();
+  Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => s.add(String(c.entityId || c.entity_id))));
+  return s;
+}
+// A change signal, not a data path: refetch (now ~90ms warm) rather than merging deltas in, because the
+// cached rows carry resolved building/claim/item names a raw delta can't reproduce.
+function feedKick(){
+  clearTimeout(_feedTimer);
+  _feedTimer = setTimeout(() => {
+    const w = { ..._feedWant }; _feedWant = { crafts:false, orders:false };
+    if (w.crafts){ craftFetchedAt = 0; if (currentTab === 'crafting') renderCraftingTab(true); }
+    if (w.orders){ ordersFetchedAt = 0; if (currentTab === 'orders') renderOrdersTab(true); }
+    // Not on that tab? Clearing the stamp is enough — re-entry revalidates instead of serving a stale cache.
+  }, 500);   // coalesce a burst; one game action often lands as several table updates at once
+}
+function onFeedRows(rows, isDelta){
+  // 1. progress ticks keep patching the bars in place, exactly as the old stream did
+  const prog = craftProgressLatest(rows.filter(x => x && x.table === 'progressive_action_state'));
+  prog.forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, isDelta));
+  if (!isDelta) return;                     // the opening snapshot isn't news
+  // 2. decide whether the LIST changed. progressive_action_state also fires on every progress tick
+  //    (1-2/sec while someone works a station), so only a craft we've never seen counts as a change.
+  let crafts = false, orders = false;
+  const known = feedKnownCraftIds();
+  rows.forEach(x => { if (!x) return;
+    if (x.table === 'progressive_action_state'){ if (x.entityId && !known.has(String(x.entityId))) crafts = true; }
+    else if (x.table === 'passive_craft_state') crafts = true;
+    else orders = true; });
+  if (!crafts && !orders) return;
+  if (crafts) _feedWant.crafts = true;
+  if (orders) _feedWant.orders = true;
+  feedKick();
+}
+function feedConn(region, sqls){
+  const conn = { closed:false, ws:null, backoff:2000 };
   const open = () => {
     if (conn.closed) return;
     if (relayIsDown()) return schedule();   // don't add to the pile-up while the relay is known down
@@ -3600,26 +3635,41 @@ function craftLiveConn(region, sqls){
     conn.ws = ws; ws.binaryType = 'arraybuffer'; let first = true;
     ws.onmessage = ev => { const b = new Uint8Array(ev.data);
       if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){} return; }
-      try { if (b[1] === 1) relayDecodeRows(b, readProgRow).forEach(r => feed(r, false));          // initial snapshot
-            else if (b[1] === 4) relayDecodeDelta(b, readProgRow).forEach(r => feed(r, true)); }   // live delta
+      try { if (b[1] === 1) onFeedRows(relayDecodeRows(b, feedRow), false);
+            else if (b[1] === 4) onFeedRows(relayDecodeDelta(b, feedRow), true); }
       catch(e){}
     };
     ws.onopen = () => { conn.backoff = 2000; };   // a real connection resets the backoff
     ws.onclose = () => { conn.ws = null; schedule(); };
     ws.onerror = () => { try { ws.close(); } catch(_){} };
   };
-  // Reconnect on drop, backing off 2s → 60s. A fixed 2s retry meant that while the relay was down we
-  // dialled it every 2s forever, which kept the browser's per-host connection throttle permanently
-  // engaged and made every OTHER relay call (the 13-region tab sweeps) far slower than it needed to be.
+  // Reconnect on drop, backing off 2s → 60s. A fixed retry meant that while the relay was down we dialled
+  // it forever, keeping the browser's per-host connection throttle permanently engaged and slowing every
+  // other relay call.
   const schedule = () => {
     if (conn.closed) return;
-    const wait = conn.backoff = Math.min((conn.backoff || 2000) * 2, 60000);
+    const wait = conn.backoff = Math.min(conn.backoff * 2, 60000);
     setTimeout(open, wait);
   };
   open();
   return conn;
 }
-function stopCraftLive(){ bcCraftConns.forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} }); bcCraftConns = []; bcCraftIdsKey = ''; bcCraftRate = {}; }
+function stopRelayFeed(){
+  Object.values(feedConns).forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} });
+  feedConns = {}; feedKey = ''; bcCraftRate = {};
+}
+function startRelayFeed(){
+  const ids = trackedPlayers.map(p => String(p.entityId)).sort();
+  const key = ids.join(',');
+  if (key === feedKey && Object.keys(feedConns).length) return;   // already streaming this roster
+  stopRelayFeed();
+  if (!ids.length) return;
+  feedKey = key;
+  const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
+  const sqls = FEED_TABLES.map(t => `SELECT * FROM ${t} WHERE ${owner}`);
+  // Staggered: 13 simultaneous handshakes is the contention that made cold loads slow.
+  BC_REGIONS.forEach((rg, i) => setTimeout(() => { if (feedKey === key && !feedConns[rg]) feedConns[rg] = feedConn(rg, sqls); }, i * 80));
+}
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
 // tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
 // "Being worked" = the game streamed an actual progress DELTA for this craft in the last ~15s. We do NOT
@@ -3696,7 +3746,7 @@ function setCraftTab(t) {
   craftTabActive = t;
   document.querySelectorAll('#craft-toolbar .craft-tab').forEach((b, i) => b.classList.toggle('active', (i===0) === (t!=='passive')));
   trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId));
-  if (t === 'passive') { startPassiveCraftTimer(); stopCraftLive(); } else { stopPassiveCraftTimer(); startCraftLive(); }
+  if (t === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();   // the live feed runs regardless of sub-tab
 }
 async function renderCraftingTab(silent, force) {
   const el = document.getElementById('tab-crafting');
@@ -3720,7 +3770,7 @@ async function renderCraftingTab(silent, force) {
     trackedPlayers.forEach(p => { if (craftByPlayer[p.entityId]) fillPlayerCraftCached(p.entityId); });
   }
   // Still fresh → skip the scan. Active-craft PROGRESS keeps ticking regardless: it streams over
-  // startCraftLive below, so a cached list is never visibly stale while you watch it.
+  // the live feed, so a cached list is never visibly stale while you watch it.
   const stillFresh = !force && !silent && craftFetchedAt && (Date.now() - craftFetchedAt) < TAB_STALE_MS
       && trackedPlayers.every(p => craftByPlayer[p.entityId]);
   // Load every tracked player in ONE batched relay pass (13 connections total, not 13 per player —
@@ -3752,12 +3802,12 @@ async function renderCraftingTab(silent, force) {
     saveTabCaches();
     setTabBusy('craft', false);
   }
-  // Live by default: active-craft progress streams over the websocket (startCraftLive) and the full list
+  // Live by default: the session-long relay feed streams progress AND surfaces new crafts, and the list
   // auto-refreshes on the tab poll (startLiveRefresh — tab-scoped, stopped by stopLiveRefresh on leaving).
   // The Refresh button forces an immediate reload. startLiveRefresh() clears the passive countdown timer,
   // so run it FIRST (and only on the initial render, so silent polls don't reset the interval/timer).
   if (!silent && currentTab === 'crafting') startLiveRefresh('crafting');   // guard: async render may finish after a tab switch
-  if (craftTabActive === 'passive') startPassiveCraftTimer(); else { stopPassiveCraftTimer(); startCraftLive(); }
+  if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
@@ -10372,7 +10422,10 @@ async function renderGroupCraft(){
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
   hydrateTabCaches();            // last session's Orders/Crafts data → the saved tab paints instantly, then revalidates
-  if (trackedPlayers.length) relayPrewarm();   // warm the region sockets in the background so the first tab click is ~80ms, not ~1400ms
+  if (trackedPlayers.length){
+    relayPrewarm();      // warm the query sockets so the first tab click is ~90ms, not ~1400ms
+    startRelayFeed();    // hold the live feed so new crafts/orders arrive by push, on any tab
+  }
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   switchTab(currentTab);
