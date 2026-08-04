@@ -257,9 +257,26 @@ function writePrefs(obj) {
   catch (e) { return false; }
 }
 
-function sendJson(res, status, obj) {
+// ── gzip ────────────────────────────────────────────────────────────────────
+// Every JSON response left here uncompressed, which is pure waste on a text payload: /api/crafts is
+// 1.43MB raw and 192KB gzipped (87% off), and the Networth tab's market calls are ~16MB per cold load.
+// zlib is built into Node, so this stays dependency-free. Only compress when the client asked and the
+// body is big enough to be worth a compress cycle.
+const zlib = require('zlib');
+const GZIP_MIN = 1024;
+function wantsGzip(req) { return /\bgzip\b/.test(req.headers['accept-encoding'] || ''); }
+function sendJson(res, status, obj, req) {
+  const body = Buffer.from(JSON.stringify(obj));
+  if (req && wantsGzip(req) && body.length >= GZIP_MIN) {
+    zlib.gzip(body, (err, gz) => {
+      if (err) { res.writeHead(status, { 'Content-Type': 'application/json' }); return res.end(body); }
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      res.end(gz);
+    });
+    return;
+  }
   res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(obj));
+  res.end(body);
 }
 
 // Serve a local file with ETag revalidation: the browser caches it but MUST revalidate, so a data
@@ -270,7 +287,18 @@ function serveFileCached(req, res, filePath, contentType) {
   try { st = fs.statSync(filePath); } catch (e) { res.writeHead(404); res.end('Not found'); return; }
   const etag = '"' + st.size + '-' + Math.floor(st.mtimeMs) + '"';
   if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'no-cache' }); res.end(); return; }
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache', 'ETag': etag });
+  const hdr = { 'Content-Type': contentType, 'Cache-Control': 'no-cache', 'ETag': etag };
+  // /crafting-data is 4.4MB — the largest single response the app serves — and index.html is ~500KB.
+  // Compressed once per request rather than cached, since these change on a data refresh and the ETag
+  // above already spares repeat visitors the transfer entirely.
+  if (wantsGzip(req)){
+    return zlib.gzip(fs.readFileSync(filePath), (err, gz) => {
+      if (err){ res.writeHead(200, hdr); return res.end(fs.readFileSync(filePath)); }
+      res.writeHead(200, { ...hdr, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      res.end(gz);
+    });
+  }
+  res.writeHead(200, hdr);
   res.end(fs.readFileSync(filePath));
 }
 
@@ -290,6 +318,14 @@ http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
     const filePath = path.join(__dirname, 'index.html');
     const data = fs.readFileSync(filePath);
+    // The app is one big file, so this is the first and largest thing every visitor downloads.
+    if (wantsGzip(req)){
+      return zlib.gzip(data, (err, gz) => {
+        if (err){ res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(data); }
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+        res.end(gz);
+      });
+    }
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(data);
     return;
@@ -324,16 +360,16 @@ http.createServer((req, res) => {
   // Cached market list (shared across all clients/reloads). { ts, items }
   if (req.url === '/market' || req.url.startsWith('/market?')) {
     const force = new URL(req.url, 'http://x').searchParams.get('force') === '1';   // client "Refresh" bypasses the cache
-    getMarketList(force).then(items => sendJson(res, 200, { ts: marketList.ts, items }))
-                        .catch(() => sendJson(res, 502, { error: 'market unavailable', items: [] }));
+    getMarketList(force).then(items => sendJson(res, 200, { ts: marketList.ts, items }, req))
+                        .catch(() => sendJson(res, 502, { error: 'market unavailable', items: [] }, req));
     return;
   }
 
   // Server-cached item/cargo detail. /item/item/123 or /item/cargo/123
   let m = req.url.match(/^\/item\/(item|cargo)\/([^/?]+)$/);
   if (m) {
-    getItemDetail(m[1], m[2]).then(data => sendJson(res, 200, data))
-                             .catch(() => sendJson(res, 502, { error: 'detail unavailable' }));
+    getItemDetail(m[1], m[2]).then(data => sendJson(res, 200, data, req))
+                             .catch(() => sendJson(res, 502, { error: 'detail unavailable' }, req));
     return;
   }
 
@@ -341,13 +377,13 @@ http.createServer((req, res) => {
   if (req.url === '/deals' || req.url.startsWith('/deals?')) {
     maybeComputeDeals();
     sendJson(res, 200, { ts: dealsCache.ts, computing: dealsCache.computing,
-      scanned: dealsCache.scanned, total: dealsCache.total, deals: dealsCache.deals });
+      scanned: dealsCache.scanned, total: dealsCache.total, deals: dealsCache.deals }, req);
     return;
   }
   // Force a fresh recompute (the client "Rescan" button).
   if (req.url === '/deals/refresh') {
     computeDeals();
-    sendJson(res, 200, { ts: dealsCache.ts, computing: true });
+    sendJson(res, 200, { ts: dealsCache.ts, computing: true }, req);
     return;
   }
 
@@ -358,14 +394,25 @@ http.createServer((req, res) => {
     getItemDefs().then(d => {
       const etag = '"idf-' + d.ts + '"';
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
-      res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' });
-      res.end(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {} }));
-    }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {}, buildings: {} }));
+      // Hand-rolled rather than via sendJson because this route carries its own ETag/Cache-Control.
+      // It's ~1MB of name/icon lookups, so it's the single biggest response the app requests.
+      const body = Buffer.from(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {} }));
+      const hdr = { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' };
+      if (wantsGzip(req)){
+        return zlib.gzip(body, (err, gz) => {
+          if (err){ res.writeHead(200, hdr); return res.end(body); }
+          res.writeHead(200, { ...hdr, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+          res.end(gz);
+        });
+      }
+      res.writeHead(200, hdr);
+      res.end(body);
+    }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {}, buildings: {} }, req));
     return;
   }
 
   // Bulk prefs (used by the client at startup to restore from backup). Returns { key: rawString }.
-  if (req.url === '/prefs') { sendJson(res, 200, readPrefs()); return; }
+  if (req.url === '/prefs') { sendJson(res, 200, readPrefs(), req); return; }
 
   // Per-key prefs. Values are stored as OPAQUE STRINGS — the exact localStorage value — so the client
   // can mirror/restore with perfect fidelity (some values are JSON, some are bare strings like "market").
@@ -374,7 +421,7 @@ http.createServer((req, res) => {
     const key = decodeURIComponent(pm[1]);
     if (req.method === 'GET') {
       const all = readPrefs();
-      sendJson(res, 200, { key, value: key in all ? all[key] : null });
+      sendJson(res, 200, { key, value: key in all ? all[key] : null }, req);
       return;
     }
     if (req.method === 'PUT') {
@@ -383,7 +430,7 @@ http.createServer((req, res) => {
       req.on('end', () => {
         const value = Buffer.concat(chunks).toString('utf8'); // store verbatim
         const all = readPrefs(); all[key] = value;
-        sendJson(res, writePrefs(all) ? 200 : 500, { ok: true, key });
+        sendJson(res, writePrefs(all) ? 200 : 500, { ok: true, key }, req);
       });
       return;
     }
@@ -391,7 +438,7 @@ http.createServer((req, res) => {
 
   // Price history for an item. /history/item/123 -> { key, points: [{t,s,b}] }
   let hm = req.url.match(/^\/history\/(item|cargo)\/([^/?]+)$/);
-  if (hm) { const h = loadHistory(); sendJson(res, 200, { key: `${hm[1]}_${hm[2]}`, points: h[`${hm[1]}_${hm[2]}`] || [] }); return; }
+  if (hm) { const h = loadHistory(); sendJson(res, 200, { key: `${hm[1]}_${hm[2]}`, points: h[`${hm[1]}_${hm[2]}`] || [] }, req); return; }
 
   // Proxy bitjita's map exports (terrain tiles + live GeoJSON) → /bcexports/maps/terrain/tiles/{z}/{x}/{y}.webp, /bcexports/claims.geojson
   if (req.url.startsWith('/bcexports/')) {
@@ -437,6 +484,16 @@ http.createServer((req, res) => {
   };
 
   const proxy = https.request(options, (apiRes) => {
+    // The bulk of the host's egress goes through here — /api/crafts alone is 1.43MB raw, and the
+    // Networth tab's per-item market calls add up to ~16MB on a cold load. Piping it through gzip
+    // costs a little CPU and takes ~87% off the wire. Streamed, so nothing is buffered in memory.
+    if (wantsGzip(req)) {
+      res.writeHead(apiRes.statusCode, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      const gz = zlib.createGzip();
+      gz.on('error', () => { try { res.end(); } catch (_) {} });
+      apiRes.pipe(gz).pipe(res);
+      return;
+    }
     res.writeHead(apiRes.statusCode, { 'Content-Type': 'application/json' });
     apiRes.pipe(res);
   });
