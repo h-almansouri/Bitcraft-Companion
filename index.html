@@ -1619,12 +1619,29 @@ function applyPlayerOnlineDots(){
     });
   });
 }
+// Online status from the relay. signed_in_player_state is just { entity_id } — presence IS the status,
+// there's no boolean to read. A player is signed in to exactly one region and we don't know which, so
+// this sweeps all of them; warm that's one parallel wave on the pooled sockets, versus a bitjita call
+// per player before. Absence only means "offline" if a mirror actually answered, hence the `answered`
+// check — otherwise an unreachable relay would mark everyone offline, which is worse than stale.
 async function refreshPlayerOnline(){
   if (!trackedPlayers.length) return;
-  await Promise.all(trackedPlayers.map(async p => {
-    const id = String(p.entityId);
-    try { const d = await apiFetch('/api/players/' + id); const pl = d.player || d; if (pl && typeof pl.signedIn === 'boolean') playerOnline[id] = pl.signedIn; } catch(e){}
-  }));
+  const ids = trackedPlayers.map(p => String(p.entityId));
+  const filter = ids.map(i => `entity_id = ${i}`).join(' OR ');
+  let answered = false;
+  const per = await Promise.all(BC_REGIONS.map(rg =>
+    relayQuery(rg, [`SELECT * FROM signed_in_player_state WHERE ${filter}`], r => r.u64().toString(), 9000)
+      .then(rows => { if (rows.ok) answered = true; return rows; })
+      .catch(() => [])));
+  if (answered){
+    const online = new Set(per.flat().filter(Boolean).map(String));
+    ids.forEach(id => playerOnline[id] = online.has(id));
+  } else {
+    await Promise.all(trackedPlayers.map(async p => {   // every mirror unreachable → bitjita
+      const id = String(p.entityId);
+      try { const d = await apiFetch('/api/players/' + id); const pl = d.player || d; if (pl && typeof pl.signedIn === 'boolean') playerOnline[id] = pl.signedIn; } catch(e){}
+    }));
+  }
   applyPlayerOnlineDots();
 }
 function startPlayerOnlinePoll(){ stopPlayerOnlinePoll(); refreshPlayerOnline(); playerOnlineTimer = setInterval(() => { if (!document.hidden && trackedPlayers.length) refreshPlayerOnline(); }, 60000); }
