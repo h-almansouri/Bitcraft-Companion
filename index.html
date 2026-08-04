@@ -3604,7 +3604,7 @@ function craftProgressLatest(rows){
 // only patched cards that already existed and never even connected for a player with nothing running).
 // Tables filtered by owner_entity_id (things the player OWNS) vs entity_id (the player THEMSELF).
 const FEED_TABLES_OWNED  = ['progressive_action_state','passive_craft_state','sell_order_state','buy_order_state'];
-const FEED_TABLES_SELF   = ['stamina_state','experience_state','active_buff_state'];
+const FEED_TABLES_SELF   = ['stamina_state','experience_state','active_buff_state','character_stats_state'];
 let feedConns = {}, feedKey = '', _feedTimer = null, _feedWant = { crafts:false, orders:false };
 // Row layouts taken from the relay's own schema (/v1/database/<db>/schema), not guessed:
 //   stamina_state       { entity_id u64, last_stamina_decrease_timestamp {i64}, stamina f32 }
@@ -3616,12 +3616,21 @@ function readExperienceRow(r){
   for (let i=0;i<n;i++) stacks.push({ skill_id: r.i32(), quantity: r.i32() });
   return { entityId: id.toString(), stacks };
 }
+//   character_stats_state { entity_id u64, values Array<f32> } — carries MAX stamina at [1]. Verified
+//   identical to the array bitjita's /stats returns (same 87 floats, same order), which is where this
+//   used to come from over REST purely because stamina_state alone has no maximum in it.
+function readStatsRow(r){
+  const id = r.u64(); const n = r.u32(); const vals = [];
+  for (let i=0;i<n;i++) vals.push(r.f32());
+  return { entityId: id.toString(), values: vals };
+}
 // Only rows we actually act on get decoded; the rest are pure "something changed" signals. Each row gets
 // its own reader, so returning early without consuming it is safe.
 function feedRow(r, table){
   try {
     if (table === 'progressive_action_state') return { table, ...readProgRow(r) };
     if (table === 'stamina_state')            return { table, ...readStaminaRow(r) };
+    if (table === 'character_stats_state')    return { table, ...readStatsRow(r) };
     if (table === 'experience_state')         return { table, ...readExperienceRow(r) };
     if (table === 'active_buff_state')        return { table, entityId: r.u64().toString() };
   } catch(e){ return { table }; }
@@ -3650,6 +3659,12 @@ function onFeedRows(rows, isDelta){
   // 2. player state — what the /live SSE used to carry, now straight from the relay. Fed on the SNAPSHOT
   //    too: stamina and XP are current values rather than events, so the opening frame is real data and
   //    seeds the baselines the alerts compare against.
+  // Max stamina FIRST: onLiveStamina compares current against it, and in a snapshot both tables arrive
+  // in the same frame, so applying stats first means the very first stamina row already has its ceiling.
+  rows.forEach(x => {
+    if (x && x.table === 'character_stats_state' && x.entityId && x.values && x.values.length > 1)
+      liveStaminaMax[x.entityId] = { max: x.values[1], ts: Date.now() };
+  });
   rows.forEach(x => {
     if (!x || !x.entityId) return;
     if (x.table === 'stamina_state')         onLiveStamina(x.entityId, { stamina: x.stamina });
@@ -9796,20 +9811,11 @@ function onLiveBuffs(id){
 // The live feed carries CURRENT stamina (a float that drains as you act); max stamina isn't in it,
 // so we read the true max from the REST stats endpoint (values[1]) and cache it per player.
 let liveStaminaMax = {};   // entityId -> { max, ts }
-function ensureStaminaMax(id){
-  const c = liveStaminaMax[id];
-  if (c && (Date.now() - c.ts) < 300000) return;   // fresh enough
-  apiFetch(`/api/players/${id}/stats`).then(d => {
-    const m = (d.stats && d.stats.values) ? liveNum(d.stats.values[1]) : null;
-    if (m != null) liveStaminaMax[id] = { max: m, ts: Date.now() };
-  }).catch(()=>{});
-}
 function onLiveStamina(id, data){
   if (!data || typeof data !== 'object') return;
   const cur = liveNum(data.stamina ?? data.current ?? data.value);
   if (cur == null) return;
-  ensureStaminaMax(id);
-  const max = liveStaminaMax[id] ? liveStaminaMax[id].max : null;
+  const max = liveStaminaMax[id] ? liveStaminaMax[id].max : null;   // supplied by character_stats_state on the same feed
   liveStamina[id] = { current: cur, max };
   loadAlerts();
   if (!(palOn(id,'stamina') && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
