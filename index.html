@@ -1572,7 +1572,6 @@ function removeTrackedPlayer(id) {
     toolTrackedInvs = null;
     tasksTrackedInvs = new Set(); tasksInvsInited = false;
     stopAllLive(); stopLiveRefresh();
-    if (typeof stopLive === 'function') stopLive();
   }
   renderPlayerArea();
   refreshPlayerTabs();
@@ -1652,7 +1651,6 @@ function refreshPlayerTabs() {
   }
   if (isAlertSettingsOpen()) renderAlerts();   // refresh the per-player rows if the settings modal is open
   if (typeof restartAlerts === 'function') restartAlerts(); // roster changed → reset alert baselines
-  if (typeof startLive === 'function') startLive();          // re-subscribe live feed to the new roster
 }
 
 // ── Reusable per-player section: collapsible + "stop monitoring" toggle ──────────
@@ -1712,13 +1710,13 @@ function togglePlayerMonitor(id, iconEl){
   const nowPaused = !playerPaused.has(id);
   if (nowPaused) playerPaused.add(id); else playerPaused.delete(id);
   savePlayerPaused();
+  if (typeof startRelayFeed === 'function') startRelayFeed();   // paused players drop out of the live feed
   if (!iconEl) return;
   iconEl.className = 'ti ti-'+(nowPaused?'player-play':'player-pause')+' psec-mon';
   iconEl.title = nowPaused ? 'Resume monitoring' : 'Stop monitoring (pause live refresh)';
   const section = iconEl.closest('.player-section');
   const badge = section ? section.querySelector('.psec-paused') : null;
   if (badge) badge.style.display = nowPaused ? '' : 'none';
-  if (typeof startLive === 'function') startLive();   // paused players drop out of the live feed
 }
 // Mute/unmute sound + notification alerts for one player, without pausing their live tracking.
 // Mute/unmute every alert for one player. Callable from the per-player section header on any tab AND
@@ -3604,12 +3602,29 @@ function craftProgressLatest(rows){
 // progress, and it runs regardless of which tab you're on — so a started craft appears immediately
 // instead of waiting for the tab's 10s poll (and previously appearing not at all, since the old stream
 // only patched cards that already existed and never even connected for a player with nothing running).
-const FEED_TABLES = ['progressive_action_state','passive_craft_state','sell_order_state','buy_order_state'];
+// Tables filtered by owner_entity_id (things the player OWNS) vs entity_id (the player THEMSELF).
+const FEED_TABLES_OWNED  = ['progressive_action_state','passive_craft_state','sell_order_state','buy_order_state'];
+const FEED_TABLES_SELF   = ['stamina_state','experience_state','active_buff_state'];
 let feedConns = {}, feedKey = '', _feedTimer = null, _feedWant = { crafts:false, orders:false };
-// Only progress rows need decoding; the rest are pure "something changed" signals. Each row gets its own
-// reader, so returning early without consuming it is safe.
+// Row layouts taken from the relay's own schema (/v1/database/<db>/schema), not guessed:
+//   stamina_state       { entity_id u64, last_stamina_decrease_timestamp {i64}, stamina f32 }
+//   experience_state    { entity_id u64, experience_stacks Array<{ skill_id i32, quantity i32 }> }
+//   active_buff_state   { entity_id u64, active_buffs Array<…> }  ← only the id matters; it's a trigger
+function readStaminaRow(r){ const id = r.u64(); r.i64(); return { entityId: id.toString(), stamina: r.f32() }; }
+function readExperienceRow(r){
+  const id = r.u64(); const n = r.u32(); const stacks = [];
+  for (let i=0;i<n;i++) stacks.push({ skill_id: r.i32(), quantity: r.i32() });
+  return { entityId: id.toString(), stacks };
+}
+// Only rows we actually act on get decoded; the rest are pure "something changed" signals. Each row gets
+// its own reader, so returning early without consuming it is safe.
 function feedRow(r, table){
-  if (table === 'progressive_action_state'){ try { return { table, ...readProgRow(r) }; } catch(e){ return { table }; } }
+  try {
+    if (table === 'progressive_action_state') return { table, ...readProgRow(r) };
+    if (table === 'stamina_state')            return { table, ...readStaminaRow(r) };
+    if (table === 'experience_state')         return { table, ...readExperienceRow(r) };
+    if (table === 'active_buff_state')        return { table, entityId: r.u64().toString() };
+  } catch(e){ return { table }; }
   return { table };
 }
 function feedKnownCraftIds(){
@@ -3632,7 +3647,16 @@ function onFeedRows(rows, isDelta){
   // 1. progress ticks keep patching the bars in place, exactly as the old stream did
   const prog = craftProgressLatest(rows.filter(x => x && x.table === 'progressive_action_state'));
   prog.forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, isDelta));
-  if (!isDelta) return;                     // the opening snapshot isn't news
+  // 2. player state — what the /live SSE used to carry, now straight from the relay. Fed on the SNAPSHOT
+  //    too: stamina and XP are current values rather than events, so the opening frame is real data and
+  //    seeds the baselines the alerts compare against.
+  rows.forEach(x => {
+    if (!x || !x.entityId) return;
+    if (x.table === 'stamina_state')         onLiveStamina(x.entityId, { stamina: x.stamina });
+    else if (x.table === 'experience_state') onLiveExperience(x.entityId, x.stacks);
+    else if (x.table === 'active_buff_state' && isDelta) onLiveBuffs(x.entityId);   // trigger only; re-checks over REST
+  });
+  if (!isDelta) return;                     // the opening snapshot isn't news for LIST changes
   // 2. decide whether the LIST changed. progressive_action_state also fires on every progress tick
   //    (1-2/sec while someone works a station), so only a craft we've never seen counts as a change.
   let crafts = false, orders = false;
@@ -3699,7 +3723,9 @@ function noteFeedRegions(list){
   if (added) startRelayFeed();
 }
 async function startRelayFeed(){
-  const ids = trackedPlayers.map(p => String(p.entityId)).sort();
+  // activePlayers(), not trackedPlayers: a paused player is explicitly excluded from live monitoring,
+  // which is what the SSE this replaced did too.
+  const ids = activePlayers().map(p => String(p.entityId)).sort();
   if (!ids.length){ stopRelayFeed(); return; }
   const here = await Promise.all(ids.map(i => relayPlayerRegion(i).catch(() => regionOfEntity(i))));
   const regions = [...new Set([...here, ...feedSeenRegions].filter(r => r != null && BC_REGIONS.includes(r)))].sort();
@@ -3709,7 +3735,11 @@ async function startRelayFeed(){
   if (!regions.length) return;
   feedKey = key;
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
-  const sqls = FEED_TABLES.map(t => `SELECT * FROM ${t} WHERE ${owner}`);
+  const self = ids.map(i => `entity_id = ${i}`).join(' OR ');
+  const sqls = [
+    ...FEED_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
+    ...FEED_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`)
+  ];
   regions.forEach((rg, i) => setTimeout(() => { if (feedKey === key && !feedConns[rg]) feedConns[rg] = feedConn(rg, sqls); }, i * 80));
 }
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
@@ -4427,6 +4457,8 @@ function bsRead(bytes){
     u16:()=>{const v=dv.getUint16(o,true);o+=2;return v;},
     i32:()=>{const v=dv.getInt32(o,true);o+=4;return v;},
     u32:()=>{const v=dv.getUint32(o,true);o+=4;return v;},
+    f32:()=>{const v=dv.getFloat32(o,true);o+=4;return v;},
+    i64:()=>{const v=dv.getBigInt64(o,true);o+=8;return v;},
     u64:()=>{const v=dv.getBigUint64(o,true);o+=8;return v;},
     str:()=>{const n=dv.getUint32(o,true);o+=4;const s=new TextDecoder().decode(bytes.subarray(o,o+n));o+=n;return s;},
     sub:(n)=>{const b=bytes.subarray(o,o+n);o+=n;return b;} };
@@ -9730,38 +9762,18 @@ function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
 // ══════════════════════════════════════════════════════════════════════════
-// LIVE FEED — SSE relay of bitjita's realtime websocket (instant stamina / XP / buffs).
-// The proxy holds the upstream ws; we just consume /live?players=… as an EventSource.
+// PLAYER STATE (stamina / XP / buffs) — delivered by the relay feed (see onFeedRows).
+// This used to be an EventSource on our own /live route, with the proxy holding an upstream websocket
+// to live.bitjita and fanning it out. That was the last always-on connection through the host, and it
+// cost real bandwidth for data the browser can now read straight from the relay on sockets we already
+// hold. stamina_state / experience_state / active_buff_state ride the same per-region feed subscription
+// as crafts and orders, so this migration added ZERO new connections.
 // ══════════════════════════════════════════════════════════════════════════
-let liveES = null, liveIdsKey = '';
 let liveStamina = {};        // entityId -> { current, max }
-window.__liveLog = [];       // last raw messages — inspect to confirm live payload shapes
-function liveConnected(){ return !!liveES && liveES.readyState === 1; }
+// "Connected" now means the relay feed is actually up, which is what alertsTick uses to decide whether
+// it still needs to poll stamina over REST.
+function liveConnected(){ return Object.values(feedConns).some(c => c.ws && c.ws.readyState === 1); }
 function liveNum(x){ if (x == null || x === '') return null; const n = +x; return isNaN(n) ? null : n; }
-function startLive(){
-  const ids = activePlayers().map(p => String(p.entityId));
-  const key = ids.join(',');
-  if (liveES && key === liveIdsKey && liveES.readyState !== 2) return; // already streaming this set
-  stopLive();
-  liveIdsKey = key;
-  if (!ids.length) return;
-  try {
-    liveES = new EventSource(API + '/live?players=' + encodeURIComponent(key));
-    liveES.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch(_){ return; } handleLiveMessage(m); };
-    liveES.onerror = () => {}; // EventSource reconnects on its own
-  } catch(e){}
-}
-function stopLive(){ if (liveES){ try { liveES.close(); } catch(_){} liveES = null; } liveIdsKey = ''; }
-function handleLiveMessage(m){
-  window.__liveLog.push(m); if (window.__liveLog.length > 50) window.__liveLog.shift();
-  const ch = m.channel || '';
-  const id = ch.includes(':') ? ch.split(':').pop() : (m.entityId || m.entity_id);
-  if (!id) return;
-  const data = m.data != null ? m.data : (m.payload != null ? m.payload : m);
-  if (ch.indexOf('stamina_state') === 0) onLiveStamina(String(id), data);
-  else if (ch.indexOf('experience_state') === 0) onLiveExperience(String(id), data);
-  else if (ch.indexOf('buffs_state') === 0) onLiveBuffs(String(id));
-}
 // A buffs_state message means this player's buff set changed (gained/lost/refreshed). We don't parse its
 // payload — we use it purely as a trigger to re-run the authoritative REST buff check, throttled per player
 // (leading-edge, ≥2.5s apart) so a chatty stream can't spam the API. Net effect: a food buff falling off
@@ -10498,7 +10510,6 @@ async function renderGroupCraft(){
   switchTab(currentTab);
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
   loadNotifHistory(); renderNotifBell();   // restore the notification-history bell
-  startLive();                  // realtime feed for instant stamina / XP
   startSkillActiveTick();        // expire the "active" skill tag between XP events (no REST poll needed)
 })();
 </script>
