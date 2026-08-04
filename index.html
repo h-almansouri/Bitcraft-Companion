@@ -4437,21 +4437,42 @@ function relayIdleReap(c){
   if (c.pending.size) return;
   c.idleTimer = setTimeout(() => { if (!c.pending.size){ try { c.ws && c.ws.close(); } catch(_){} } }, RELAY_IDLE_MS);
 }
+// ⚠️ A one-shot query leaves its subscription registered on the connection, and there's no cheap way to
+// retract it: subscriptions are ADDITIVE (verified — a second Subscribe doesn't replace the first, both
+// keep streaming) and the v2 Unsubscribe wire format isn't documented (a guessed frame killed the
+// socket). They accumulate server-side, and that quietly breaks live updates: on a fresh connection a
+// held subscription received 164 TransactionUpdates in 6s, but after 30 one-shot queries on that same
+// socket it received ZERO — snapshots keep answering, so nothing looks broken. So bound it: retire a
+// socket once it has issued RELAY_MAX_SUBS subscribes. nextId keeps climbing across recycles so a
+// reused connection can never hand out an id that's still in flight; subsOnSocket resets per socket.
+const RELAY_MAX_SUBS = 20;
+function relayRecycle(c){
+  if ((c.subsOnSocket || 0) < RELAY_MAX_SUBS || c.pending.size) return;
+  try { c.ws && c.ws.close(); } catch(_){}      // onclose clears state; the next query opens a fresh socket
+}
 function relayConnect(region){
-  const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1 });
+  const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1, region });
   if (c.greeted && c.ws && c.ws.readyState === 1) return Promise.resolve(c);
   if (c.opening) return c.opening;
   c.opening = new Promise((resolve, reject) => {
     let ws;
     try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
     catch(e){ c.opening = null; return reject(e); }
-    ws.binaryType = 'arraybuffer'; c.ws = ws; c.greeted = false;
+    ws.binaryType = 'arraybuffer'; c.ws = ws; c.greeted = false; c.subsOnSocket = 0;
     const t = setTimeout(() => { try { ws.close(); } catch(_){} }, 12000);   // onclose does the teardown
     ws.onmessage = ev => {
       const b = new Uint8Array(ev.data);
       if (!c.greeted){ c.greeted = true; clearTimeout(t); c.opening = null; resolve(c); return; }
-      let req = 0; try { const r = bsRead(b); r.o = 2; req = r.u32(); } catch(e){ return; }
-      const h = c.pending.get(req); if (h) h.frame(b);
+      // ⚠️ The two frame types carry the id in DIFFERENT slots. SubscribeApplied (tag 1) is
+      // [comp][tag][request_id][query_set_id]; TransactionUpdate (tag 4) is [comp][tag][?][query_set_id]
+      // — its first u32 is NOT the request id (observed as 1 while we'd sent 777). Routing deltas off
+      // offset 2 therefore matched nothing and silently dropped every live update. We always send
+      // request_id === query_set_id, so keying both on the right slot lands them on the same handler.
+      let key = 0;
+      try { const r = bsRead(b); r.o = 2; const a = r.u32(), qs = r.u32(); key = (b[1] === 4) ? qs : a; }
+      catch(e){ return; }
+      const h = c.pending.get(key);
+      if (h) h.frame(b);
     };
     ws.onerror = () => { try { ws.close(); } catch(_){} };
     ws.onclose = () => {
@@ -4468,6 +4489,7 @@ function relayConnect(region){
 function relayPrewarm(regions){
   (regions || BC_REGIONS).forEach((rg, i) => setTimeout(() => { relayConnect(rg).catch(()=>{}); }, i * 60));
 }
+
 // Run one subscription (possibly several query strings) against a region mirror and decode its rows.
 async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
   const fail = () => { const rows = []; rows.ok = false; return rows; };
@@ -4483,7 +4505,7 @@ async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     const fin = () => {
       if (done) return; done = true;
       clearTimeout(t); clearTimeout(idle); c.pending.delete(id);
-      rows.ok = answered; noteRelayResult(answered); relayIdleReap(c); resolve(rows);
+      rows.ok = answered; noteRelayResult(answered); relayIdleReap(c); relayRecycle(c); resolve(rows);
     };
     const t = setTimeout(fin, timeoutMs);
     c.pending.set(id, {
@@ -4499,7 +4521,7 @@ async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
       },
       dropped: fin      // socket died under us — settle as unanswered so the caller can fall back
     });
-    try { c.ws.send(relayEncSubscribe(sqls, id, id)); } catch(e){ fin(); }
+    try { c.ws.send(relayEncSubscribe(sqls, id, id)); c.subsOnSocket = (c.subsOnSocket||0)+1; } catch(e){ fin(); }
   });
 }
 // Which region mirror to ask about a player. The region encoded in their entity id is only where the
