@@ -2030,6 +2030,49 @@ async function renderExperienceTab() {
   trackedPlayers.forEach(p => loadSkillsInto(p));
   startLiveRefresh('skills');
 }
+// ── Skills from the relay ──
+// skill_desc is static reference data (20 rows, ~83ms) — fetched once per session and persisted, since
+// it only changes on a game patch. Layout from the relay schema:
+//   { id i32, skill_type i32, name str, description str, icon_asset_name str, title str,
+//     skill_category Sum(0=None,1=Profession,2=Adventure) → 1 byte, max_level i32 }
+const SKILL_DESC_KEY = 'bcSkillDescs', SKILL_DESC_TTL = 7*24*60*60*1000;
+let _skillDescs = null;
+async function relaySkillDescs(){
+  if (_skillDescs) return _skillDescs;
+  try {
+    const d = JSON.parse(localStorage.getItem(SKILL_DESC_KEY) || 'null');
+    if (d && d.ts && (Date.now() - d.ts) < SKILL_DESC_TTL && d.map) return (_skillDescs = d.map);
+  } catch(e){}
+  const CATS = ['None','Profession','Adventure'];   // the schema's own Sum variant names, so the strings match bitjita's exactly
+  for (const rg of BC_REGIONS){
+    const rows = await relayQuery(rg, ['SELECT * FROM skill_desc'], r => {
+      const id = r.i32(); r.i32(); const name = r.str(); r.str(); r.str(); r.str();
+      const cat = r.u8(); r.i32();
+      return { id, name, skillCategoryStr: CATS[cat] || 'Other' };
+    }, 9000).catch(() => []);
+    if (rows.length){
+      const map = {}; rows.forEach(s => map[s.id] = { name: s.name, skillCategoryStr: s.skillCategoryStr });
+      _skillDescs = map;
+      safeSetItem(SKILL_DESC_KEY, JSON.stringify({ ts: Date.now(), map }));
+      return map;
+    }
+  }
+  return null;   // no mirror answered — caller falls back to bitjita
+}
+// experience_state lives only in the region the player is currently in, so sweep all of them rather than
+// asking where they are first (that lookup is an HTTP round-trip, and this is one parallel wave anyway).
+// The same table is on the live feed, so between loads XP keeps updating without any of this re-running.
+async function fetchSkillsRelay(id){
+  const [descs, per] = await Promise.all([
+    relaySkillDescs(),
+    Promise.all(BC_REGIONS.map(rg => relayQuery(rg, [`SELECT * FROM experience_state WHERE entity_id = ${id}`],
+      r => readExperienceRow(r), 9000).catch(() => [])))
+  ]);
+  if (!descs) throw new Error('skill_desc unavailable');
+  const row = per.flat().find(x => x && x.stacks && x.stacks.length);
+  if (!row) throw new Error('no experience_state');
+  return { player: { experience: row.stacks, skillMap: descs } };
+}
 async function loadSkillsInto(p, silent=false) {
   const eid = String(p.entityId);
   const body = document.getElementById('psec-skills-' + eid);
@@ -2037,10 +2080,13 @@ async function loadSkillsInto(p, silent=false) {
   // Don't clobber a calculator input the user is editing during a background live refresh.
   if (silent) { const ae = document.activeElement; if (ae && ae.closest && ae.closest('#sj-' + eid)) return; }
   try {
-    const [pData, rankData] = await Promise.all([
-      apiFetch(`/api/players/${p.entityId}`),
-      apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}))
-    ]);
+    // XP + skill names come from the relay; skill RANKINGS have no relay equivalent (they're a bitjita
+    // computation over every player, not game state), so that one call stays where it is.
+    const rankP = apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}));
+    let pData;
+    try { pData = await fetchSkillsRelay(p.entityId); }
+    catch(e){ pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
+    const rankData = await rankP;
     body.innerHTML = skillsSectionHtml(pData, rankData, eid);
     renderJourney(eid);   // re-open the calculator panel (if one was open) with fresh level/rate
   } catch(e) { if (!silent) body.innerHTML = errBox(e); }
