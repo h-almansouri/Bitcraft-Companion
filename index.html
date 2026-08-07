@@ -1728,6 +1728,7 @@ function togglePlayerMonitor(id, iconEl){
   if (nowPaused) playerPaused.add(id); else playerPaused.delete(id);
   savePlayerPaused();
   if (typeof startRelayFeed === 'function') startRelayFeed();   // paused players drop out of the live feed
+  if (typeof startAlerts === 'function') startAlerts();         // …and out of alertsEnabled(), so re-arm on resume
   if (!iconEl) return;
   iconEl.className = 'ti ti-'+(nowPaused?'player-play':'player-pause')+' psec-mon';
   iconEl.title = nowPaused ? 'Resume monitoring' : 'Stop monitoring (pause live refresh)';
@@ -1745,6 +1746,7 @@ function togglePlayerAlerts(id){
   if (nowMuted) playerAlertsMuted.add(id); else playerAlertsMuted.delete(id);
   savePlayerAlertsMuted();
   delete alertState[id];   // drop stale baselines so unmuting doesn't fire on the first poll
+  startAlerts();           // muting the last unmuted player disables alerts; unmuting must bring the poller back
   document.querySelectorAll(`[data-alerts-bell="${id}"]`).forEach(el => {
     el.className = 'ti ti-'+(nowMuted?'bell-off':'bell')+' psec-alerts';
     el.title = nowMuted ? 'Alerts muted — click to enable' : 'Mute alerts for this player';
@@ -9861,7 +9863,12 @@ async function alertsTick(){
   try { await _alertsTickInner(); } finally { _alertTickRunning = false; }
 }
 async function _alertsTickInner(){
-  if (!alertsEnabled()){ stopAlerts(); return; }
+  // Skip this pass, but DO NOT stop the timer. It used to call stopAlerts() here, which made a
+  // momentary "disabled" permanent: mute your only tracked player (or pause them) and the next tick
+  // tore the poller down, but unmuting/resuming never rebuilt it — only a settings change or a page
+  // reload did. Alerts simply stopped and stayed stopped. A 15s no-op check costs nothing and lets it
+  // resume by itself the moment alerts are live again.
+  if (!alertsEnabled()) return;
   const players = activePlayers().filter(p => !isPlayerAlertsMuted(p.entityId));  // muted players still live-track, just no pings
   if (!players.length) return;
   if (players.some(p => palOn(p.entityId,'craftDone'))){ try { await loadCraftingData(); } catch(e){} }
