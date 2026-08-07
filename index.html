@@ -9885,14 +9885,22 @@ function scheduleBuffExpiryWake(){
   const ms = Math.min(6*3600*1000, Math.max(500, soonest - now + 1500));
   _buffWakeTimer = setTimeout(() => { checkPlayerBuffs(who).catch(()=>{}); }, ms);
 }
-let _alertTickRunning = false;
+let _alertTickRunning = false, _alertTickQueued = false;
 async function alertsTick(){
   // A tick awaits several fetches per player, so a slow one can still be running when the 15s interval
-  // fires again — or when startAlerts()/scheduleCraftDoneWake() kick one off. Two overlapping passes read
-  // the same baselines and can both decide the same thing just happened.
-  if (_alertTickRunning) return;
+  // fires again — or when startAlerts()/scheduleCraftDoneWake()/scheduleBuffExpiryWake() kick one off.
+  // Two overlapping passes read the same baselines and can both decide the same thing just happened.
+  // But simply DROPPING the overlapping call loses real work: the craft and buff wakes fire exactly
+  // once at the moment something completes, and they re-arm only at the end of a completed pass — so a
+  // wake that lands mid-tick was silently discarded and the alert waited for the next 15s poll. Queue
+  // it instead and run once the current pass finishes.
+  if (_alertTickRunning){ _alertTickQueued = true; return; }
   _alertTickRunning = true;
-  try { await _alertsTickInner(); } finally { _alertTickRunning = false; }
+  try { await _alertsTickInner(); }
+  finally {
+    _alertTickRunning = false;
+    if (_alertTickQueued){ _alertTickQueued = false; setTimeout(() => { alertsTick().catch(()=>{}); }, 0); }
+  }
 }
 async function _alertsTickInner(){
   // Skip this pass, but DO NOT stop the timer. It used to call stopAlerts() here, which made a
