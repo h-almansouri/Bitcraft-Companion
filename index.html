@@ -1465,6 +1465,12 @@ function switchTab(tab) {
   else if (tab === 'deals') renderDeals();
   else if (tab === 'shopping') {
     renderShoppingTab();
+    // Opening the tab has to kick off pricing itself. renderShoppingTab() only draws — every OTHER
+    // entry point (switching list, changing region, adding an item, the Refresh button, the live poll)
+    // calls fetchAllShoppingPrices separately, so arriving at the tab was the one route that left the
+    // prices blank until you touched something. Re-entrant calls are cheap: fetchAllShoppingPrices
+    // returns immediately while a pass is already running.
+    fetchAllShoppingPrices();
     // Load market items for search autocomplete + regions for filter
     if (!shoppingMarketItems.length) {
       apiFetch('/api/market?hasOrders=true&hasBuyOrders=true').then(d => {
