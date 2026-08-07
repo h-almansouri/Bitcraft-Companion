@@ -9832,7 +9832,7 @@ function setPlayerIdleSecs(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 1
 function setPlayerCraftMute(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).craftMuteSecs = n; saveAlerts(); }
 function alertsEnabled(){ loadAlerts(); if (!alertsActive() || !trackedPlayers.length) return false; return activePlayers().some(p => !isPlayerAlertsMuted(p.entityId) && palAnyOn(p.entityId)); }
 function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
-function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } if (_craftWakeTimer){ clearTimeout(_craftWakeTimer); _craftWakeTimer = null; } }
+function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } if (_craftWakeTimer){ clearTimeout(_craftWakeTimer); _craftWakeTimer = null; } if (_buffWakeTimer){ clearTimeout(_buffWakeTimer); _buffWakeTimer = null; } }
 function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
 // Buff-loss check for one player. Shared by the 15s poll AND the live buffs_state trigger (onLiveBuffs),
 // so whichever notices first fires once and updates the shared baseline (alertState[id].buffs) — no
@@ -9847,11 +9847,43 @@ async function checkPlayerBuffs(p){
     const d = await apiFetch(`/api/players/${id}/buffs`);
     const active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
     const wanted = b => t.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
-    const cur = new Set(active.filter(wanted).map(b => b.buffTypeName || b.buffName));
+    const watched = active.filter(wanted);
+    const cur = new Set(watched.map(b => b.buffTypeName || b.buffName));
     if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
     st.buffs = cur;
+    // Record exactly WHEN each watched buff runs out, so we can wake on it instead of waiting for the
+    // next poll. buffStartTimestamp is unix seconds and buffDuration is seconds — that pair is exact,
+    // unlike timeRemaining which is a snapshot that drifts between fetches.
+    const exp = {};
+    watched.forEach(b => {
+      const nm = b.buffTypeName || b.buffName;
+      const start = +b.buffStartTimestamp, dur = +b.buffDuration;
+      if (nm && isFinite(start) && isFinite(dur) && dur > 0) exp[nm] = (start + dur) * 1000;
+    });
+    st.buffExpiry = exp;
   } catch(e){ /* skip this check */ }
-  finally { st.buffCheckInFlight = false; }
+  finally { st.buffCheckInFlight = false; scheduleBuffExpiryWake(); }
+}
+// Food buffs matter at the moment they lapse — waiting up to 15s for the next poll to notice is most of
+// the window you'd want to re-apply in. Every watched buff has a known expiry, so schedule a wake at the
+// soonest one and re-check the instant it lands. Same idea as scheduleCraftDoneWake, and re-armed after
+// every check so a newly-applied buff moves the alarm earlier.
+let _buffWakeTimer = null;
+function scheduleBuffExpiryWake(){
+  if (_buffWakeTimer){ clearTimeout(_buffWakeTimer); _buffWakeTimer = null; }
+  if (!alertsActive()) return;
+  const now = Date.now();
+  let soonest = Infinity, who = null;
+  activePlayers().forEach(p => {
+    const id = String(p.entityId);
+    if (isPlayerAlertsMuted(id) || !palOn(id, 'buffLost')) return;
+    const exp = (alertState[id] || {}).buffExpiry; if (!exp) return;
+    for (const nm in exp){ const ts = exp[nm]; if (ts > now && ts < soonest){ soonest = ts; who = p; } }
+  });
+  if (!who) return;
+  // A small lag past the expiry so the API has actually flipped the buff to expired when we re-read it.
+  const ms = Math.min(6*3600*1000, Math.max(500, soonest - now + 1500));
+  _buffWakeTimer = setTimeout(() => { checkPlayerBuffs(who).catch(()=>{}); }, ms);
 }
 let _alertTickRunning = false;
 async function alertsTick(){
