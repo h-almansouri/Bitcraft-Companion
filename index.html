@@ -6960,9 +6960,21 @@ async function fetchAllShoppingPrices() {
     try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){}
   }
   const items = [...shoppingItems];
-  for (const item of items) {
-    await fetchShoppingPrice(item.id, item.isCargo, true);
-  }
+  // A concurrency pool rather than one-at-a-time. Each item needs two calls (its order book, then the
+  // 7d average), and awaiting them in sequence meant a 20-item list spent 7.4s almost entirely waiting
+  // — median 169ms between calls with nothing ever overlapping. Six at a time matches the Networth tab
+  // and stays inside bitjita's rate limit; fetchWithCache already backs off on a 429.
+  // NOT the bulk price endpoint: this tab shows WHERE the best order is and how much is available
+  // ("76 avail · R18 · Bumbeaux Bay"), and bulk returns only the bare price with no location or
+  // quantity. Each item genuinely needs its own order book.
+  let idx = 0;
+  const worker = async () => {
+    while (idx < items.length) {
+      const item = items[idx++];
+      try { await fetchShoppingPrice(item.id, item.isCargo, true); } catch(e){ /* one bad item mustn't stall the rest */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, items.length) }, worker));
   shoppingPricingActive = false;
   const listEl = document.getElementById('shopping-list-el');
   if (listEl) listEl.innerHTML = renderShoppingListHtml();
