@@ -10139,6 +10139,34 @@ function gcSeedItems(tier){ return (craftingData.items||[]).filter(i => i.tier==
 function gcFishOilItem(tier){ return (craftingData.items||[]).find(i => i.tier===tier && /fish oil$/i.test(i.name)); }
 let _gcStab;
 function gcStabilizer(){ if (_gcStab===undefined) _gcStab = (craftingData.items||[]).find(i => /^reforging stabilizer$/i.test(i.name))||null; return _gcStab; }
+// Price every material in ONE request instead of one call per material. gcComputeNeeded used to await
+// gcPrice() per line inside a for-loop, so 27 materials meant 28 round-trips end to end — measured at
+// 4.2s with a median 147ms gap and zero overlap. /api/market/prices/bulk takes up to 100 ids at a time.
+// Note this changes the NUMBER as well as the speed: vwap7d is a volume-weighted average with per-item
+// outlier filtering, where the old path used priceStats.avg7d (a plain mean). It's a truer going rate,
+// but contribution points are denominated in it, so a tally will shift slightly against older ones.
+async function gcPrefetchPrices(ids){
+  const want = [...new Set(ids.filter(id => id != null && !(id in gcPriceCache)))];
+  if (!want.length) return;
+  const batches = [];
+  for (let i = 0; i < want.length; i += 100) batches.push(want.slice(i, i + 100));
+  await Promise.all(batches.map(async b => {
+    try {
+      const r = await fetch(`${API}/api/market/prices/bulk`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds: b })
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      const rows = { ...((d.data||{}).items||{}), ...((d.data||{}).cargo||{}) };
+      b.forEach(id => {
+        const v = rows[id];
+        if (!v) return;                                   // leave uncached → gcPrice falls back per item
+        gcPriceCache[id] = v.vwap7d != null ? v.vwap7d : (v.vwap24h != null ? v.vwap24h : null);
+      });
+    } catch(e){ /* leave uncached; the per-item path still works */ }
+  }));
+}
 async function gcPrice(itemId){
   if (itemId in gcPriceCache) return gcPriceCache[itemId];
   try { const d = await apiFetch(`/api/market/0/${itemId}/price-history?limit=1`); const s = d.priceStats||{}; const v = s.avg7d!=null ? s.avg7d : (s.avg24h!=null ? s.avg24h : null); gcPriceCache[itemId] = v; return v; }
@@ -10166,6 +10194,11 @@ async function gcComputeNeeded(){
     add('stab', { section:'reroll', tier:0, key:'stab', itemId:st&&st.id, label:'Reforging Stabilizer', icon:st&&st.iconAssetName, qty:r.count, kind:'fixed' });
   });
   const lines = Object.values(map);
+  // One bulk request for every material at once, so the loop below is all cache hits. 'fixed' lines are
+  // excluded: the Reforging Stabilizer is trader-only with no market listing, so asking for it would
+  // never cache anything and would re-fire a request on every recompute.
+  await gcPrefetchPrices(lines.filter(ln => ln.kind !== 'fixed')
+    .flatMap(ln => ln.kind === 'seedavg' ? (ln.seedIds || []) : [ln.itemId]));
   for (const ln of lines){
     if (ln.kind==='fixed') ln.unit = GC_STABILIZER_HEX;
     else if (ln.kind==='seedavg') ln.unit = await gcSeedAvgPrice(ln.seedIds);

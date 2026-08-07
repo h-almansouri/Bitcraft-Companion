@@ -305,7 +305,7 @@ function serveFileCached(req, res, filePath, contentType) {
 http.createServer((req, res) => {
   res.on('error', () => {}); // client aborted mid-response (common under bursty load) — ignore, don't crash
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
@@ -476,11 +476,16 @@ http.createServer((req, res) => {
     return;
   }
 
+  // Forward the request body for methods that carry one. This passthrough was GET-only — it called
+  // proxy.end() with nothing — so a POST arrived upstream with an empty body and came back
+  // "400 Invalid JSON in request body". /api/market/prices/bulk needs it.
+  const hasBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
   const options = {
     hostname: TARGET,
     path: req.url,
     method: req.method,
-    headers: { 'User-Agent': 'BitcraftCompanion/1.0', 'x-app-identifier': 'BitcraftCompanion' }
+    headers: Object.assign({ 'User-Agent': 'BitcraftCompanion/1.0', 'x-app-identifier': 'BitcraftCompanion' },
+      hasBody ? { 'Content-Type': req.headers['content-type'] || 'application/json' } : {})
   };
 
   const proxy = https.request(options, (apiRes) => {
@@ -503,7 +508,7 @@ http.createServer((req, res) => {
     res.end(JSON.stringify({ error: err.message }));
   });
 
-  proxy.end();
+  if (hasBody) req.pipe(proxy); else proxy.end();
 }).listen(PORT, () => {
   console.log(`Bitcraft proxy running on http://localhost:${PORT}`);
   // Bandwidth-lazy: no background market refresh or deal precompute. The market list is fetched on demand
