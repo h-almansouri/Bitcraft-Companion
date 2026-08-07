@@ -3667,7 +3667,11 @@ async function fetchCraftsRelayMulti(ids){
   return out;
 }
 async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
-  return (await fetchCraftsRelayMulti([id]))[String(id)] || { active: [], done: [], passive: [], itemMap: {} };
+  const multi = await fetchCraftsRelayMulti([id]);
+  const out = multi[String(id)] || { active: [], done: [], passive: [], itemMap: {} };
+  // Carry the sweep's completeness through — the alert path can't safely act on a partial read.
+  try { Object.defineProperty(out, '_complete', { value: multi._complete !== false, enumerable: false }); } catch(e){}
+  return out;
 }
 async function fetchPlayerCraftsBitjita(id){
   const [acData, pcData] = await Promise.all([
@@ -3684,10 +3688,16 @@ async function fetchPlayerCraftsBitjita(id){
   const passive = pcData.craftResults || pcData.passiveCrafts || pcData.crafts || pcData.results || (Array.isArray(pcData) ? pcData : []);
   return { active, done, passive, itemMap };
 }
+// ⚠️ This is the ALERT path, and it must never be handed a PARTIAL sweep. The craft-done alert works by
+// diffing against the previous tick's watch set, and that set is rebuilt from whatever this returns. If
+// one region fails to answer, its crafts silently vanish from the set — so when they finish there's
+// nothing in `prev` to compare against and the alert never fires at all. It shows up exactly as
+// reported: alerts arrive for a while, then a batch completes in silence, then they come back.
+// An incomplete read therefore falls through to bitjita, which is always a complete per-player view.
 async function fetchPlayerCrafts(id) {
   try {
     const r = await fetchPlayerCraftsRelay(id);
-    if (r.active.length || r.passive.length) return r;
+    if (r._complete !== false && (r.active.length || r.passive.length)) return r;
   } catch(e){ /* relay unreachable → fall back to bitjita below */ }
   return fetchPlayerCraftsBitjita(id);
 }
