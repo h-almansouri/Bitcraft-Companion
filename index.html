@@ -2640,6 +2640,7 @@ async function fetchMarketRelayMulti(ids){
     }, 9000).then(rows => { if (rows.ok) ok++; return { rg, rows: rows.filter(Boolean) }; }).catch(() => ({ rg, rows: [] }))
   ));
   if (!ok) throw new Error('relay unreachable');
+  const complete = ok === BC_REGIONS.length;   // see the caller: a partial sweep must not blank a player's orders
   noteFeedRegions(per.filter(x => x.rows.length).map(x => x.rg));   // …and wherever their orders are
   per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
   saveRelayPlaces();
@@ -2671,6 +2672,7 @@ async function fetchMarketRelayMulti(ids){
       (r.kind === 'sell' ? bucket.sellOrders : bucket.buyOrders).push(o);
     }
   }));
+  try { Object.defineProperty(out, '_complete', { value: complete, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerMarketRelay(id){   // single-player wrapper
@@ -2941,7 +2943,14 @@ async function renderOrdersTab(silent, force){
     try {
       const multi = await fetchMarketRelayMulti(toLoad.map(p => p.entityId));
       if (myRun !== ordersRunId) return;                    // a newer load owns the UI now
-      toLoad.forEach(p => { ordersByPlayer[p.entityId] = multi[String(p.entityId)] || { sellOrders:[], buyOrders:[], collections:[] }; fillPlayerOrdersCached(p.entityId); });
+      toLoad.forEach(p => {
+        const fresh = multi[String(p.entityId)];
+        // Same reasoning as crafts: don't let a region that didn't answer erase this player's orders.
+        const empty = !fresh || !((fresh.sellOrders||[]).length + (fresh.buyOrders||[]).length + (fresh.collections||[]).length);
+        if (empty && multi._complete === false && ordersByPlayer[p.entityId]) return;
+        ordersByPlayer[p.entityId] = fresh || { sellOrders:[], buyOrders:[], collections:[] };
+        fillPlayerOrdersCached(p.entityId);
+      });
       batched = true;
     } catch(e){ /* relay down → bitjita per player */ }
   }
@@ -3545,6 +3554,7 @@ async function fetchCraftsRelayMulti(ids){
   const perRegion = await Promise.all(BC_REGIONS.map(rg =>
     relayRegionCrafts(rg, ids).then(rows => ({ rg, rows, ok: rows.ok })).catch(() => ({ rg, rows: [], ok: false }))));
   if (!perRegion.some(x => x.ok)) throw new Error('relay unreachable');
+  const complete = perRegion.every(x => x.ok);   // did EVERY region answer? see the caller for why it matters
   const hits = perRegion.filter(x => x.rows.length);
   noteFeedRegions(hits.map(x => x.rg));   // widen the live feed to wherever this player's crafts actually are
   // resolve place names region by region (cached, so this is a no-op on later refreshes)
@@ -3595,6 +3605,7 @@ async function fetchCraftsRelayMulti(ids){
       }
     });
   });
+  try { Object.defineProperty(out, '_complete', { value: complete, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
@@ -3953,7 +3964,17 @@ async function renderCraftingTab(silent, force) {
       try {
         const multi = await fetchCraftsRelayMulti(toLoad.map(p => p.entityId));
         if (myRun !== craftRunId) return;                   // a newer load owns the UI now
-        toLoad.forEach(p => { craftByPlayer[p.entityId] = multi[String(p.entityId)] || { active:[], done:[], passive:[], itemMap:{} }; fillPlayerCraftCached(p.entityId); });
+        toLoad.forEach(p => {
+          const fresh = multi[String(p.entityId)];
+          // An EMPTY result from an INCOMPLETE sweep is not evidence the player has no crafts — it's
+          // evidence we never heard back from the region their crafts are in (a socket recycling or
+          // dropping mid-sweep does exactly this). Overwriting on that is why the tab could sit on
+          // "No crafts" until a full page reload: the blank got cached, and Refresh just re-blanked it.
+          const empty = !fresh || !((fresh.active||[]).length + (fresh.passive||[]).length + (fresh.done||[]).length);
+          if (empty && multi._complete === false && craftByPlayer[p.entityId]) return;   // keep what we had
+          craftByPlayer[p.entityId] = fresh || { active:[], done:[], passive:[], itemMap:{} };
+          fillPlayerCraftCached(p.entityId);
+        });
         batched = true;
       } catch(e){ /* relay down → bitjita per player */ }
     }
@@ -9659,8 +9680,19 @@ function speakAlert(msg){
     speechSynthesis.speak(u);
   } catch(e){}
 }
+// Suppress an identical alert repeated within a few seconds. There is more than one route to the same
+// ping — stamina in particular has two, the live feed (st.liveStamBelow) and the REST poll
+// (st.stamBelow), which keep SEPARATE state and produce the SAME message. The REST path only runs while
+// the feed is disconnected, so a brief feed drop arms one and the reconnect arms the other, and a refill
+// then fires both. alertsTick can also overlap itself when a poll runs long. Rather than chase each
+// pairing, dedupe at the point of sound: nothing legitimately fires the same message twice in 5s.
+const ALERT_DEDUPE_MS = 5000;
+let _lastAlert = {};   // "type|msg" -> ts
 function fireAlert(typeKey, msg){
   const t = alertSettings.types[typeKey]; if (!t) return;
+  const key = typeKey + '|' + msg, now = Date.now();
+  if (_lastAlert[key] && (now - _lastAlert[key]) < ALERT_DEDUPE_MS) return;
+  _lastAlert[key] = now;
   if (alertSettings.master) playAlertSound(t.sound);
   if (alertSettings.tts && alertSettings.tts.on) speakAlert(msg);
   alertToast(msg, (ALERT_META[typeKey]||{}).icon);
@@ -9769,7 +9801,16 @@ async function checkPlayerBuffs(p){
   } catch(e){ /* skip this check */ }
   finally { st.buffCheckInFlight = false; }
 }
+let _alertTickRunning = false;
 async function alertsTick(){
+  // A tick awaits several fetches per player, so a slow one can still be running when the 15s interval
+  // fires again — or when startAlerts()/scheduleCraftDoneWake() kick one off. Two overlapping passes read
+  // the same baselines and can both decide the same thing just happened.
+  if (_alertTickRunning) return;
+  _alertTickRunning = true;
+  try { await _alertsTickInner(); } finally { _alertTickRunning = false; }
+}
+async function _alertsTickInner(){
   if (!alertsEnabled()){ stopAlerts(); return; }
   const players = activePlayers().filter(p => !isPlayerAlertsMuted(p.entityId));  // muted players still live-track, just no pings
   if (!players.length) return;
