@@ -139,7 +139,36 @@ localStorage) never enters this cache. It stays HTTP per 5.1, in its existing
 ### 2.4 Tabs read the cache
 
 No tab calls a fetch function for live state. Tabs render from the cache and
-re-render when it changes.
+patch themselves when it changes.
+
+### 2.4.1 "Re-render" means patching, NOT `innerHTML =`
+
+The app's current pattern is `el.innerHTML = html`, which resets scroll position,
+collapses open dropdowns and expanded rows, drops text selection, steals focus
+from filter boxes, and visibly flashes on large content.
+
+That's tolerable today because re-renders are rare — a manual refresh or a poll.
+At delta frequency it would be unusable.
+
+**The model already exists**: craft progress bars ([index.html:3984](index.html:3984))
+find the one card, set the bar width, update the text, flip the status chip, and
+touch nothing else. Extend that pattern to everything.
+
+| change | response |
+|---|---|
+| a value changed (progress, quantity, XP, stamina) | patch that element's text/width — no structural change |
+| a row appeared or disappeared (craft done, order filled) | insert/remove that one node |
+| full rebuild | only on tab switch, player add/remove, or first render |
+
+- **Coalesce per frame.** Twenty deltas arriving together = one patch pass, not
+  twenty.
+- **Don't render while the tab is hidden.** The cache keeps updating; render on
+  switch. Also sidesteps the hidden-pane trap (rAF suspended, `setTimeout`
+  clamped to ~1s buckets).
+
+**Cost warning:** writing a patch path per tab is more work than
+`innerHTML = html`, and is likely the largest single chunk of this overhaul —
+larger than the socket layer. The plumbing is the easy half.
 
 ---
 
