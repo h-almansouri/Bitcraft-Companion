@@ -97,7 +97,44 @@ A plain JavaScript object in the page. Not on the host, not in localStorage.
   there'd be a real blank window.
 - Dies on page refresh, rebuilt in ~1s from snapshots. That is the only time we
   pay a cold start.
-- Per browser tab. See 8.2.
+- Per browser tab. See 8.3.
+
+### 2.3.1 Size — this is heap, not localStorage
+
+Different budget entirely. localStorage is a hard ~5MB per origin, and exceeding
+it makes *every* `setItem` fail silently (we've hit this). The JS heap is
+hundreds of MB to a few GB.
+
+Estimated for 3 tracked players:
+
+| | |
+|---|---|
+| Crafts incl. passive | heaviest — one player measured at 1,908 `passive_craft_state` rows, ~300KB/player worst case |
+| Inventory | ~40 containers, few hundred item rows, ~100KB/player |
+| Orders | dozens–low hundreds of rows |
+| Experience / Tasks / Stamina / Buffs | trivial |
+| Place names (buildings, claims) | few hundred KB, shared |
+
+**~1–2MB total.** Not a concern — *provided* the two rules below hold.
+
+Estimate, not measurement. Profile it against a heavy player once the cache layer
+exists rather than trusting this arithmetic.
+
+### 2.3.2 Two rules that keep it bounded
+
+The risk isn't snapshot size, it's unbounded growth from deltas.
+
+1. **Keyed by `entity_id`.** A delta *replaces* the existing row, never appends.
+   Size is then bounded by "rows matching our filters", which is bounded by
+   tracked players.
+2. **Deletes must actually delete.** Each `TransactionUpdate` carries a delete
+   list and an insert list. Processing inserts but ignoring deletes makes
+   completed crafts and filled orders pile up indefinitely — fastest-growing for
+   passive crafts specifically.
+
+Market order-book data (~2,400 items, several MB — the thing that killed
+localStorage) never enters this cache. It stays HTTP per 5.1, in its existing
+5-minute in-memory `Map`.
 
 ### 2.4 Tabs read the cache
 
