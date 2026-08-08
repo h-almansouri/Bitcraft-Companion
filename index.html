@@ -4246,7 +4246,10 @@ function renderPassiveCraftsHtml(passive, itemMap) {
   const renderLocCard = (loc, mode) => {
     const groups = Object.values(loc.groups).sort((a,b) => b.count - a.count);
     const rows = groups.map(g => {
-      const bNames = Object.keys(g.buildings);
+      // Label by the MOST COMMON building type, not arrival order — a group spanning two types
+      // (46 Large Farming Fields + 1 Farmer's Garden) otherwise flips its label depending on which
+      // craft happened to come first, which differed between the bitjita paint and the cache rebuild.
+      const bNames = Object.keys(g.buildings).sort((a, b) => g.buildings[b] - g.buildings[a] || a.localeCompare(b));
       const bLabel = bNames.length === 1 ? bNames[0] : `${bNames[0]} ×${bNames.length}`;
       const tierBadge = g.tier > 0 ? `<span class="badge badge-tier" style="margin-left:.4rem">T${g.tier}</span>` : '';
       let rightEl;
