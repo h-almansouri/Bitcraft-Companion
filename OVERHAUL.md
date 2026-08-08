@@ -550,6 +550,47 @@ then Rough Plank — a different thing every few seconds. And under 3.1, changin
 what we watch means hanging up and redialling all 13 sockets. Browsing ten items
 would mean ten full redials. Obviously wrong.
 
+### ✅ RESOLVED — subscribe to the WHOLE order book, lazily
+
+Measured 2026-08-07, all 13 regions, `sell_order_state` + `buy_order_state`
+unfiltered:
+
+| | |
+|---|---|
+| total orders | **54,627** |
+| snapshot size | **14.93 MB** |
+| time for all 13 (parallel) | **1,053 ms** |
+| **updates over ~50s, all regions** | **10 frames / 7.2 KB** |
+
+The market barely churns — roughly **8.6 KB/minute** for the entire game. So it's
+a one-time ~15MB, then effectively free. (Very uneven per region: R12 = 10,377
+orders/2.9MB, R23 = 132 orders/38KB.) Neither order table is on the explorer's
+`HUGE_TABLES` warning list.
+
+**This is a bounded, stable filter** — exactly what 8.4 requires — so it fits the
+architecture with no special handling.
+
+**Lazily**: don't subscribe at startup. Add it on first visit to Market / Deals /
+Shopping / Networth. That's **one additive subscribe per socket, once, held for
+the session** — bounded and permanent, so it never accumulates and never forces a
+redial. Users who never open those tabs pay nothing.
+
+**Costs:** ~15MB on the user's connection per page load (fine on broadband,
+real on mobile); 25–40MB heap once parsed — **project rows down to the fields
+actually needed on ingest** rather than storing them whole; and it doubles under
+the multi-tab issue (8.3).
+
+**Unlocks:** Market instant + live (the per-item problem below simply
+disappears); Shopping List instant with no bulk POST; **Deals becomes a
+client-side computation** (see 7.3); Networth order-book pricing instant. It also
+*reduces* host bandwidth, since `/deals` and the market passthrough currently go
+through the proxy.
+
+---
+
+*The analysis below is retained for context — it's why the per-item approaches
+were rejected before the whole-book option was measured.*
+
 ### The root cause: Market is all-regions-then-filter-locally
 
 [index.html:6182](index.html:6182) fetches an item's orders across **every**
@@ -622,7 +663,14 @@ via the inventory fix.
 violates 9.1. One bitjita HTTP call beats 13 permanent unfiltered subscriptions.
 **Keep on bitjita.** If we ever want it live, scope it to pinned claims only.
 
-**Deals** — an all-items arbitrage sweep. Inherently a batch job. Keep proxy-side.
+**Deals** — **MOVED to Group B by the 7.2 finding.** Previously assessed as
+"inherently a batch job, keep proxy-side". With the whole order book already in
+memory (7.2), the arbitrage sweep becomes **a client-side computation over data
+we already hold** — no proxy scan, no ~296 fetches, no `dealsPrefilter`.
+
+Caveat: if any of the ranking/filtering uses *historical* volume or price
+trends, that part still needs HTTP (5.1). Check what `/deals` actually computes
+before assuming it's fully replaceable.
 
 **Map** — a different relay entirely (prism-relay) plus geojson exports. Already
 live. Out of scope.
@@ -789,8 +837,14 @@ proven.
 - ~~**6** — which tabs keep a bitjita fallback~~ **DECIDED: keep all five that
   exist today**, collapsed to one `withFallback` boundary each (the logic is
   currently duplicated per tab).
-- **7.2** — Market: filter changes on every item you view. Three options listed;
-  lean is "leave it on HTTP".
+- ~~**7.2** — Market~~ **RESOLVED: subscribe to the whole order book, lazily.**
+  Measured 54,627 orders / 14.93 MB / 1.05s across all 13 regions, updating at
+  only ~8.6 KB/min. Bounded and stable, so it fits 8.4. Added on first visit to
+  Market/Deals/Shopping/Networth as one additive subscribe per socket. Also moves
+  **Deals** from Group C to Group B.
+
+**All section-11 items are now decided.** Remaining known-but-deferred: multi-tab
+(8.3).
 - ~~**8.3** — multi-tab~~ **TESTED: the socket budget IS shared across tabs**
   (~22 ceiling; a second tab silently loses ~4 regions). Deferred by decision,
   but now a known bug, not a hypothesis. Also found: never open 2 sockets to the
