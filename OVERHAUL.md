@@ -236,36 +236,102 @@ construction.
 
 ---
 
-## 4. Wire format
+## 4. Wire format — **DECIDED: `v1.json.spacetimedb`**
 
-**🔲 OPEN DECISION**
+Probed live against region 19 on 2026-08-07 with a realistic filtered
+subscription (one active player, 6 tables: progressive/passive crafts, sell/buy
+orders, experience, stamina).
 
-The relay offers three subprotocols. Two are realistic:
+### 4.1 Measured size
 
-| | `v2.bsatn.spacetimedb` (today) | `v1.json.spacetimedb` |
-|---|---|---|
-| Format | binary | plain JSON |
-| Decoder | ~300 lines hand-written, **plus a hand-written reader per table** | `JSON.parse` |
-| New table | write a new row reader | free |
-| Failure mode | game adds a column → we silently misread everything after it, no error | field is just absent |
-| Size | baseline | ~6× measured |
+73-second window, identical frame counts on both protocols:
 
-**Leaning: JSON.** Two reasons —
+| | frames | bytes | per hour |
+|---|---|---|---|
+| `v1.json.spacetimedb` | 116 | 119.9 KB | **~5.9 MB** |
+| `v2.bsatn.spacetimedb` | 116 | 33.1 KB | **~1.6 MB** |
 
-1. The 6× was measured on an *unfiltered firehose* (every player position in a
-   region). The new architecture is filtered to a handful of tracked players, so
-   it's 6× of a very small number.
-2. The relay's own explorer uses JSON, so it's well-trodden.
+**Ratio 3.6×**, not the 6× feared — that figure came from an unfiltered firehose.
 
-The payoff is deleting the most fragile code in the app and never writing another
-row reader.
+Caveat: this player was *very* active (stamina ticking every ~1.5s, XP rising).
+An idle player generates near zero. Idle regions cost nothing. But budget
+roughly 6 MB/hour per actively-playing tracked character, on the user's own
+connection — browser-direct, so still zero host bandwidth.
 
-**Before committing: measure it on a realistic filtered subscription.** ~10
-minutes. Don't take the reasoning above on faith.
+### 4.2 Message shapes
 
-If we stay on BSATN, two decoder traps must be preserved: `SubscribeApplied`
-(tag 1) puts `request_id` at offset 2, but `TransactionUpdate` (tag 4) puts
-`query_set_id` at offset **6** — its first u32 is *not* the request id.
+**Subscribe (client→server) has NO `query_set_id`** — that's v2 only. Sending it
+closes the socket with `1011 unknown field 'query_set_id'`:
+
+```js
+ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: [ ...sql ] } }));
+```
+
+Server frames are plain-text JSON, single-keyed. Names differ from v2:
+
+| v1 JSON | v2 BSATN equivalent |
+|---|---|
+| `IdentityToken` | (arrives first, carries identity + JWT — ignorable) |
+| `InitialSubscription` | `SubscribeApplied` |
+| `TransactionUpdate` | `TransactionUpdate` |
+
+Both data frames nest the same way — `…database_update.tables[]` for
+`InitialSubscription`, `…status.Committed.tables[]` for `TransactionUpdate` —
+each table carrying `table_name`, `num_rows`, and `updates[]` with `deletes[]`
+and `inserts[]`.
+
+Errors arrive as a **close code with a readable reason string**, which is a large
+debugging improvement over BSATN's silent misreads.
+
+### 4.3 ⚠️ Rows are JSON *strings*, and the two frame types encode them DIFFERENTLY
+
+Row entries inside `inserts`/`deletes` are strings needing a second `JSON.parse`.
+And critically — verified across `progressive_action_state`, `experience_state`
+and `stamina_state`:
+
+```
+InitialSubscription → NAMED OBJECT
+  {"entity_id":1369094287934560918,"building_entity_id":...,"progress":0,...}
+
+TransactionUpdate   → POSITIONAL ARRAY
+  [1369094287930634672,1369094286772059011,16,116047,307011,862,1,...]
+```
+
+**The array positions map 1:1 onto the snapshot's key order** — verified by
+zipping them: 10 keys, 10 positions, every value landing in the right field.
+
+So we do **not** need hand-written readers or a schema fetch. Capture the key
+order from each table's first `InitialSubscription` row, then use it to name
+every subsequent delta array. Fully automatic, works for any table we ever add.
+
+This is weaker than the "just `JSON.parse` it" pitch I originally made, but still
+far better than BSATN: one generic mechanism instead of a hand-written byte
+reader per table.
+
+Timestamps also differ by frame type — `{"__timestamp_micros_since_unix_epoch__":N}`
+in snapshots, bare `[N]` in deltas. Normalise both on the way into the cache.
+
+### 4.4 ⚠️⚠️ `JSON.parse` SILENTLY CORRUPTS ENTITY IDS
+
+Entity ids exceed `Number.MAX_SAFE_INTEGER` (9007199254740991). Verified:
+
+```
+raw:    1369094287934560918
+parsed: 1369094287934561000     ← wrong, no error
+```
+
+**These are our cache keys.** Every row must be pre-processed before parsing:
+
+```js
+JSON.parse(row.replace(/([\[,:])(\d{16,})/g, '$1"$2"'))   // ids → strings
+```
+
+Verified: restores the exact id, leaves small numbers (`progress: 116047`)
+untouched. Ids become strings, which is what we want for object keys anyway.
+
+**This is the single most dangerous trap in the JSON path** — it fails silently
+and produces plausible-looking wrong ids. Any row-ingest path that skips the
+regex is a bug.
 
 ---
 
@@ -501,7 +567,9 @@ proven.
 
 ## 11. Open decisions
 
-- **4** — wire format: BSATN or JSON. Measure first.
+- ~~**4** — wire format~~ **DECIDED: `v1.json.spacetimedb`.** Measured 3.6× the
+  bytes of BSATN (~5.9 MB/hr per active character, browser-direct). Traps
+  documented in 4.3/4.4.
 - **6** — which tabs keep a bitjita fallback.
 - **7.2** — Market: how to handle a filter that changes on every item you view,
   when changing the filter means a redial.
