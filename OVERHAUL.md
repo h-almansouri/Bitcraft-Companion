@@ -333,6 +333,33 @@ untouched. Ids become strings, which is what we want for object keys anyway.
 and produces plausible-looking wrong ids. Any row-ingest path that skips the
 regex is a bug.
 
+### 4.5 Why JSON over BSATN, and what would reverse it
+
+The effort argument is roughly a wash — most BSATN readers already exist and
+work. The deciding factor is **failure mode**:
+
+- **JSON's trap (4.4) is known, enumerated, and fixed once** at the ingest
+  boundary. It cannot recur once the regex is in place, regardless of what tables
+  we add or what the game changes.
+- **BSATN's trap is column drift.** If the game adds a field to a table, the
+  hand-written reader misreads every field after it and produces confident
+  garbage — no error, one table at a time, presenting as a tab bug rather than a
+  protocol bug. That risk **re-arms with every game update** and scales with
+  table count.
+
+Secondary: JSON errors arrive as readable close reasons (`1011 unknown field
+'query_set_id'`) instead of an unexplained socket close.
+
+**Keep the protocol confined to one layer: `socket → normalise → cache`.** Tabs,
+cache, and alerts must never see a raw frame. Switching protocols then means
+rewriting one module, not the app.
+
+**What would reverse this decision:** bandwidth. ~6 MB/hr per actively-playing
+character (≈140 MB over an 8h session with 3 active characters, vs ≈39 MB on
+BSATN). Fine on broadband, noticeable on metered/tethered connections.
+`?compression=Gzip` is silently ignored by the relay, so there's no middle
+ground.
+
 ---
 
 ## 5. What must stay HTTP
