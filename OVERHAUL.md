@@ -367,29 +367,71 @@ ground.
 Not everything can be a subscription, because not everything is a live row.
 
 ### 5.1 Historical / derived
-Computed over time windows; the database only holds *now*. The general rule:
-**anything describing what *happened* needs something that was watching** — a
-mirror of current state can't reconstruct it.
-- Market price history (`avg7d`, `vwap`, etc.)
+Computed over time windows by bitjita; no table backs them. Each item below was
+checked against the schema (see 5.1.2) — **not** inferred from "it sounds
+historical", which produced two wrong answers.
+- Market price history (`avg7d`, `vwap`, etc.). Order books themselves
+  (`sell_order_state` / `buy_order_state`) ARE live state; only the time series
+  is derived. Verified: no price/vwap table.
 - Completed-trade history (the order row is deleted on completion — see 7.1;
   *collections* are NOT in this category, they're `closed_listing_state`)
-- `/storage-logs` — the deposit/withdraw feed Group Craft is built on.
-  **ALL of it is HTTP-only, not just old entries** — a deposit from one second
-  ago is equally unavailable over the socket. A deposit is an *event*; the
-  database holds *state*. What changes is the chest's `inventory_state`
-  quantity; there is no "a deposit happened" row to subscribe to. The relay
-  offers this endpoint because it watches the stream and records the
-  transitions itself.
-  Separately, retention is **~15 days** — beyond that the history doesn't exist
-  anywhere, by any route.
-  *Deriving it ourselves doesn't work:* watching a container's `inventory_state`
-  shows quantities change but not **who** changed them (attribution is the whole
-  point of the tally), and only while the app is open — Group Craft events run
-  for days. One thread to check when we reach that tab: `TransactionUpdate`
-  carries a `caller_identity`, but for a mirrored game DB that is probably the
-  game server's connection rather than a player. Unverified; not counting on it.
-- Skill rankings (a leaderboard computed across every player in the game)
+- Skill rankings — a leaderboard bitjita computes across every player. Verified:
+  no ranking table exists (`empire_rank_*` is empire ranks, not skills).
+  Deriving it would mean subscribing to all of `experience_state`, which
+  violates 8.4.
 - The Deals arbitrage scan
+
+**NOT in this category (I got this wrong twice — verify against the schema, don't
+reason about it):**
+- *Collections* → `closed_listing_state` [Public]. See 7.1.
+- *Storage logs* → `storage_log_state` [Public]. See 5.1.1.
+
+### 5.1.1 ⚠️ `storage_log_state` IS a real Public table — storage logs are NOT HTTP-only
+
+I originally claimed `/storage-logs` was HTTP-forever because "deposits are
+events and the database holds state." **That reasoning was invented and wrong.**
+BitCraft records deposits *as rows* — which is exactly why the relay can serve
+them at all. The relay isn't watching and recording anything; it mirrors this
+table like every other one.
+
+Verified live (subscribed, region 19, one container → 88 rows in one frame):
+
+```
+{"id":4032854,"object_entity_id":1369094286807564957,
+ "subject_entity_id":1369094286781181638,"subject_name":"Velcruza",
+ "subject_type":[0,{}],
+ "data":[2,{"item_id":2015587422,"quantity":66,"item_type":[0,{}],...}],
+ "timestamp":{"__timestamp_micros_since_unix_epoch__":...},
+ "days_since_epoch":20672}
+```
+
+Columns: `id`, `object_entity_id` (container), `subject_entity_id` +
+`subject_name` (**the depositor — full attribution**), `subject_type`, `data`
+(Sum: variant index encodes deposit vs withdraw — cross-checked variant `2`
+against the HTTP endpoint's `"action":"deposit"` for the same item/qty),
+`timestamp`, `days_since_epoch`.
+
+The ~15-day window is the **game's** retention, not a relay limit — there's a
+`storage_log_cleanup_loop_timer` in the same schema deleting old rows.
+
+**Consequence:** Group Craft's contribution tally can be WS-native and **live** —
+the leaderboard would update as people deposit. Filter by `object_entity_id` per
+selected container (one query string each, all bundled into the one subscribe);
+`days_since_epoch` is a plain i32 column, so the event window can be filtered
+server-side to cut volume.
+
+### 5.1.2 The lesson
+
+My "is it an event or is it state?" heuristic produced two wrong answers in a
+row. **BitCraft records plenty of events as rows.** The only reliable test is to
+search the schema:
+
+```
+GET https://relay.bitcraftsync.app:30NN/v1/database/bitcraft-live-NN/schema?version=9
+→ 480 tables, 274 Public, with names and table_access
+```
+
+Do that before declaring anything unavailable.
 
 ### 5.2 Text search
 Subscription SQL has no `LIKE`.
@@ -486,9 +528,19 @@ means a redial (3.1), this tab needs its own thought. **🔲 OPEN.**
 **Shopping List** — same story as Market. Lower priority; the bulk price POST
 already made it fast.
 
-**Group Craft** — container discovery and live contents can move to WS, so a
-chest's progress would tick as people deposit. **The contribution tally cannot** —
-`/storage-logs` is history, not state (5.1).
+**Group Craft** — fully relay-native, including the tally. Container discovery
+and live contents move to WS, **and so does the contribution tally**:
+`storage_log_state` is Public and subscribable (5.1.1), carrying
+`subject_entity_id` + `subject_name` for attribution.
+
+This is an upgrade, not just a port — **the leaderboard would update live as
+people deposit**, instead of only on a manual re-tally.
+
+Practical notes: filter by `object_entity_id` per selected container (one query
+string each, all bundled into the region's single subscribe); `days_since_epoch`
+is a plain i32 column so the event window can be filtered server-side. Volume is
+real but bounded — 88 rows for one container in testing, and users select a
+handful, not all 144.
 
 **Tool Crafting / Planner** — static data stays on the proxy. These improve only
 via the inventory fix.
