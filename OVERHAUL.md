@@ -575,7 +575,17 @@ Shopping / Networth. That's **one additive subscribe per socket, once, held for
 the session** — bounded and permanent, so it never accumulates and never forces a
 redial. Users who never open those tabs pay nothing.
 
-**Costs:** ~15MB on the user's connection per page load (fine on broadband,
+**Plus `claim_state` for settlement names** — Deals groups by settlement, so the
+whole book needs names for every claim holding a listing, not just ours.
+Measured: **10,031 claims / 1.83 MB / 735 ms** across all 13 regions. Cheap, and
+it pays for itself twice — Crafts and Orders can then resolve settlement names
+from a map lookup instead of a per-building join, retiring part of the
+`bcRelayPlaces` cache (9.3). (`building_state` stays per-query — it IS on
+`HUGE_TABLES`.)
+
+**Total for the lazy market subscription: ~16.8 MB, ~1s.**
+
+**Costs:** ~17MB on the user's connection per page load (fine on broadband,
 real on mobile); 25–40MB heap once parsed — **project rows down to the fields
 actually needed on ingest** rather than storing them whole; and it doubles under
 the multi-tab issue (8.3).
@@ -668,9 +678,19 @@ violates 9.1. One bitjita HTTP call beats 13 permanent unfiltered subscriptions.
 memory (7.2), the arbitrage sweep becomes **a client-side computation over data
 we already hold** — no proxy scan, no ~296 fetches, no `dealsPrefilter`.
 
-Caveat: if any of the ranking/filtering uses *historical* volume or price
-trends, that part still needs HTTP (5.1). Check what `/deals` actually computes
-before assuming it's fully replaceable.
+**Verified fully replaceable** — `processItem` ([proxy.js:171](proxy.js:171))
+uses only `price`/`priceThreshold`, `quantity`, and `claimName` (cheapest sell
+per settlement × highest buy per settlement, emit where buy > sell, sort by
+`maxProfit`). No averages, volume, or history. Item metadata comes from
+`/itemdefs`, which we already have.
+
+**Fields to project on ingest:** `item_id`, price, `quantity`, claim id, region,
+owner. Six fields, not the whole row — this is the heap mitigation in 7.2.
+
+**Deletions this enables in `proxy.js`:** `dealsPrefilter` (the whole 1216→296
+optimisation exists only to avoid paying for order books we'd now already hold),
+`dealsCache`, `computeDeals`, `maybeComputeDeals`, `DEALS_TTL`, the 8-worker
+concurrency pool, and the 429 backoff/rate-limit dance.
 
 **Map** — a different relay entirely (prism-relay) plus geojson exports. Already
 live. Out of scope.
