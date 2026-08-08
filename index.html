@@ -2600,57 +2600,36 @@ function ordToggle(key){
   body.style.display = shut ? 'none' : '';
   if (chev) chev.style.transform = shut ? 'rotate(-90deg)' : '';
 }
-// ── Orders straight from the relay's state tables, across every region ─────────
-// Same shape as the crafts migration: a player's orders and collections are region-partitioned, so we
-// scan all 13 mirrors in parallel rather than trusting any one region's view (Velcruza's collections
-// sit in two different regions). Item names/icons come from gameItemDefs, claim names from claim_state.
-// sell_order_state / buy_order_state (fixed 52B) — same layout for both.
-function readOrderRow(kind){
-  return r => {
-    const entityId = r.u64().toString(), ownerId = r.u64().toString(), claimId = r.u64().toString();
-    const itemId = r.i32(), itemType = r.i32(), price = r.i32(), quantity = r.i32();
-    const ts = r.u64(), storedCoins = r.i32();
-    return { kind, entityId, ownerId, claimId, itemId, itemType, price, quantity, tsMicros: ts.toString(), storedCoins };
-  };
+// ── Orders/collections for MANY players — assembled from the LIVE CACHE, no network ─────────
+// sell/buy/closed rows are held live by the layer; the only queries left are claim-NAME resolves for
+// claims we've never seen (persisted via bcRelayPlaces, so a no-op after first sight). Output shape is
+// IDENTICAL to the old join-per-refresh version, so the tab render and the bitjita fallback are
+// untouched. Throws while the layer hasn't snapshotted every region — callers fall back as before.
+function relayResolveClaims(region, cids){
+  const need = [...new Set(cids)].filter(c => c && c !== '0' && !relayClaimNames[c]);
+  if (!need.length) return Promise.resolve();
+  return relayQuery(region, [`SELECT * FROM claim_state WHERE ${need.map(c => `entity_id = ${c}`).join(' OR ')}`],
+    r => { const e = r.u64(); r.u64(); r.u64(); return { id: e.toString(), name: r.str() }; }, 9000)
+    .then(rows => { rows.forEach(x => { if (x) relayClaimNames[x.id] = x.name; }); saveRelayPlaces(); });
 }
-// closed_listing_state = the "collections to pick up" pile (coins from sells, items from filled buys).
-function readClosedListing(r){
-  const entityId = r.u64().toString(), ownerId = r.u64().toString(), claimId = r.u64().toString();
-  const itemId = r.i32(), quantity = r.i32(), itemType = r.u8();
-  if (r.u8() === 0) r.i32();                       // durability = some(i32)
-  return { kind:'closed', entityId, ownerId, claimId, itemId, quantity, itemType, tsMicros: r.u64().toString() };
-}
-// Orders/collections for MANY players at once: 13 connections total (all players OR'd per region), not
-// 13 per player. Returns { playerId: {sellOrders, buyOrders, collections} }. Throws only if every mirror
-// was unreachable. Claim names ride along via a join, so there's no separate name-resolution pass.
 async function fetchMarketRelayMulti(ids){
   ids = ids.map(String);
+  if (!liveComplete()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
-  const owner = ids.map(id => `owner_entity_id = ${id}`).join(' OR ');
-  // Orders/collections AND their claim names in ONE round-trip per region — the claim rows ride along via
-  // a join. A join can't be OR'd (the relay needs an index the OR defeats), so emit one single-owner join
-  // per player per table, all bundled into the same subscribe. Names are also persisted for next session.
-  const claimJoins = t => ids.map(id => `SELECT claim_state.* FROM claim_state JOIN ${t} ON claim_state.entity_id = ${t}.claim_entity_id WHERE ${t}.owner_entity_id = ${id}`);
-  let ok = 0;
-  const per = await Promise.all(BC_REGIONS.map(rg =>
-    relayQuery(rg, [
-      `SELECT * FROM sell_order_state WHERE ${owner}`,
-      `SELECT * FROM buy_order_state WHERE ${owner}`,
-      `SELECT * FROM closed_listing_state WHERE ${owner}`,
-      ...claimJoins('sell_order_state'), ...claimJoins('buy_order_state'), ...claimJoins('closed_listing_state')
-    ], (r, table) => {
-      if (table === 'sell_order_state') return readOrderRow('sell')(r);
-      if (table === 'buy_order_state') return readOrderRow('buy')(r);
-      if (table === 'closed_listing_state') return readClosedListing(r);
-      if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { kind:'claim', id: e.toString(), name: r.str() }; }
-      return null;
-    }, 9000).then(rows => { if (rows.ok) ok++; return { rg, rows: rows.filter(Boolean) }; }).catch(() => ({ rg, rows: [] }))
-  ));
-  if (!ok) throw new Error('relay unreachable');
-  const complete = ok === BC_REGIONS.length;   // see the caller: a partial sweep must not blank a player's orders
-  per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
-  saveRelayPlaces();
+  const want = new Set(ids);
+  // Deterministic order — cache-Map iteration shifts on every delta (same lesson as crafts).
+  const byId = (a, b) => { const x = String(a.entity_id), y = String(b.entity_id); return x.length - y.length || (x < y ? -1 : x > y ? 1 : 0); };
+  const sells  = liveRows('sell_order_state',     r => want.has(String(r.owner_entity_id))).sort(byId);
+  const buys   = liveRows('buy_order_state',      r => want.has(String(r.owner_entity_id))).sort(byId);
+  const closed = liveRows('closed_listing_state', r => want.has(String(r.owner_entity_id))).sort(byId);
+  // Resolve claim names we've never seen, grouped by the region the rows came from.
+  const unknown = {};
+  sells.concat(buys, closed).forEach(r => {
+    const cid = String(r.claim_entity_id || '0');
+    if (cid !== '0' && !relayClaimNames[cid]) (unknown[r.__region] || (unknown[r.__region] = new Set())).add(cid);
+  });
+  await Promise.all(Object.keys(unknown).map(rg => relayResolveClaims(+rg, [...unknown[rg]]).catch(() => {})));
   // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
   // location headers keep reading "Ba Sing Se · Zephra (R19)" instead of falling back to a bare R19.
   if (typeof marketRegions !== 'undefined' && !marketRegions.length){
@@ -2658,28 +2637,36 @@ async function fetchMarketRelayMulti(ids){
   }
   const regionName = {};
   (typeof marketRegions !== 'undefined' ? marketRegions : []).forEach(r => { regionName[r.regionId] = r.regionName; });
-  const shape = r => {
-    const meta = (r.itemType === 1 ? defs.cargos : defs.items)[r.itemId] || {};
-    const rg = regionOfEntity(r.claimId && r.claimId !== '0' ? r.claimId : r.entityId);
-    return { entityId: r.entityId, ownerEntityId: r.ownerId,
-      claimEntityId: r.claimId !== '0' ? r.claimId : null,
-      claimName: (r.claimId !== '0' && relayClaimNames[r.claimId]) || null,
+  const sumIdx = v => Array.isArray(v) ? v[0] : (+v || 0);   // Sum on the wire = [variantIdx, payload]; plain ints pass through
+  // closed_listing's item_stack is a nested product: NAMED object in snapshots, POSITIONAL in deltas.
+  const stack = st => {
+    if (!st) return { itemId: 0, quantity: 0, itemType: 0 };
+    if (Array.isArray(st)) return { itemId: +st[0] || 0, quantity: +st[1] || 0, itemType: sumIdx(st[2]) };
+    return { itemId: +st.item_id || 0, quantity: +st.quantity || 0, itemType: sumIdx(st.item_type) };
+  };
+  const shape = (r, itemId, itemType, qty) => {
+    const meta = (itemType === 1 ? defs.cargos : defs.items)[itemId] || {};
+    const cid = String(r.claim_entity_id || '0');
+    const rg = regionOfEntity(cid !== '0' ? cid : r.entity_id);
+    return { entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
+      claimEntityId: cid !== '0' ? cid : null,
+      claimName: (cid !== '0' && relayClaimNames[cid]) || null,
       regionId: rg, regionName: regionName[rg] || null,
-      itemId: String(r.itemId), itemType: r.itemType,
-      itemName: meta.name || ('Item ' + r.itemId), tier: meta.tier != null ? meta.tier : 0,
+      itemId: String(itemId), itemType,
+      itemName: meta.name || ('Item ' + itemId), tier: meta.tier != null ? meta.tier : 0,
       rarityStr: meta.rarityStr || '', tag: meta.tag || '', iconAssetName: meta.iconAssetName || '',
-      quantity: String(r.quantity), timestamp: r.tsMicros };
+      quantity: String(qty),
+      timestamp: String((r.timestamp || 0) * 1000) };   // contract: MICROS string, as the old reader produced (the cache holds ms)
   };
   const out = {}; ids.forEach(id => out[id] = { sellOrders: [], buyOrders: [], collections: [] });
-  per.forEach(({ rows }) => rows.forEach(r => {
-    const bucket = out[r.ownerId]; if (!bucket) return;
-    if (r.kind === 'closed') bucket.collections.push(shape(r));
-    else if (r.kind === 'sell' || r.kind === 'buy'){
-      const o = { ...shape(r), priceThreshold: String(r.price), storedCoins: String(r.storedCoins) };
-      (r.kind === 'sell' ? bucket.sellOrders : bucket.buyOrders).push(o);
-    }
-  }));
-  try { Object.defineProperty(out, '_complete', { value: complete, enumerable: false }); } catch(e){}
+  sells.forEach(r => { const b = out[String(r.owner_entity_id)];
+    if (b) b.sellOrders.push({ ...shape(r, +r.item_id, sumIdx(r.item_type), r.quantity), priceThreshold: String(r.price_threshold), storedCoins: String(r.stored_coins) }); });
+  buys.forEach(r => { const b = out[String(r.owner_entity_id)];
+    if (b) b.buyOrders.push({ ...shape(r, +r.item_id, sumIdx(r.item_type), r.quantity), priceThreshold: String(r.price_threshold), storedCoins: String(r.stored_coins) }); });
+  closed.forEach(r => { const b = out[String(r.owner_entity_id)]; if (!b) return;
+    const s = stack(r.item_stack); b.collections.push(shape(r, s.itemId, s.itemType, s.quantity)); });
+  // Complete by construction: liveComplete() gated entry, so this can never be a partial sweep.
+  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerMarketRelay(id){   // single-player wrapper
