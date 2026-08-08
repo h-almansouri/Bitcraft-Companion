@@ -367,9 +367,12 @@ ground.
 Not everything can be a subscription, because not everything is a live row.
 
 ### 5.1 Historical / derived
-Computed over time windows; the database only holds *now*.
+Computed over time windows; the database only holds *now*. The general rule:
+**anything describing what *happened* needs something that was watching** — a
+mirror of current state can't reconstruct it.
 - Market price history (`avg7d`, `vwap`, etc.)
-- Trade history, market collections
+- Completed-trade history (the order row is deleted on completion — see 7.1;
+  *collections* are NOT in this category, they're `closed_listing_state`)
 - `/storage-logs` — the 15-day deposit/withdraw feed Group Craft is built on
 - Skill rankings (a leaderboard computed across every player in the game)
 - The Deals arbitrage scan
@@ -428,8 +431,20 @@ so it inherits 7.2.
 double-work this overhaul removes: asks on tab open *and* listens continuously to
 the same table. Collapses to one held subscription. **Rankings stay HTTP** (5.1).
 
-**Orders** — `sell_order_state` / `buy_order_state` + claim join. **Trade history
-and collections stay HTTP** (5.1).
+**Orders** — `sell_order_state` / `buy_order_state` + claim join, **plus
+`closed_listing_state` for collections** (coins from filled sells, items from
+filled buys). All three Public, all three already read from the relay today —
+`readClosedListing` ([index.html:2617](index.html:2617)) feeds
+`bucket.collections` in `fetchMarketRelayMulti`. bitjita's
+`/api/players/<id>/market-collections` is only the fallback.
+
+**Only completed-trade history stays HTTP.** Verified against the schema: there
+is no such table. `trade_order_state` / `traveler_trade_order_desc` are
+traveller/NPC trades, not player market history. **When a trade completes the
+order row is deleted** — the mirror holds only what exists now. bitjita has the
+history because it watches the stream continuously and records transitions; no
+snapshot can reconstruct it. Same principle as price history (5.1) and
+`/storage-logs`.
 
 ### 7.2 Group B — relay has it, we're not using it properly
 
