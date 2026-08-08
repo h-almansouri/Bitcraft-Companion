@@ -3814,8 +3814,13 @@ async function fetchCraftsRelayMulti(ids){
   hydrateRelayPlaces();
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
   const want = new Set(ids);
-  const prog = liveRows('progressive_action_state', r => want.has(String(r.owner_entity_id)));
-  const pass = liveRows('passive_craft_state',      r => want.has(String(r.owner_entity_id)));
+  // Deterministic order: a delta re-inserts its row at the END of the cache Map, so raw iteration order
+  // shifts on every progress tick — rendered as cards visibly jumping around the Active section. Sort by
+  // entity id (creation order) so every rebuild yields the same sequence. Length-first compare = numeric
+  // order for decimal strings of differing length.
+  const byId = (a, b) => { const x = String(a.entity_id), y = String(b.entity_id); return x.length - y.length || (x < y ? -1 : x > y ? 1 : 0); };
+  const prog = liveRows('progressive_action_state', r => want.has(String(r.owner_entity_id))).sort(byId);
+  const pass = liveRows('passive_craft_state',      r => want.has(String(r.owner_entity_id))).sort(byId);
   const pub  = new Set(liveRows('public_progressive_action_state', r => want.has(String(r.owner_entity_id))).map(r => String(r.entity_id)));
   // Resolve names for buildings we haven't seen, grouped by the region their rows came from (persisted
   // across sessions via bcRelayPlaces, so this is a no-op on every load after the first).
@@ -3980,7 +3985,14 @@ function liveBridge(evs){
   const known = feedKnownCraftIds();
   evs.forEach(ev => {
     if (!ev.isDelta) return;
-    if (ev.table === 'progressive_action_state'){ if (ev.rows.some(r => !known.has(String(r.entity_id))) || ev.deletes.length) crafts = true; }
+    if (ev.table === 'progressive_action_state'){
+      // A progress tick is delete(old)+insert(new) for the SAME craft — that's not a list change, and
+      // treating it as one made the Active section rebuild (and visibly reshuffle) every 500ms while
+      // anyone was crafting. Only a craft we've never seen, or a delete with no matching re-insert
+      // (finished/cancelled), changes the list.
+      const reinserted = new Set(ev.rows.map(r => String(r.entity_id)));
+      if (ev.rows.some(r => !known.has(String(r.entity_id))) || ev.deletes.some(d => !reinserted.has(String(d.entity_id)))) crafts = true;
+    }
     else if (ev.table === 'passive_craft_state') crafts = true;
     else if (ev.table === 'sell_order_state' || ev.table === 'buy_order_state' || ev.table === 'closed_listing_state') orders = true;
   });
