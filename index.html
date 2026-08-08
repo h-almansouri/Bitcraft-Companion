@@ -4735,7 +4735,10 @@ async function loadGameItemDefs(){
   if (gameItemDefs) return gameItemDefs;
   if (_gameItemDefsP) return _gameItemDefsP;
   _gameItemDefsP = (async () => {
-    const d = await apiFetch('/itemdefs?v=rout1');   // compact [name, tier, rarityIdx, tag, icon]; ?v busts the 24h browser cache when the payload gains fields
+    // ?v busts the 24h browser cache when the payload gains fields. rout2, not rout1: a dev server
+    // briefly served rout1 WITHOUT recipeOuts (the route dropped the field), and that empty payload
+    // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh.
+    const d = await apiFetch('/itemdefs?v=rout2');   // compact [name, tier, rarityIdx, tag, icon]
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
     gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
       recipeOuts: d.recipeOuts || {} };   // recipeId -> [headlineItemId, qty] — the game's own crafted_item_stacks[0]
