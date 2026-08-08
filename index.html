@@ -8515,7 +8515,7 @@ async function renderPlanner() {
 
 async function loadCraftingData() {
   if (craftingData) return;
-  const d = await apiFetch('/crafting-data?v=icons1'); // ?v bumps to bust stale browser cache on data refresh
+  const d = await apiFetch('/crafting-data?v=gd1'); // ?v bumps to bust stale browser cache on data refresh (gd1 = GameData-derived, replacing the scrape)
   craftingData = d;
   // Build indexes
   craftingData.itemsById = {};

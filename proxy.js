@@ -405,7 +405,7 @@ http.createServer((req, res) => {
     const filePath = path.join(__dirname, 'craftingData.json');
     if (!fs.existsSync(filePath)) {
       res.writeHead(404);
-      res.end(JSON.stringify({ error: 'craftingData.json not found. Run: node extract-crafting-data.js' }));
+      res.end(JSON.stringify({ error: 'craftingData.json not found. Run: node build-crafting-data.js' }));
       return;
     }
     serveFileCached(req, res, filePath, 'application/json');
