@@ -465,8 +465,27 @@ const data = await withFallback(
 - All bitjita functions live together in one clearly-marked block.
 - Deleting them later is mechanical, not surgery.
 
-**🔲 OPEN:** which tabs keep a fallback. Current lean: Crafts, Orders, Inventory
-(the ones that would leave the app unusable). Not the rest.
+**DECIDED:** keep a fallback everywhere one exists today — no more, no fewer.
+The five current paths:
+
+| tab | relay path | bitjita fallback |
+|---|---|---|
+| Experience | `fetchSkillsRelay` | `/api/players/<id>` ([index.html:2113](index.html:2113)) |
+| Orders | `fetchPlayerMarketRelay` | `fetchPlayerMarketBitjita` ([index.html:2689](index.html:2689)) |
+| Crafts | `fetchPlayerCraftsRelay` | `fetchPlayerCraftsBitjita` ([index.html:3676](index.html:3676)) |
+| Inventory | `fetchPlayerInvRelay` | inline in `fetchPlayerInv` ([index.html:5004](index.html:5004)) |
+| Tasks | `fetchTasksRelay` | `/api/players/<id>/traveler-tasks` ([index.html:5118](index.html:5118)) |
+
+**The cleanup:** each of these is currently expressed **twice** — once in the
+per-player wrapper, and again in the tab's render loop:
+
+```
+2698 fetchPlayerMarket    →  2963/2968 render loop retries per player
+3701 fetchPlayerCrafts    →  4047/4052 render loop retries per player
+```
+
+Collapse to one `withFallback` boundary per tab so the render loop just calls the
+tab's data function and never mentions bitjita.
 
 ---
 
@@ -521,9 +540,29 @@ vehicles. `inventory_state` is Public and carries full live pockets.
 **Networth** — inherits the inventory fix, which is most of its latency. Prices
 stay HTTP (5.1).
 
-**Market** — order books could become genuinely live. But the filter is "whatever
-item you're looking at", which changes constantly — and since changing the filter
-means a redial (3.1), this tab needs its own thought. **🔲 OPEN.**
+**Market** — **🔲 OPEN.** The problem in plain terms:
+
+Every other tab watches a **fixed** set of things — your tracked players. Set
+once when the app loads, changes maybe twice a session.
+
+Market watches **whatever item you just clicked**. Iron Ingot, then Copper Ore,
+then Rough Plank — a different thing every few seconds. And under 3.1, changing
+what we watch means hanging up and redialling all 13 sockets. Browsing ten items
+would mean ten full redials. Obviously wrong.
+
+Three ways out:
+
+1. **Leave Market on HTTP.** You look at an order book for a few seconds; a fresh
+   fetch per item is equivalent to a live one, costs no sockets, and works today.
+2. **One dedicated extra socket** just for Market, redialled on each item click
+   (~250ms). Costs one from the budget and needs 8.3.1 care.
+3. **Subscribe only to a small pinned watchlist** — a bounded, stable filter that
+   fits the architecture cleanly.
+
+**Lean: option 1.** "Live order book" sounds appealing but adds little when
+you're glancing at a price. Option 3 becomes the right answer *if* we ever want
+"alert me when someone undercuts my listing" — that's a genuinely live need with
+a naturally small filter.
 
 **Shopping List** — same story as Market. Lower priority; the bulk price POST
 already made it fast.
@@ -572,15 +611,53 @@ First connect is 13 handshakes: 410ms to occasionally 12s, variable. We already
 pay this today for the query pool, so it's not a regression — but "instant" means
 "after the first second", not "always".
 
-### 8.3 Multi-tab
-The cache is per browser tab. Two tabs open = two caches and **26 sockets** from
-one machine, right on the cliff — and the limit is likely per-browser, so both
-tabs would be slow.
+### 8.3 Multi-tab — **TESTED 2026-08-07, the budget IS shared across tabs**
 
-New failure mode that doesn't exist today, and it would present as "the app is
-randomly slow sometimes" with no obvious cause. Fixable later with a
-`BroadcastChannel` so one tab owns the sockets and shares rows. **Not building
-that up front.**
+Previously an untested assumption. Measured:
+
+| test | result |
+|---|---|
+| 13 sockets, one tab, 13 different ports | all open, **530ms** (median 260ms) |
+| +13 from a *second* tab while the first held its 13 | **only 9 opened**; 4 hung indefinitely |
+| then closed tab 1's 13 | the 4 opened **instantly** — after blocking 56s |
+
+```
+tab 2 timings: [251,251,251,252,254,255,267,271,272, 56116,56116,56116,56116]
+                └────── nine at ~270ms ──────┘        └─ four blocked until tab 1 closed ─┘
+```
+
+The four waited *exactly* until sockets freed elsewhere, so this is a shared
+budget, not coincidental slowness. Ceiling observed: **~22 concurrent** (13 + 9).
+
+**Consequence:** two tabs of the app is a real, reproducible degradation — the
+second tab silently fails to connect ~4 regions and those regions' data never
+arrives. Worse than "slow".
+
+⚠️ *Whose* limit it is remains unproven — browser, relay per-IP, or this test
+environment's networking (it ran inside the Claude browser pane, which may have
+its own layer; real Chrome could differ). The shared-across-tabs behaviour is
+solid regardless.
+
+Still not building `BroadcastChannel` coordination up front, but this is now a
+known bug rather than a hypothetical. **Minimum viable mitigation:** detect
+sockets stuck in CONNECTING and surface it, rather than showing empty regions as
+though they're genuinely empty.
+
+### 8.3.1 ⚠️ NEVER open two sockets to the same region
+
+Connections to the **same** host:port are **serialised** — one handshake at a
+time. Measured: 30 sockets to region 19 all opened, but at ~265ms intervals,
+taking **7.9 seconds** total.
+
+```
+251, 516, 783, 1049, 1313, 1572, 1833, … 7937
+```
+
+Different ports go in **parallel** (13 regions ≈ 250ms each, all at once).
+
+So one-socket-per-region is not just convenient — it's the only shape that
+parallelises. Splitting a region's queries across two sockets would double that
+region's connect time, not halve it.
 
 ### 8.4 Every held subscription must be filtered
 No held subscription without a bounded `WHERE`. `owner_entity_id = <our players>`
@@ -678,10 +755,15 @@ proven.
 - ~~**4** — wire format~~ **DECIDED: `v1.json.spacetimedb`.** Measured 3.6× the
   bytes of BSATN (~5.9 MB/hr per active character, browser-direct). Traps
   documented in 4.3/4.4.
-- **6** — which tabs keep a bitjita fallback.
-- **7.2** — Market: how to handle a filter that changes on every item you view,
-  when changing the filter means a redial.
-- **8.3** — do we care about multi-tab now, or wait to see if it bites.
+- ~~**6** — which tabs keep a bitjita fallback~~ **DECIDED: keep all five that
+  exist today**, collapsed to one `withFallback` boundary each (the logic is
+  currently duplicated per tab).
+- **7.2** — Market: filter changes on every item you view. Three options listed;
+  lean is "leave it on HTTP".
+- ~~**8.3** — multi-tab~~ **TESTED: the socket budget IS shared across tabs**
+  (~22 ceiling; a second tab silently loses ~4 regions). Deferred by decision,
+  but now a known bug, not a hypothesis. Also found: never open 2 sockets to the
+  same region — they serialise (8.3.1).
 
 ---
 
