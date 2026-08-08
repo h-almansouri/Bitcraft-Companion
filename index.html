@@ -3443,18 +3443,11 @@ function craftingContentHtml(craftData) {
 
   const claimBlocks = Object.values(byClaim).map(loc => {
     const type = isPassive ? 'passive' : 'active';
-    const inProgress = loc.crafts.filter(c => !c.completed && !c.isCompleted);
-    const actions = inProgress.reduce((s,c) => {
-      const rp = c.progress ?? c.progressPercent ?? c.progressPct ?? 0;
-      const p  = rp > 1 ? rp/100 : rp;
-      return s + ((c.actionsRequiredPerItem||0) * (1 - p));
-    }, 0);
     return `<div class="craft-location-card">
       <div class="craft-location-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
         <div class="craft-location-name"><i class="ti ${loc.isBuilding?'ti-building-factory':'ti-map-pin'}"></i>${escHtml(loc.name)}${loc.regionId ? `<span style="color:var(--text3);font-size:11px;margin-left:.35rem">· R${loc.regionId}</span>` : ''}</div>
         <div class="craft-location-meta">
           <span>${loc.crafts.length} craft${loc.crafts.length!==1?'s':''}</span>
-          ${actions > 0 ? `<span>${Math.round(actions)} actions left</span>` : ''}
           <i class="ti ti-chevron-down" style="font-size:14px;color:var(--text3)"></i>
         </div>
       </div>
@@ -3842,14 +3835,19 @@ async function fetchCraftsRelayMulti(ids){
     const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
     const rec = recipes[r.recipe_id] || {};
     const perItem = rec.actionsRequired || 0;
-    bucket.active.push({ entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
+    const total = perItem * (r.craft_count || 1);
+    // A finished-but-uncollected craft stays in progressive_action_state with progress >= total. Bucket
+    // it as DONE (like the bitjita path does) so the chip reads Complete — not Idle — and the render's
+    // [...active, ...done] order keeps completed crafts at the bottom of the list, on every rebuild.
+    const isDone = total > 0 && r.progress >= total;
+    bucket[isDone ? 'done' : 'active'].push({ entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
       progress: r.progress, recipeId: r.recipe_id, recipeName: rec.name || '',
       craftCount: r.craft_count,
       actionsRequiredPerItem: perItem,
-      totalActionsRequired: perItem * (r.craft_count || 1),
+      totalActionsRequired: total,
       craftedItem: outputsOf(r.recipe_id, bucket.itemMap),
       lockExpiration: r.lock_expiration ? new Date(r.lock_expiration).toISOString() : null,
-      isPublic: pub.has(String(r.entity_id)), completed: false, ...place(r) });
+      isPublic: pub.has(String(r.entity_id)), completed: isDone, ...place(r) });
   });
   pass.forEach(r => {
     const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
@@ -4050,6 +4048,10 @@ function onLiveCraftProgress(d, isDelta){
   // baseline (prevP) but must not mark the craft Active.
   const worked = isDelta && prevP != null && prog > prevP;
   if (worked) bcCraftRate[cid].workedT = Date.now();
+  // Crossing the finish line live: the delta is a same-pk delete+insert, which the doorbell deliberately
+  // ignores — but completion DOES change the list (the craft re-buckets to done/Complete, at the bottom).
+  // Ring it exactly once, on the crossing.
+  if (isDelta && total > 0 && prog >= total && prevP != null && prevP < total){ _feedWant.crafts = true; feedKick(); }
   // patch the DOM in place (no full re-render → no flicker)
   const card = document.querySelector(`.craft-card[data-cid="${cid}"]`); if (!card) return;
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(prog / total * 100))) : null;
