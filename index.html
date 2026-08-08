@@ -3643,7 +3643,7 @@ function liveApplySnapshot(c, frame){
   const fresh = {};
   ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
     const m = new Map();
-    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) m.set(livePk(r), r); }));
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r){ r.__region = c.region; m.set(livePk(r), r); } }));
     fresh[t.table_name] = m;
   });
   // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
@@ -3668,8 +3668,8 @@ function liveApplyDelta(c, frame){
     (t.updates || []).forEach(u => {
       // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
       // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
-      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.delete(livePk(r)); del.push(r); } });
-      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.set(livePk(r), r); ins.push(r); } });
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ r.__region = c.region; slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ r.__region = c.region; slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
   });
@@ -3773,43 +3773,9 @@ function liveReschedule(c){
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
-// progressive_action_state (fixed 53B) — the full row, including the lock the Active/Idle chip needs.
-function readProgFull(r){
-  const entityId = r.u64().toString(), buildingId = r.u64().toString();
-  r.i32();                                            // function_type
-  const progress = r.i32(), recipeId = r.i32(), craftCount = r.i32();
-  r.i32();                                            // last_crit_outcome
-  const ownerId = r.u64().toString(), lock = r.u64();
-  return { kind:'active', entityId, buildingId, progress, recipeId, craftCount, ownerId, lockMs: Number(lock / 1000n) };
-}
-// passive_craft_state: entity u64, owner u64, recipe i32, building u64, timestamp i64(micros),
-// status Sum[Queued|Processing|Complete], slot Sum[some u32|none]
-function readPassiveRow(r){
-  const entityId = r.u64().toString(), ownerId = r.u64().toString();
-  const recipeId = r.i32(), buildingId = r.u64().toString(), ts = r.u64();
-  const status = ['queued','processing','complete'][r.u8()] || 'queued';
-  return { kind:'passive', entityId, ownerId, recipeId, buildingId, startMs: Number(ts / 1000n), status };
-}
 function readBuildingState(r){
   const entityId = r.u64().toString(), claimId = r.u64().toString();
   r.i32(); return { entityId, claimId, descId: r.i32() };
-}
-// One region: every craft owned by ANY of the given players there, plus which are public. Batching all
-// tracked players into one OR'd query per region is essential — the browser throttles hard past ~13
-// simultaneous WebSockets, so one connection per region (not per region PER PLAYER) keeps us under the cliff.
-async function relayRegionCrafts(region, playerIds){
-  const owner = playerIds.map(id => `owner_entity_id = ${id}`).join(' OR ');
-  const rows = await relayQuery(region, [
-    `SELECT * FROM progressive_action_state WHERE ${owner}`,
-    `SELECT * FROM passive_craft_state WHERE ${owner}`,
-    `SELECT * FROM public_progressive_action_state WHERE ${owner}`
-  ], (r, table) => {
-    if (table === 'progressive_action_state') return readProgFull(r);
-    if (table === 'passive_craft_state') return readPassiveRow(r);
-    if (table === 'public_progressive_action_state') return { kind:'public', entityId: r.u64().toString() };
-    return null;
-  }, 9000);
-  const out = rows.filter(Boolean); out.ok = rows.ok; return out;   // carry the answered flag through the filter
 }
 // Resolve building/claim names for buildings we haven't seen — in ONE round-trip. The per-connection
 // cost to the relay is ~1s once connections are churning, so what matters is round-trip COUNT, not query
@@ -3836,35 +3802,42 @@ async function relayResolvePlaces(region, buildingIds){
   unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
   saveRelayPlaces();
 }
-// Fetch crafts for MANY players in one pass: 13 connections total (one per region, all players OR'd in),
-// not 13 per player. Returns { playerId: {active, done, passive, itemMap} }. Throws only if every mirror
-// was unreachable, so the caller can fall back to bitjita.
+// Crafts for MANY players — assembled from the LIVE CACHE, no network. The held subscriptions keep the
+// cache current, so a "fetch" is a local read plus (rarely) a place-name resolve for buildings we've
+// never seen. Returns { playerId: {active, done, passive, itemMap} } — IDENTICAL to the old
+// subscribe-per-refresh shape, so the tab render, the alert differ and the bitjita fallback are
+// untouched. Throws while the layer hasn't snapshotted every region (boot, relay down): callers fall
+// back exactly as they did when a sweep failed.
 async function fetchCraftsRelayMulti(ids){
   ids = ids.map(String);
+  if (!liveComplete()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
-  const perRegion = await Promise.all(BC_REGIONS.map(rg =>
-    relayRegionCrafts(rg, ids).then(rows => ({ rg, rows, ok: rows.ok })).catch(() => ({ rg, rows: [], ok: false }))));
-  if (!perRegion.some(x => x.ok)) throw new Error('relay unreachable');
-  const complete = perRegion.every(x => x.ok);   // did EVERY region answer? see the caller for why it matters
-  const hits = perRegion.filter(x => x.rows.length);
-  // resolve place names region by region (cached, so this is a no-op on later refreshes)
-  await Promise.all(hits.map(({ rg, rows }) => {
-    const bIds = [...new Set(rows.filter(r => r.buildingId && r.buildingId !== '0').map(r => r.buildingId))];
-    return relayResolvePlaces(rg, bIds).catch(() => {});
-  }));
+  const want = new Set(ids);
+  const prog = liveRows('progressive_action_state', r => want.has(String(r.owner_entity_id)));
+  const pass = liveRows('passive_craft_state',      r => want.has(String(r.owner_entity_id)));
+  const pub  = new Set(liveRows('public_progressive_action_state', r => want.has(String(r.owner_entity_id))).map(r => String(r.entity_id)));
+  // Resolve names for buildings we haven't seen, grouped by the region their rows came from (persisted
+  // across sessions via bcRelayPlaces, so this is a no-op on every load after the first).
+  const unknownByRegion = {};
+  prog.concat(pass).forEach(r => {
+    const b = String(r.building_entity_id || '0');
+    if (b !== '0' && !relayBuildingInfo[b]) (unknownByRegion[r.__region] || (unknownByRegion[r.__region] = new Set())).add(b);
+  });
+  await Promise.all(Object.keys(unknownByRegion).map(rg => relayResolvePlaces(+rg, [...unknownByRegion[rg]]).catch(() => {})));
   const recipes = (craftingData && craftingData.recipesById) || {};
   const defs = gameItemDefs || { items:{}, cargos:{}, buildings:{} };
   const out = {}; ids.forEach(id => out[id] = { active: [], done: [], passive: [], itemMap: {} });
   const place = r => {
-    const b = relayBuildingInfo[r.buildingId] || { claimId:'0', descId:0, nickname:'' };
+    const bid = String(r.building_entity_id || '0');
+    const b = relayBuildingInfo[bid] || { claimId:'0', descId:0, nickname:'' };
     const claimId = b.claimId && b.claimId !== '0' ? b.claimId : null;
     return {
-      buildingEntityId: r.buildingId,
+      buildingEntityId: bid,
       buildingName: b.nickname || defs.buildings[b.descId] || 'Unknown Building',
       claimEntityId: claimId,
       claimName: (claimId && relayClaimNames[claimId]) || null,
-      regionId: regionOfEntity(claimId || r.entityId)
+      regionId: regionOfEntity(claimId || r.entity_id)
     };
   };
   const outputsOf = (recipeId, itemMap) => {
@@ -3873,30 +3846,32 @@ async function fetchCraftsRelayMulti(ids){
     outs.forEach(o => { const m = defs.items[o.itemId] || defs.cargos[o.itemId]; if (m) itemMap[o.itemId] = m; });
     return outs.map(o => ({ item_id: o.itemId, quantity: o.quantity, item_type: 0 }));
   };
-  perRegion.forEach(({ rows }) => {
-    const pub = new Set(rows.filter(r => r.kind === 'public').map(r => r.entityId));
-    rows.forEach(r => {
-      const bucket = out[r.ownerId]; if (!bucket) return;   // guard: OR shouldn't return untracked owners
-      if (r.kind === 'active'){
-        const rec = recipes[r.recipeId] || {};
-        const perItem = rec.actionsRequired || 0;
-        bucket.active.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
-          progress: r.progress, recipeId: r.recipeId, recipeName: rec.name || '',
-          craftCount: r.craftCount,
-          actionsRequiredPerItem: perItem,
-          totalActionsRequired: perItem * (r.craftCount || 1),
-          craftedItem: outputsOf(r.recipeId, bucket.itemMap),
-          lockExpiration: r.lockMs ? new Date(r.lockMs).toISOString() : null,
-          isPublic: pub.has(r.entityId), completed: false, ...place(r) });
-      } else if (r.kind === 'passive'){
-        bucket.passive.push({ entityId: r.entityId, ownerEntityId: r.ownerId,
-          recipeId: r.recipeId, recipeName: (recipes[r.recipeId]||{}).name || '',
-          status: r.status, timestamp: new Date(r.startMs).toISOString(),
-          craftedItem: outputsOf(r.recipeId, bucket.itemMap), ...place(r) });
-      }
-    });
+  prog.forEach(r => {
+    const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
+    const rec = recipes[r.recipe_id] || {};
+    const perItem = rec.actionsRequired || 0;
+    bucket.active.push({ entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
+      progress: r.progress, recipeId: r.recipe_id, recipeName: rec.name || '',
+      craftCount: r.craft_count,
+      actionsRequiredPerItem: perItem,
+      totalActionsRequired: perItem * (r.craft_count || 1),
+      craftedItem: outputsOf(r.recipe_id, bucket.itemMap),
+      lockExpiration: r.lock_expiration ? new Date(r.lock_expiration).toISOString() : null,
+      isPublic: pub.has(String(r.entity_id)), completed: false, ...place(r) });
   });
-  try { Object.defineProperty(out, '_complete', { value: complete, enumerable: false }); } catch(e){}
+  pass.forEach(r => {
+    const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
+    // status is a raw Sum on the wire — [variantIdx, {}] — in the same variant order the BSATN reader used
+    const sIdx = Array.isArray(r.status) ? r.status[0] : r.status;
+    bucket.passive.push({ entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
+      recipeId: r.recipe_id, recipeName: (recipes[r.recipe_id]||{}).name || '',
+      status: ['queued','processing','complete'][sIdx] || 'queued',
+      timestamp: new Date(r.timestamp).toISOString(),
+      craftedItem: outputsOf(r.recipe_id, bucket.itemMap), ...place(r) });
+  });
+  // The cache is complete by construction here — liveComplete() gated entry, so the alert differ can
+  // trust this view the same way it trusted a 13/13 sweep.
+  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
