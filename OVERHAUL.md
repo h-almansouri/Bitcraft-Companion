@@ -550,19 +550,50 @@ then Rough Plank — a different thing every few seconds. And under 3.1, changin
 what we watch means hanging up and redialling all 13 sockets. Browsing ten items
 would mean ten full redials. Obviously wrong.
 
-Three ways out:
+### The root cause: Market is all-regions-then-filter-locally
 
-1. **Leave Market on HTTP.** You look at an order book for a few seconds; a fresh
-   fetch per item is equivalent to a live one, costs no sockets, and works today.
-2. **One dedicated extra socket** just for Market, redialled on each item click
-   (~250ms). Costs one from the budget and needs 8.3.1 care.
-3. **Subscribe only to a small pinned watchlist** — a bounded, stable filter that
-   fits the architecture cleanly.
+[index.html:6182](index.html:6182) fetches an item's orders across **every**
+region in one call and filters client-side; the region dropdown is a *display*
+filter that defaults to showing everything:
 
-**Lean: option 1.** "Live order book" sounds appealing but adds little when
-you're glancing at a price. Option 3 becomes the right answer *if* we ever want
-"alert me when someone undercuts my listing" — that's a genuinely live need with
-a naturally small filter.
+```js
+d = await apiFetch(`/api/market/${t1}/${id}`);
+const filterRegion = o => !marketSelectedRegion || String(o.regionId) === String(marketSelectedRegion);
+```
+
+So "the order book for one item" = 13 regions of rows, not one. That defeats the
+obvious fix (a dedicated ephemeral socket per viewed item): it'd need **13**
+extra sockets, i.e. 26 total, past the ~22 ceiling measured in 8.3 — where
+sockets hang silently and regions render as falsely empty.
+
+### Options
+
+1. **Leave Market on HTTP.** Works today, costs no sockets, no accumulation.
+2. **Ephemeral 14th socket per item.** Only viable if the tab is redesigned
+   around picking a region *first*. Budget is fine (14 ≪ 22); the blocker is the
+   tab's all-regions shape, not the socket count.
+3. **Additive subscribe** for the clicked item onto the 13 held sockets. No
+   redial and **~85ms** warm — *faster* than the HTTP path. But every item viewed
+   leaves an unretractable subscription, so sockets die after ~30 items browsed.
+   Boundable (redial all 13 every ~15 items, one ~530ms hiccup) — but that
+   reintroduces "breaks after N of something", the shape of most bugs this
+   overhaul exists to remove.
+4. **Pinned watchlist only** — bounded, stable filter; fits the architecture
+   cleanly.
+
+**Lean: option 1 for now.** Not because live order books are worthless, but
+because this tab's "watch everything, filter locally" shape is fundamentally at
+odds with subscriptions.
+
+Note the tab is a **hybrid regardless**: price history and stats have no backing
+table (5.1), so moving the order book to sockets adds a second data path rather
+than replacing one.
+
+Option 4 is the right answer if we ever want *"alert me when someone undercuts my
+listing"* — a genuinely live need with a naturally small filter. Option 2 becomes
+attractive only alongside a broader redesign that makes region a real selection,
+which would make the tab faster *and* subscribable — worth doing someday, not
+part of this overhaul.
 
 **Shopping List** — same story as Market. Lower priority; the bulk price POST
 already made it fast.
