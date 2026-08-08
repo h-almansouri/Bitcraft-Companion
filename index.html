@@ -2110,7 +2110,7 @@ async function loadSkillsInto(p, silent=false) {
     const rankP = apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}));
     let pData;
     try { pData = await fetchSkillsRelay(p.entityId); }
-    catch(e){ pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
+    catch(e){ if (bitjitaDisabled()) throw e; pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
     // Paint as soon as the XP is in, rather than waiting on ranks too. The relay read is ~84ms but the
     // rankings call is ~557ms cold (971 bytes — it's latency, not size), and blocking on it made the
     // whole tab five times slower to appear for one small "#12" beside each XP figure. Passing {} here
@@ -2562,6 +2562,7 @@ let ordersRunId = 0, craftRunId = 0;   // a superseded background revalidate mus
 const TAB_CACHE_KEY = 'bcTabCache', TAB_CACHE_TTL = 24*60*60*1000, TAB_CACHE_MAX = 300*1024;
 let _tabCacheSaveTimer = null;
 function hydrateTabCaches(){
+  if (bitjitaDisabled()) return;   // relay-only test: no instant-paint from last session — show the real gap
   try {
     const d = JSON.parse(localStorage.getItem(TAB_CACHE_KEY) || 'null');
     if (!d || !d.ts || (Date.now() - d.ts) > TAB_CACHE_TTL) return;
@@ -2673,6 +2674,7 @@ async function fetchPlayerMarketRelay(id){   // single-player wrapper
   return (await fetchMarketRelayMulti([id]))[String(id)] || { sellOrders: [], buyOrders: [], collections: [] };
 }
 async function fetchPlayerMarketBitjita(id){
+  if (bitjitaDisabled()) throw new Error('bitjita fallback disabled (relay-only test)');
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
     apiFetch(`/api/players/${id}/market-collections`).catch(() => ({ collections: [] })),
@@ -2952,8 +2954,9 @@ async function renderOrdersTab(silent, force){
   if (!batched){
     await Promise.all(toLoad.map(async p => {
       try { ordersByPlayer[p.entityId] = await fetchPlayerMarketBitjita(p.entityId); }
-      catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
-      if (myRun === ordersRunId) fillPlayerOrdersCached(p.entityId);
+      catch(e){ if (!bitjitaDisabled() && !ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
+      // Relay-only test with nothing yet: keep the spinner (see the crafts loop for why).
+      if (myRun === ordersRunId && (ordersByPlayer[p.entityId] || !bitjitaDisabled())) fillPlayerOrdersCached(p.entityId);
     }));
     if (myRun !== ordersRunId) return;
   }
@@ -3597,6 +3600,13 @@ const livePk = r => String(r.entity_id != null ? r.entity_id : (r.id != null ? r
 // a transition that happens during a reconnect gap only ever appears as changed state (§3.5).
 const liveListeners = new Set();
 function onLiveChange(cb){ liveListeners.add(cb); return () => liveListeners.delete(cb); }
+// ── TEST SWITCH: relay-only mode ──
+// setNoFallback(true) (from the console) disables every bitjita fallback — they THROW instead of
+// answering — and skips the bcTabCache instant-paint, so the app shows the honest pure-relay
+// experience: spinner until the snapshots land, then everything from the cache. Persisted in
+// localStorage so it survives the reload it triggers. setNoFallback(false) restores everything.
+function bitjitaDisabled(){ try { return localStorage.getItem('bc_no_fallback') === '1'; } catch(e){ return false; } }
+function setNoFallback(on){ try { if (on) localStorage.setItem('bc_no_fallback','1'); else localStorage.removeItem('bc_no_fallback'); } catch(e){} location.reload(); }
 let _livePendingEv = null;
 function liveNotify(evs){
   if (!_livePendingEv){ _livePendingEv = []; setTimeout(() => { const e = _livePendingEv; _livePendingEv = null; liveListeners.forEach(cb => { try { cb(e); } catch(err){} }); }, 40); }
@@ -3635,7 +3645,15 @@ function liveApplySnapshot(c, frame){
     evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
   });
   liveNotify(evs);
+  // The moment the LAST region's snapshot lands, ring the doorbells once: tabs that rendered (or
+  // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
+  if (!_liveCompleteKicked && liveComplete()){
+    _liveCompleteKicked = true;
+    craftFetchedAt = 0; ordersFetchedAt = 0;
+    _feedWant.crafts = true; _feedWant.orders = true; feedKick();
+  }
 }
+let _liveCompleteKicked = false;
 function liveApplyDelta(c, frame){
   const com = frame.status && frame.status.Committed;
   if (!com) return;
@@ -3682,6 +3700,7 @@ function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
   const key = ids.join(',');
   if (!ids.length){ liveStopAll(); return; }
+  if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
   liveRosterKey = key;
   BC_REGIONS.forEach((rg, i) => setTimeout(() => liveDial(rg), i * 40));   // stagger — 13 simultaneous handshakes is the cliff (§8.1)
 }
@@ -3872,6 +3891,7 @@ async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for 
   return out;
 }
 async function fetchPlayerCraftsBitjita(id){
+  if (bitjitaDisabled()) throw new Error('bitjita fallback disabled (relay-only test)');
   const [acData, pcData] = await Promise.all([
     apiFetch(`/api/players/${id}/crafts?completed=all`),
     apiFetch(`/api/players/${id}/passive-crafts?status=all`),
@@ -4124,8 +4144,10 @@ async function renderCraftingTab(silent, force) {
     if (!batched){
       await Promise.all(toLoad.map(async p => {
         try { craftByPlayer[p.entityId] = await fetchPlayerCraftsBitjita(p.entityId); }
-        catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
-        if (myRun === craftRunId) fillPlayerCraftCached(p.entityId);
+        catch(e) { if (!bitjitaDisabled() && !craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
+        // Relay-only test with nothing yet: keep the spinner — the live layer's completion kick will
+        // re-render the moment the cache is whole, and "No crafts" before that would be a lie.
+        if (myRun === craftRunId && (craftByPlayer[p.entityId] || !bitjitaDisabled())) fillPlayerCraftCached(p.entityId);
       }));
       if (myRun !== craftRunId) return;
     }
@@ -5084,7 +5106,7 @@ async function fetchPlayerInvRelay(id){
 // The relay covers everything (personal, banks, house storage, vehicles); the bitjita path below is
 // only a fallback for when the relay is unreachable.
 async function fetchPlayerInv(id) {
-  try { return await fetchPlayerInvRelay(id); } catch(e){ /* relay down → fall back to bitjita */ }
+  try { return await fetchPlayerInvRelay(id); } catch(e){ if (bitjitaDisabled()) throw e; /* relay down → fall back to bitjita */ }
   const [d, housingList] = await Promise.all([
     apiFetch(`/api/players/${id}/inventories`),
     apiFetch(`/api/players/${id}/housing`).catch(() => [])
@@ -5198,7 +5220,7 @@ async function loadTasks(id, silent=false) {
     if (silent && isPlayerPaused(p.entityId) && taskPlayersById[p.entityId]) return; // keep cached for paused
     try {
       const [taskData, inv] = await Promise.all([
-        fetchTasksRelay(p.entityId).catch(() => apiFetch(`/api/players/${p.entityId}/traveler-tasks`)),
+        fetchTasksRelay(p.entityId).catch(e => { if (bitjitaDisabled()) throw e; return apiFetch(`/api/players/${p.entityId}/traveler-tasks`); }),
         fetchPlayerInv(p.entityId)
       ]);
       taskPlayersById[p.entityId] = { player: p, travTasks: taskData.tasks || [], itemMetaMap: {...(taskData.items||{}), ...(taskData.cargo||{})}, expires: taskData.expirationTimestamp, inv };
