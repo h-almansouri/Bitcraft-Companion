@@ -423,8 +423,11 @@ server-side to cut volume.
 ### 5.1.2 The lesson
 
 My "is it an event or is it state?" heuristic produced two wrong answers in a
-row. **BitCraft records plenty of events as rows.** The only reliable test is to
-search the schema:
+row — and a third followed during the build: I claimed region display names
+needed HTTP (`/api/regions`), but **`world_region_name_state` [Public] carries
+each mirror's own name** (`{id:0, player_facing_name:"Zephra"}`, one row per
+region). It's now part of the standard query set. **BitCraft records plenty of
+events as rows.** The only reliable test is to search the schema:
 
 ```
 GET https://relay.bitcraftsync.app:30NN/v1/database/bitcraft-live-NN/schema?version=9

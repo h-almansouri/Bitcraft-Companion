@@ -2631,11 +2631,8 @@ async function fetchMarketRelayMulti(ids){
     if (cid !== '0' && !relayClaimNames[cid]) (unknown[r.__region] || (unknown[r.__region] = new Set())).add(cid);
   });
   await Promise.all(Object.keys(unknown).map(rg => relayResolveClaims(+rg, [...unknown[rg]]).catch(() => {})));
-  // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
-  // location headers keep reading "Ba Sing Se · Zephra (R19)" instead of falling back to a bare R19.
-  if (typeof marketRegions !== 'undefined' && !marketRegions.length){
-    try { const d = await apiFetch('/api/regions'); const rs = Array.isArray(d) ? d : (d.regions||[]); if (rs.length) marketRegions = rs; } catch(e){}
-  }
+  // Region display names ("Zephra") come from the cache too — world_region_name_state, one row per
+  // mirror — so no /api/regions call. (marketRegions, if some other tab loaded it, is only a fallback.)
   const regionName = {};
   (typeof marketRegions !== 'undefined' ? marketRegions : []).forEach(r => { regionName[r.regionId] = r.regionName; });
   const sumIdx = v => Array.isArray(v) ? v[0] : (+v || 0);   // Sum on the wire = [variantIdx, payload]; plain ints pass through
@@ -2652,7 +2649,7 @@ async function fetchMarketRelayMulti(ids){
     return { entityId: String(r.entity_id), ownerEntityId: String(r.owner_entity_id),
       claimEntityId: cid !== '0' ? cid : null,
       claimName: (cid !== '0' && relayClaimNames[cid]) || null,
-      regionId: rg, regionName: regionName[rg] || null,
+      regionId: rg, regionName: liveRegionName(rg) || regionName[rg] || null,
       itemId: String(itemId), itemType,
       itemName: meta.name || ('Item ' + itemId), tier: meta.tier != null ? meta.tier : 0,
       rarityStr: meta.rarityStr || '', tag: meta.tag || '', iconAssetName: meta.iconAssetName || '',
@@ -3553,6 +3550,7 @@ const LIVE_COLS = {
   signed_in_player_state: ['entity_id'],
   traveler_task_state: ['entity_id','player_entity_id','traveler_id','task_id','completed'],
   claim_state: ['entity_id','owner_player_entity_id','owner_building_entity_id','name','neutral'],
+  world_region_name_state: ['id','player_facing_name','module_name_prefix'],
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
   inventory_state: ['entity_id','pockets','inventory_index','cargo_index','owner_entity_id','player_owner_entity_id'],
 };
@@ -3689,9 +3687,18 @@ function liveQuerySet(ids){
       ...LIVE_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
       ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
       ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
+      // Unfiltered but bounded (§8.4): exactly ONE row per mirror — each region's own display name
+      // ("Zephra"). Replaces the /api/regions HTTP call for naming, and never changes.
+      'SELECT * FROM world_region_name_state',
     ],
-    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL],
+    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'world_region_name_state'],
   };
+}
+// Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
+function liveRegionName(rg){
+  const t = liveCache.world_region_name_state, m = t && t[rg];
+  if (m) for (const row of m.values()) if (row && row.player_facing_name) return row.player_facing_name;
+  return null;
 }
 // (Re)start the layer. Idempotent for an unchanged roster; a changed roster is a full redial of every
 // region (§3.2) — the ONE code path for add, remove, and boot. The cache keeps rendering throughout;
@@ -3836,17 +3843,23 @@ async function fetchCraftsRelayMulti(ids){
     const bid = String(r.building_entity_id || '0');
     const b = relayBuildingInfo[bid] || { claimId:'0', descId:0, nickname:'' };
     const claimId = b.claimId && b.claimId !== '0' ? b.claimId : null;
+    const rg = regionOfEntity(claimId || r.entity_id);
     return {
       buildingEntityId: bid,
       buildingName: b.nickname || defs.buildings[b.descId] || 'Unknown Building',
       claimEntityId: claimId,
       claimName: (claimId && relayClaimNames[claimId]) || null,
-      regionId: regionOfEntity(claimId || r.entity_id)
+      regionId: rg,
+      regionName: liveRegionName(rg)   // bitjita rows carry this pre-joined; without it the "Zephra" subtitle vanished at handoff
     };
   };
   const outputsOf = (recipeId, itemMap) => {
+    // The game's own crafted_item_stacks[0] wins: the scraped craftingData pre-expands bundle items
+    // into their contents (recipe 210018 really crafts "Simple Wispweave Products", not Seeds+Filament),
+    // and headlining a different item than bitjita made the card flicker names at the fallback handoff.
+    const t = defs.recipeOuts && defs.recipeOuts[recipeId];
     const rec = recipes[recipeId];
-    const outs = (rec && rec.outputs) || [];
+    const outs = t ? [{ itemId: t[0], quantity: t[1] }] : ((rec && rec.outputs) || []);
     outs.forEach(o => { const m = defs.items[o.itemId] || defs.cargos[o.itemId]; if (m) itemMap[o.itemId] = m; });
     return outs.map(o => ({ item_id: o.itemId, quantity: o.quantity, item_type: 0 }));
   };
@@ -4719,9 +4732,10 @@ async function loadGameItemDefs(){
   if (gameItemDefs) return gameItemDefs;
   if (_gameItemDefsP) return _gameItemDefsP;
   _gameItemDefsP = (async () => {
-    const d = await apiFetch('/itemdefs?v=bld1');   // compact [name, tier, rarityIdx, tag, icon]; ?v busts the 24h browser cache when the payload gains fields
+    const d = await apiFetch('/itemdefs?v=rout1');   // compact [name, tier, rarityIdx, tag, icon]; ?v busts the 24h browser cache when the payload gains fields
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
-    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {} };
+    gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
+      recipeOuts: d.recipeOuts || {} };   // recipeId -> [headlineItemId, qty] — the game's own crafted_item_stacks[0]
     _gameItemDefsP = null; return gameItemDefs;
   })();
   return _gameItemDefsP;

@@ -278,17 +278,33 @@ function slimBuildings(rows) {
   (Array.isArray(rows) ? rows : []).forEach(x => { if (x && x.id != null && x.name) out[x.id] = x.name; });
   return out;
 }
+// crafting_recipe_desc → { recipeId: [headlineItemId, qty] } — the game's OWN crafted_item_stacks[0].
+// The scraped craftingData.json lies about some outputs: it pre-expands bundle items into their
+// contents (e.g. recipe 210018 "Husk into {0}" really crafts 1x "Simple Wispweave Products" 2220023,
+// but the scrape lists Seeds x3 + Filament x3 — the bundle's UNPACKED contents). bitjita headlines the
+// real stack, so the crafts tab flickered between names as the fallback handed over to the relay path.
+// This map is the authoritative headline; the scraped outputs stay for the Planner's crafting trees.
+// Stack shape (SATS): [item_id, quantity, [type_variant, []], [durability...]] — only [0] and [1] matter.
+function slimRecipeOuts(rows) {
+  const out = {};
+  (Array.isArray(rows) ? rows : []).forEach(x => {
+    const s = x && Array.isArray(x.crafted_item_stacks) ? x.crafted_item_stacks[0] : null;
+    if (x && x.id != null && Array.isArray(s) && s[0] != null) out[x.id] = [s[0], +s[1] || 1];
+  });
+  return out;
+}
 async function getItemDefs() {
   if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
   itemDefsBuilding = (async () => {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings) { itemDefs = d; itemDefsBuilding = null; return d; }
+      // recipeOuts must be non-empty — a build whose recipes fetch failed writes {} and must not stick for 7 days
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
-      const [items, cargos, equip, buildings] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings) };
+      const [items, cargos, equip, buildings, recipes] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => [])]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes) };
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
@@ -449,7 +465,7 @@ http.createServer((req, res) => {
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
       // Hand-rolled rather than via sendJson because this route carries its own ETag/Cache-Control.
       // It's ~1MB of name/icon lookups, so it's the single biggest response the app requests.
-      const body = Buffer.from(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {} }));
+      const body = Buffer.from(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {}, recipeOuts: d.recipeOuts || {} }));
       const hdr = { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' };
       if (wantsGzip(req)){
         return zlib.gzip(body, (err, gz) => {
