@@ -1658,8 +1658,7 @@ function refreshPlayerTabs() {
   // it so it reloads; tracked selections re-resolve from their persisted (owner-aware) names.
   invData = null; plannerTrackedInvs = null; toolTrackedInvs = null; plannerInvMap = {};
   ordersFetchedAt = 0; craftFetchedAt = 0;   // roster changed → the cached tabs must refetch, not short-circuit
-  if (typeof startRelayFeed === 'function') startRelayFeed();       // re-scope the live feed to the new roster (stops it when empty)
-  if (typeof startRelayKeepWarm === 'function') startRelayKeepWarm();   // a first-tracked player needs the pool warmed now
+  if (typeof liveStart === 'function') liveStart();   // roster changed → full redial with the new query set (§3.2); stops the layer when empty
   if (!trackedPlayers.length) {
     ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
   }
@@ -1733,8 +1732,9 @@ function togglePlayerMonitor(id, iconEl){
   const nowPaused = !playerPaused.has(id);
   if (nowPaused) playerPaused.add(id); else playerPaused.delete(id);
   savePlayerPaused();
-  if (typeof startRelayFeed === 'function') startRelayFeed();   // paused players drop out of the live feed
-  if (typeof startAlerts === 'function') startAlerts();         // …and out of alertsEnabled(), so re-arm on resume
+  // (No liveStart here: the layer covers ALL tracked players, so pause/unpause never redials — the
+  //  alert/monitor code filters paused players itself.)
+  if (typeof startAlerts === 'function') startAlerts();         // paused players drop out of alertsEnabled(), so re-arm on resume
   if (!iconEl) return;
   iconEl.className = 'ti ti-'+(nowPaused?'player-play':'player-pause')+' psec-mon';
   iconEl.title = nowPaused ? 'Resume monitoring' : 'Stop monitoring (pause live refresh)';
@@ -2649,7 +2649,6 @@ async function fetchMarketRelayMulti(ids){
   ));
   if (!ok) throw new Error('relay unreachable');
   const complete = ok === BC_REGIONS.length;   // see the caller: a partial sweep must not blank a player's orders
-  noteFeedRegions(per.filter(x => x.rows.length).map(x => x.rg));   // …and wherever their orders are
   per.forEach(({ rows }) => rows.forEach(r => { if (r.kind === 'claim') relayClaimNames[r.id] = r.name; }));
   saveRelayPlaces();
   // Region display names ("Zephra") aren't in the mirror; reuse the cached /api/regions list so the
@@ -3539,6 +3538,241 @@ function saveRelayPlaces(){
     try { localStorage.setItem(RELAY_PLACE_CACHE_KEY, JSON.stringify({ ts: Date.now(), buildings: relayBuildingInfo, claims: relayClaimNames })); } catch(e){}
   }, 1500);
 }
+
+// ═══════════════ LIVE LAYER — 13 held sockets, one Subscribe each, feeding a client cache ═══════════════
+// (See OVERHAUL.md.) The relay speaks subscriptions: one Subscribe returns a snapshot AND a live delta
+// stream on the same socket. The legacy code below treats it as request/response — subscribe, read the
+// snapshot, walk away — which leaks an unretractable server-side subscription per query; after ~30 of
+// those a socket stops delivering deltas while still answering snapshots (measured). This layer uses the
+// protocol as designed: one socket per region, ONE Subscribe covering everything that region needs for
+// the tracked roster, held for the whole session. Rows land in liveCache; tabs render from the cache and
+// deltas patch it. A socket is redialled only when it dies or the roster changes — never on a timer,
+// never on tab switch (§3.1). Protocol is v1.json.spacetimedb — chosen for its benign failure mode over
+// v2 BSATN's silent column-drift (§4.5). Two wire traps are handled in liveRow:
+//   §4.4 — JSON.parse silently corrupts u64 entity ids (they exceed MAX_SAFE_INTEGER): every row is
+//          regex-quoted first, so ids come through as exact strings (what Map keys want anyway).
+//   §4.3 — snapshots encode rows as NAMED OBJECTS, deltas as POSITIONAL ARRAYS whose positions match the
+//          snapshot's key order. Orders are captured from snapshots; LIVE_COLS (generated from the
+//          relay's /schema, 2026-08-08) covers a delta arriving for a table whose snapshot was empty.
+const LIVE_COLS = {
+  progressive_action_state: ['entity_id','building_entity_id','function_type','progress','recipe_id','craft_count','last_crit_outcome','owner_entity_id','lock_expiration','preparation'],
+  passive_craft_state: ['entity_id','owner_entity_id','recipe_id','building_entity_id','timestamp','status','slot'],
+  public_progressive_action_state: ['entity_id','building_entity_id','owner_entity_id'],
+  sell_order_state: ['entity_id','owner_entity_id','claim_entity_id','item_id','item_type','price_threshold','quantity','timestamp','stored_coins'],
+  buy_order_state: ['entity_id','owner_entity_id','claim_entity_id','item_id','item_type','price_threshold','quantity','timestamp','stored_coins'],
+  closed_listing_state: ['entity_id','owner_entity_id','claim_entity_id','item_stack','timestamp'],
+  stamina_state: ['entity_id','last_stamina_decrease_timestamp','stamina'],
+  experience_state: ['entity_id','experience_stacks'],
+  character_stats_state: ['entity_id','values'],
+  active_buff_state: ['entity_id','active_buffs'],
+  equipment_state: ['entity_id','equipment_slots'],
+  equipment_preset_state: ['entity_id','player_entity_id','index','active','equipment_slots'],
+  signed_in_player_state: ['entity_id'],
+  traveler_task_state: ['entity_id','player_entity_id','traveler_id','task_id','completed'],
+  claim_state: ['entity_id','owner_player_entity_id','owner_building_entity_id','name','neutral'],
+  storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
+  inventory_state: ['entity_id','pockets','inventory_index','cargo_index','owner_entity_id','player_owner_entity_id'],
+};
+// Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
+// {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
+const LIVE_TS = {
+  progressive_action_state: ['lock_expiration'], passive_craft_state: ['timestamp'],
+  sell_order_state: ['timestamp'], buy_order_state: ['timestamp'], closed_listing_state: ['timestamp'],
+  stamina_state: ['last_stamina_decrease_timestamp'], storage_log_state: ['timestamp'],
+};
+const liveCache = {};      // table -> region -> Map(pk -> row)   Sum-typed fields stay raw ([variantIdx, payload]).
+const liveColOrder = {};   // table -> key order captured from a snapshot row (authoritative; overrides LIVE_COLS)
+const liveConns = {};      // region -> { ws, key, tables, status, backoff, snapshotTs, timer, closed }
+let liveRosterKey = '';    // roster fingerprint the current subscriptions cover
+const _liveColWarned = {};
+function liveOn(){ return liveRosterKey !== ''; }
+const liveMicrosToMs = v => {
+  if (v == null) return null;
+  if (typeof v === 'object') v = Array.isArray(v) ? v[0] : v.__timestamp_micros_since_unix_epoch__;
+  const n = Number(v); return isFinite(n) ? Math.floor(n / 1000) : null;
+};
+// One row string → named object. Every insert AND delete goes through here — deletes must decode too,
+// or a completed craft's row could never be removed from the cache (§2.3.2).
+function liveRow(table, raw){
+  let v;
+  try { v = JSON.parse(raw.replace(/([\[,:])\s*(-?\d{16,})/g, '$1"$2"')); }
+  catch(e){ try { v = JSON.parse(raw); } catch(e2){ return null; } }   // quoting broke it (16+ digits inside a string) → ids may round but the row survives
+  if (Array.isArray(v)){
+    const cols = liveColOrder[table] || LIVE_COLS[table];
+    if (!cols || cols.length !== v.length){
+      if (!_liveColWarned[table]){ _liveColWarned[table] = true; console.warn('[live] cannot name delta for', table, '— cols', cols ? cols.length : 'unknown', 'vs', v.length); }
+      return null;
+    }
+    const o = {}; cols.forEach((c, i) => o[c] = v[i]); v = o;
+  } else if (!liveColOrder[table]){
+    liveColOrder[table] = Object.keys(v);
+  }
+  (LIVE_TS[table] || []).forEach(c => { if (c in v) v[c] = liveMicrosToMs(v[c]); });
+  return v;
+}
+const livePk = r => String(r.entity_id != null ? r.entity_id : (r.id != null ? r.id : r.scheduled_id));
+// ── Change notification: coalesced per ~40ms burst (one game action lands as several table updates).
+// Listeners get [{table, region, isDelta, rows, deletes}] and typically re-read the cache; row-level
+// consumers (progress bars) use ev.rows directly. Alerts must DIFF THE CACHE, not watch these events —
+// a transition that happens during a reconnect gap only ever appears as changed state (§3.5).
+const liveListeners = new Set();
+function onLiveChange(cb){ liveListeners.add(cb); return () => liveListeners.delete(cb); }
+let _livePendingEv = null;
+function liveNotify(evs){
+  if (!_livePendingEv){ _livePendingEv = []; setTimeout(() => { const e = _livePendingEv; _livePendingEv = null; liveListeners.forEach(cb => { try { cb(e); } catch(err){} }); }, 40); }
+  _livePendingEv.push(...evs);
+}
+// Read API — every region's slice of a table, optionally filtered. Tabs build their view from this.
+function liveRows(table, pred){
+  const out = [], t = liveCache[table];
+  if (t) Object.keys(t).forEach(rg => t[rg].forEach(r => { if (!pred || pred(r)) out.push(r); }));
+  return out;
+}
+function liveStatus(){
+  const out = {};
+  Object.keys(liveConns).forEach(rg => { const c = liveConns[rg]; out[rg] = { status: c.status, snapshotTs: c.snapshotTs }; });
+  return out;
+}
+// Have all dialled regions delivered a snapshot? (Callers that need a COMPLETE view — the alert differ —
+// check this instead of trusting whatever's arrived so far; a partial view isn't wrong, just incomplete.)
+function liveComplete(){
+  const rgs = Object.keys(liveConns);
+  return rgs.length > 0 && rgs.every(rg => liveConns[rg].snapshotTs > 0 && liveConns[rg].status === 'live');
+}
+function liveApplySnapshot(c, frame){
+  const fresh = {};
+  ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
+    const m = new Map();
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) m.set(livePk(r), r); }));
+    fresh[t.table_name] = m;
+  });
+  // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
+  // snapshot didn't mention it), so rows from before a reconnect can never linger.
+  const evs = [];
+  c.tables.forEach(tb => {
+    const slice = fresh[tb] || new Map();
+    (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
+    evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
+  });
+  liveNotify(evs);
+}
+function liveApplyDelta(c, frame){
+  const com = frame.status && frame.status.Committed;
+  if (!com) return;
+  const evs = [];
+  (com.tables || []).forEach(t => {
+    const tb = t.table_name;
+    const byRegion = liveCache[tb] || (liveCache[tb] = {});
+    const slice = byRegion[c.region] || (byRegion[c.region] = new Map());
+    const ins = [], del = [];
+    (t.updates || []).forEach(u => {
+      // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
+      // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.set(livePk(r), r); ins.push(r); } });
+    });
+    if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
+  });
+  if (evs.length) liveNotify(evs);
+}
+// ── Connection lifecycle ──
+// The roster is ALL tracked players (not just unpaused): tabs render paused players too, so their rows
+// must be in the cache — pausing only mutes alerts/monitoring, which filter elsewhere. This also means
+// pause/unpause never redials (the key doesn't change).
+const LIVE_TABLES_OWNED = ['progressive_action_state','passive_craft_state','public_progressive_action_state','sell_order_state','buy_order_state','closed_listing_state'];
+const LIVE_TABLES_SELF  = ['stamina_state','experience_state','character_stats_state','active_buff_state','equipment_state','signed_in_player_state'];
+const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state'];   // filter column is player_entity_id
+function liveQuerySet(ids){
+  const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
+  const self  = ids.map(i => `entity_id = ${i}`).join(' OR ');
+  const pcol  = ids.map(i => `player_entity_id = ${i}`).join(' OR ');
+  return {
+    sqls: [
+      ...LIVE_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
+      ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
+      ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
+    ],
+    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL],
+  };
+}
+// (Re)start the layer. Idempotent for an unchanged roster; a changed roster is a full redial of every
+// region (§3.2) — the ONE code path for add, remove, and boot. The cache keeps rendering throughout;
+// only updates pause for the ~1s the redials take.
+function liveStart(){
+  const ids = trackedPlayers.map(p => String(p.entityId)).sort();
+  const key = ids.join(',');
+  if (!ids.length){ liveStopAll(); return; }
+  liveRosterKey = key;
+  BC_REGIONS.forEach((rg, i) => setTimeout(() => liveDial(rg), i * 40));   // stagger — 13 simultaneous handshakes is the cliff (§8.1)
+}
+function liveStopAll(){
+  Object.keys(liveConns).forEach(rg => liveDrop(rg));
+  liveRosterKey = '';
+}
+function liveDrop(rg){
+  const c = liveConns[rg];
+  if (!c) return;
+  c.closed = true; clearTimeout(c.timer);
+  try { c.ws && c.ws.close(); } catch(e){}
+  delete liveConns[rg];
+}
+function liveDial(rg){
+  const ex = liveConns[rg];
+  if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
+  if (ex) liveDrop(rg);
+  const ids = liveRosterKey.split(',');
+  const { sqls, tables } = liveQuerySet(ids);
+  const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
+  liveConns[rg] = c;
+  liveOpen(c);
+}
+function liveOpen(c){
+  if (c.closed || c.key !== liveRosterKey) return;
+  let ws;
+  try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
+  catch(e){ return liveReschedule(c); }
+  c.ws = ws; c.status = 'connecting';
+  // §8.3 stuck-CONNECTING watchdog: past the browser's ~22-socket SHARED budget a socket hangs in
+  // CONNECTING forever with no event — the region would render as genuinely empty. Surface it and keep
+  // retrying; the moment budget frees (other app tab closed), a redial succeeds instantly.
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => {
+    if (ws.readyState === 0){
+      c.status = 'blocked';
+      console.warn(`[live] r${c.region} stuck CONNECTING — socket budget exhausted (is the app open in another tab?)`);
+      try { ws.close(); } catch(e){}
+    }
+  }, 15000);
+  ws.onopen = () => {
+    c.status = 'open'; c.backoff = 1500; clearTimeout(c.timer);
+    try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
+  };
+  ws.onmessage = ev => {
+    if (typeof ev.data !== 'string') return;
+    let m; try { m = JSON.parse(ev.data); } catch(e){ return; }   // outer frame is safe to parse plainly — rows are still strings inside it
+    if (m.InitialSubscription){ c.status = 'live'; c.snapshotTs = Date.now(); liveApplySnapshot(c, m.InitialSubscription); }
+    else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
+    // IdentityToken (first frame) and anything unrecognised: ignore.
+  };
+  ws.onerror = () => { try { ws.close(); } catch(e){} };
+  ws.onclose = () => {
+    c.ws = null;
+    if (c.closed || c.key !== liveRosterKey) return;
+    c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
+    liveReschedule(c);
+  };
+}
+function liveReschedule(c){
+  if (c.closed || c.key !== liveRosterKey) return;
+  // §3.3: backoff with JITTER — a network blip drops all 13 at once, and 13 synchronized redials is the cliff.
+  const wait = Math.min(c.backoff *= 2, 60000) * (0.5 + Math.random());
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => liveOpen(c), wait);
+}
+// Console/debug handle (not a public API): window.__live.status() etc.
+window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
+// ═══════════════ end LIVE LAYER core ═══════════════
+
 // progressive_action_state (fixed 53B) — the full row, including the lock the Active/Idle chip needs.
 function readProgFull(r){
   const entityId = r.u64().toString(), buildingId = r.u64().toString();
@@ -3614,7 +3848,6 @@ async function fetchCraftsRelayMulti(ids){
   if (!perRegion.some(x => x.ok)) throw new Error('relay unreachable');
   const complete = perRegion.every(x => x.ok);   // did EVERY region answer? see the caller for why it matters
   const hits = perRegion.filter(x => x.rows.length);
-  noteFeedRegions(hits.map(x => x.rg));   // widen the live feed to wherever this player's crafts actually are
   // resolve place names region by region (cached, so this is a no-op on later refreshes)
   await Promise.all(hits.map(({ rg, rows }) => {
     const bIds = [...new Set(rows.filter(r => r.buildingId && r.buildingId !== '0').map(r => r.buildingId))];
@@ -3705,44 +3938,8 @@ function fillPlayerCraftCached(entityId) {
   const b = document.getElementById('psec-craft-' + entityId);
   if (b) b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
 }
-// ── Live active-craft progress — direct from the relay WebSocket (progressive_action_state) ──
-// While viewing the Crafts tab (Active), we hold one persistent subscription per region, scoped to the
-// tracked owners crafting there, and patch each card as the game streams progress ticks (~1-2/sec while
-// someone works a station). Browser↔relay is direct, so unlike the old SSE→live.bitjita path this costs
-// our host nothing. The relay firehose proved it pushes these deltas in real time.
+// ── Live craft-progress bookkeeping (fed by the live layer's bridge below) ──
 let bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
-// progressive_action_state row (fixed 53B): entity u64, building u64, function i32, progress i32,
-// recipe i32, craft_count i32, last_crit i32, owner u64, lock_expiration i64(micros), preparation bool.
-function readProgRow(r){
-  const entityId = r.u64();
-  r.u64(); r.i32();                      // building_entity_id, function_type
-  const progress = r.i32();
-  r.i32(); r.i32(); r.i32();             // recipe_id, craft_count, last_crit_outcome
-  const owner = r.u64();
-  return { entityId: entityId.toString(), progress, ownerId: owner.toString() };
-}
-// A TransactionUpdate (tag 4) carries, per table, a delete list then an insert list. Each row gets its
-// own reader, and the table name is passed through like relayDecodeRows does, so one subscription can
-// span several tables — the live feed needs to know WHICH table changed, not just that something did.
-function relayDecodeDelta(b, rowFn){
-  const r = bsRead(b); r.o = 2; r.u32(); r.u32();
-  const nT = r.u32(); const rows = [];
-  for (let t=0;t<nT;t++){
-    const table = r.str();
-    const nUpd = r.u32();
-    for (let u=0;u<nUpd;u++){
-      r.u8();                            // CompressableQueryUpdate tag (0 = uncompressed)
-      for (let L=0;L<2;L++){             // deletes, then inserts
-        const hint = r.u8(); let fixed = 0, offsets = null;
-        if (hint === 0) fixed = r.u16(); else { const n = r.u32(); offsets = []; for (let i=0;i<n;i++) offsets.push(Number(r.u64())); }
-        const data = r.sub(r.u32());
-        const starts = offsets || (fixed ? Array.from({length:Math.floor(data.length/fixed)},(_,i)=>i*fixed) : []);
-        for (let i=0;i<starts.length;i++){ const end=(i+1<starts.length)?starts[i+1]:data.length; try{ rows.push(rowFn(bsRead(data.subarray(starts[i],end)), table)); }catch(e){} }
-      }
-    }
-  }
-  return rows;
-}
 // Progress only ever climbs within a craft, so taking the max across the delete+insert lists per entity
 // gives the current value without reasoning about ordering (verified against the live firehose).
 function craftProgressLatest(rows){
@@ -3750,51 +3947,13 @@ function craftProgressLatest(rows){
   rows.forEach(x => { if (!x || x.entityId == null) return; const c = latest[x.entityId]; if (!c || x.progress > c.progress) latest[x.entityId] = x; });
   return Object.values(latest);
 }
-// ── LIVE FEED — one dedicated socket per region, held for the whole session ──
-// Replaces the old per-tab craft-progress stream. Two reasons it gets its own sockets rather than
-// sharing the query pool:
-//   1. A query leaves its subscription registered forever and they accumulate — measured, a socket that
-//      had served 30 queries delivered ZERO further TransactionUpdates while still answering snapshots
-//      perfectly. The pool works around that by recycling sockets (RELAY_MAX_SUBS); a feed sharing them
-//      would be blinded every recycle, and a craft started in that gap would be missed.
-//   2. Nothing is ever queried here, so nothing accumulates and this socket never needs recycling.
-// It also covers MORE than the old stream: passive crafts and market orders, not just active-craft
-// progress, and it runs regardless of which tab you're on — so a started craft appears immediately
-// instead of waiting for the tab's 10s poll (and previously appearing not at all, since the old stream
-// only patched cards that already existed and never even connected for a player with nothing running).
-// Tables filtered by owner_entity_id (things the player OWNS) vs entity_id (the player THEMSELF).
-const FEED_TABLES_OWNED  = ['progressive_action_state','passive_craft_state','sell_order_state','buy_order_state'];
-const FEED_TABLES_SELF   = ['stamina_state','experience_state','active_buff_state','character_stats_state'];
-let feedConns = {}, feedKey = '', _feedTimer = null, _feedWant = { crafts:false, orders:false };
-// Row layouts taken from the relay's own schema (/v1/database/<db>/schema), not guessed:
-//   stamina_state       { entity_id u64, last_stamina_decrease_timestamp {i64}, stamina f32 }
-//   experience_state    { entity_id u64, experience_stacks Array<{ skill_id i32, quantity i32 }> }
-//   active_buff_state   { entity_id u64, active_buffs Array<…> }  ← only the id matters; it's a trigger
-function readStaminaRow(r){ const id = r.u64(); r.i64(); return { entityId: id.toString(), stamina: r.f32() }; }
+let _feedTimer = null, _feedWant = { crafts:false, orders:false };
+// readExperienceRow outlives the feed it was written for: fetchSkillsRelay still decodes BSATN rows
+// with it until the Experience tab migrates onto the cache.
 function readExperienceRow(r){
   const id = r.u64(); const n = r.u32(); const stacks = [];
   for (let i=0;i<n;i++) stacks.push({ skill_id: r.i32(), quantity: r.i32() });
   return { entityId: id.toString(), stacks };
-}
-//   character_stats_state { entity_id u64, values Array<f32> } — carries MAX stamina at [1]. Verified
-//   identical to the array bitjita's /stats returns (same 87 floats, same order), which is where this
-//   used to come from over REST purely because stamina_state alone has no maximum in it.
-function readStatsRow(r){
-  const id = r.u64(); const n = r.u32(); const vals = [];
-  for (let i=0;i<n;i++) vals.push(r.f32());
-  return { entityId: id.toString(), values: vals };
-}
-// Only rows we actually act on get decoded; the rest are pure "something changed" signals. Each row gets
-// its own reader, so returning early without consuming it is safe.
-function feedRow(r, table){
-  try {
-    if (table === 'progressive_action_state') return { table, ...readProgRow(r) };
-    if (table === 'stamina_state')            return { table, ...readStaminaRow(r) };
-    if (table === 'character_stats_state')    return { table, ...readStatsRow(r) };
-    if (table === 'experience_state')         return { table, ...readExperienceRow(r) };
-    if (table === 'active_buff_state')        return { table, entityId: r.u64().toString() };
-  } catch(e){ return { table }; }
-  return { table };
 }
 function feedKnownCraftIds(){
   const s = new Set();
@@ -3812,111 +3971,50 @@ function feedKick(){
     // Not on that tab? Clearing the stamp is enough — re-entry revalidates instead of serving a stale cache.
   }, 500);   // coalesce a burst; one game action often lands as several table updates at once
 }
-function onFeedRows(rows, isDelta){
-  // 1. progress ticks keep patching the bars in place, exactly as the old stream did
-  const prog = craftProgressLatest(rows.filter(x => x && x.table === 'progressive_action_state'));
-  prog.forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, isDelta));
-  // 2. player state — what the /live SSE used to carry, now straight from the relay. Fed on the SNAPSHOT
-  //    too: stamina and XP are current values rather than events, so the opening frame is real data and
-  //    seeds the baselines the alerts compare against.
-  // Max stamina FIRST: onLiveStamina compares current against it, and in a snapshot both tables arrive
-  // in the same frame, so applying stats first means the very first stamina row already has its ceiling.
-  rows.forEach(x => {
-    if (x && x.table === 'character_stats_state' && x.entityId && x.values && x.values.length > 1)
-      liveStaminaMax[x.entityId] = { max: x.values[1], ts: Date.now() };
+// ── Bridge: live-layer cache events → the existing per-value handlers ──
+// Same semantics the old dedicated feed had, now driven by the held subscriptions. Stamina/XP/max are
+// applied from SNAPSHOTS too (they're current values, so the opening frame seeds the alert baselines);
+// buffs and the crafts/orders doorbells fire only on genuine deltas.
+function liveBridge(evs){
+  // Max stamina FIRST: onLiveStamina compares current against it, and a snapshot delivers both tables
+  // in the same burst — applying stats first means the first stamina row already has its ceiling.
+  evs.forEach(ev => {
+    if (ev.table === 'character_stats_state') ev.rows.forEach(r => {
+      if (r.entity_id && (r.values || []).length > 1) liveStaminaMax[r.entity_id] = { max: r.values[1], ts: Date.now() };
+    });
   });
-  rows.forEach(x => {
-    if (!x || !x.entityId) return;
-    if (x.table === 'stamina_state')         onLiveStamina(x.entityId, { stamina: x.stamina });
-    else if (x.table === 'experience_state') onLiveExperience(x.entityId, x.stacks);
-    else if (x.table === 'active_buff_state' && isDelta) onLiveBuffs(x.entityId);   // trigger only; re-checks over REST
+  evs.forEach(ev => {
+    if (ev.table === 'progressive_action_state'){
+      // dedupe to the furthest progress per craft, exactly as the old stream did
+      craftProgressLatest(ev.rows.map(r => ({ entityId: r.entity_id, progress: r.progress })))
+        .forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, ev.isDelta));
+    } else if (ev.table === 'stamina_state'){
+      ev.rows.forEach(r => onLiveStamina(r.entity_id, { stamina: r.stamina }));
+    } else if (ev.table === 'experience_state'){
+      // v1 JSON renders the stacks as [skill_id, quantity] PAIRS, not objects — normalise for the handler
+      ev.rows.forEach(r => onLiveExperience(r.entity_id,
+        (r.experience_stacks || []).map(s => Array.isArray(s) ? { skill_id: +s[0], quantity: +s[1] } : s)));
+    } else if (ev.table === 'active_buff_state' && ev.isDelta){
+      ev.rows.forEach(r => onLiveBuffs(r.entity_id));
+    }
   });
-  if (!isDelta) return;                     // the opening snapshot isn't news for LIST changes
-  // 2. decide whether the LIST changed. progressive_action_state also fires on every progress tick
-  //    (1-2/sec while someone works a station), so only a craft we've never seen counts as a change.
+  // Doorbell: did a LIST change? (Progress rows tick 1-2/sec while someone works a station, so only a
+  // craft we've never seen counts.) Interim — once the tabs render straight from the cache this whole
+  // refetch cycle disappears.
   let crafts = false, orders = false;
   const known = feedKnownCraftIds();
-  rows.forEach(x => { if (!x) return;
-    if (x.table === 'progressive_action_state'){ if (x.entityId && !known.has(String(x.entityId))) crafts = true; }
-    else if (x.table === 'passive_craft_state') crafts = true;
-    else orders = true; });
+  evs.forEach(ev => {
+    if (!ev.isDelta) return;
+    if (ev.table === 'progressive_action_state'){ if (ev.rows.some(r => !known.has(String(r.entity_id))) || ev.deletes.length) crafts = true; }
+    else if (ev.table === 'passive_craft_state') crafts = true;
+    else if (ev.table === 'sell_order_state' || ev.table === 'buy_order_state' || ev.table === 'closed_listing_state') orders = true;
+  });
   if (!crafts && !orders) return;
   if (crafts) _feedWant.crafts = true;
   if (orders) _feedWant.orders = true;
   feedKick();
 }
-function feedConn(region, sqls){
-  const conn = { closed:false, ws:null, backoff:2000 };
-  const open = () => {
-    if (conn.closed) return;
-    if (relayIsDown()) return schedule();   // don't add to the pile-up while the relay is known down
-    let ws;
-    try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
-    catch(e){ return schedule(); }
-    conn.ws = ws; ws.binaryType = 'arraybuffer'; let first = true;
-    ws.onmessage = ev => { const b = new Uint8Array(ev.data);
-      if (first){ first = false; try { ws.send(relayEncSubscribe(sqls, 1, 1)); } catch(e){} return; }
-      try { if (b[1] === 1) onFeedRows(relayDecodeRows(b, feedRow), false);
-            else if (b[1] === 4) onFeedRows(relayDecodeDelta(b, feedRow), true); }
-      catch(e){}
-    };
-    ws.onopen = () => { conn.backoff = 2000; };   // a real connection resets the backoff
-    ws.onclose = () => { conn.ws = null; schedule(); };
-    ws.onerror = () => { try { ws.close(); } catch(_){} };
-  };
-  // Reconnect on drop, backing off 2s → 60s. A fixed retry meant that while the relay was down we dialled
-  // it forever, keeping the browser's per-host connection throttle permanently engaged and slowing every
-  // other relay call.
-  const schedule = () => {
-    if (conn.closed) return;
-    const wait = conn.backoff = Math.min(conn.backoff * 2, 60000);
-    setTimeout(open, wait);
-  };
-  open();
-  return conn;
-}
-function stopRelayFeed(){
-  Object.values(feedConns).forEach(c => { c.closed = true; try { c.ws && c.ws.close(); } catch(_){} });
-  feedConns = {}; feedKey = ''; bcCraftRate = {};
-}
-// ⚠️ The feed must NOT watch all 13 regions. Holding 13 feed sockets on top of the 13 pooled query
-// sockets puts 26 connections on one host, and the browser's contention cliff (13 → ~510ms, 26 → ~5s)
-// then starves the queries: measured crafts 82ms → 1396ms, orders 90ms → 1528ms, inventory 503ms →
-// 2858ms. So watch only where the roster actually is.
-// This is NOT the region-narrowing we rejected for FETCHING. Narrowing a fetch risks showing a wrong
-// list — a craft in an unwatched region would silently vanish. Narrowing the FEED only risks a delayed
-// notification: the tab's existing 10s/30s poll still catches anything the feed misses, so the failure
-// mode is "as slow as it used to be", never "wrong".
-// Regions watched = each tracked player's CURRENT region (where they are, so where they'll craft) plus
-// any region a previous fetch actually found their crafts/orders in.
-let feedSeenRegions = new Set();
-// Called with every region a fetch actually found rows in. Restarts the feed ONCE if that widened the
-// scope, rather than per region — otherwise a 13-region sweep would tear the feed down 13 times.
-function noteFeedRegions(list){
-  let added = false;
-  (list || []).forEach(rg => { if (rg != null && !feedSeenRegions.has(rg)){ feedSeenRegions.add(rg); added = true; } });
-  if (added) startRelayFeed();
-}
-async function startRelayFeed(){
-  // activePlayers(), not trackedPlayers: a paused player is explicitly excluded from live monitoring,
-  // which is what the SSE this replaced did too.
-  const ids = activePlayers().map(p => String(p.entityId)).sort();
-  if (!ids.length){ stopRelayFeed(); return; }
-  const here = await Promise.all(ids.map(i => relayPlayerRegion(i).catch(() => regionOfEntity(i))));
-  const regions = [...new Set([...here, ...feedSeenRegions].filter(r => r != null && BC_REGIONS.includes(r)))].sort();
-  const key = ids.join(',') + '|' + regions.join(',');
-  if (key === feedKey && Object.keys(feedConns).length) return;   // already streaming this roster+scope
-  stopRelayFeed();
-  if (!regions.length) return;
-  feedKey = key;
-  const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
-  const self = ids.map(i => `entity_id = ${i}`).join(' OR ');
-  const sqls = [
-    ...FEED_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
-    ...FEED_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`)
-  ];
-  regions.forEach((rg, i) => setTimeout(() => { if (feedKey === key && !feedConns[rg]) feedConns[rg] = feedConn(rg, sqls); }, i * 80));
-}
+onLiveChange(liveBridge);
 // A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
 // tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
 // "Being worked" = the game streamed an actual progress DELTA for this craft in the last ~15s. We do NOT
@@ -4742,26 +4840,34 @@ function noteRelayResult(answered){
 // (SubscribeApplied echoes `req`/`query_set`, verified: sent qs=1 and qs=2, got req=1 and req=2 back).
 // Sockets idle-close so we don't sit on 13 open connections to a community-run box indefinitely.
 const relayPool = {};   // region -> { ws, greeted, opening, pending:Map(reqId->handler), nextId }
-// The pool used to drop its sockets after 90s idle, to avoid sitting on 13 connections to a
-// single-maintainer relay while nobody was using them. The relay's owner has confirmed that's a
-// non-issue at this scale, so they're now held for the session — sitting on Map for two minutes and
-// then opening Crafts was costing 535ms to redial all 13, against 84ms warm, and an intermittent
-// slowdown with no visible cause is worse than a uniformly slower tab.
-let relayKeepTimer = null;
-function relayKeepWarm(){
-  if (!trackedPlayers.length) return;
-  BC_REGIONS.forEach((rg, i) => {
-    const c = relayPool[rg];
-    if (c && c.greeted && c.ws && c.ws.readyState === 1) return;   // already up
-    if (c && c.opening) return;                                     // already on its way
-    setTimeout(() => relayConnect(rg).catch(()=>{}), i * 60);       // staggered — 13 at once is the cliff
+// ⚠️ INTERIM (until the last relayQuery consumers move onto the live cache and this pool is deleted):
+// the live layer now holds 13 sockets permanently, and the browser's socket budget to one host is a
+// SHARED ~22 (measured, OVERHAUL §8.3) — so the pool can no longer keep its own 13 warm. Pool sockets
+// are instead dialled on demand, capped at POOL_MAX_OPEN concurrent, and closed shortly after their
+// last answer. A 13-region sweep runs 4-wide (~1-2s) — slower than the old warm pool, acceptable for
+// the migration window. Peak sockets: 13 live + 4 opening + a few idling ≈ 20, under the ceiling.
+const POOL_MAX_OPEN = 4, POOL_IDLE_MS = 800;
+let _poolQ = [];
+function _poolSlot(c){
+  if (c.slot) return Promise.resolve();
+  return new Promise(res => {
+    const tryGo = () => {
+      if (Object.values(relayPool).filter(x => x.slot).length < POOL_MAX_OPEN){ c.slot = true; res(); }
+      else _poolQ.push(tryGo);
+    };
+    tryGo();
   });
 }
-// Re-warms anything that recycled, dropped, or never came up. Cheap: it's a readyState check per region.
-function startRelayKeepWarm(){
-  relayKeepWarm();
-  if (relayKeepTimer) return;
-  relayKeepTimer = setInterval(relayKeepWarm, 30000);
+function _poolFree(c){
+  if (!c.slot) return;
+  c.slot = false;
+  const n = _poolQ.shift(); if (n) n();
+}
+// Close an answered socket soon: the slot frees when its last pending query settles (so sweeps keep
+// moving), and the socket itself closes shortly after so open-socket count stays near the cap.
+function _poolIdleSoon(c){
+  clearTimeout(c.idleT);
+  c.idleT = setTimeout(() => { if (!c.pending.size){ try { c.ws && c.ws.close(); } catch(e){} } }, POOL_IDLE_MS);
 }
 // ⚠️ A one-shot query leaves its subscription registered on the connection, and there's no cheap way to
 // retract it: subscriptions are ADDITIVE (verified — a second Subscribe doesn't replace the first, both
@@ -4786,12 +4892,12 @@ function relayRecycle(c){
 }
 function relayConnect(region){
   const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1, region });
-  if (c.greeted && c.ws && c.ws.readyState === 1) return Promise.resolve(c);
+  if (c.greeted && c.ws && c.ws.readyState === 1){ clearTimeout(c.idleT); return Promise.resolve(c); }
   if (c.opening) return c.opening;
-  c.opening = new Promise((resolve, reject) => {
+  c.opening = _poolSlot(c).then(() => new Promise((resolve, reject) => {
     let ws;
     try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
-    catch(e){ c.opening = null; return reject(e); }
+    catch(e){ c.opening = null; _poolFree(c); return reject(e); }
     ws.binaryType = 'arraybuffer'; c.ws = ws; c.greeted = false; c.subsOnSocket = 0;
     const t = setTimeout(() => { try { ws.close(); } catch(_){} }, 12000);   // onclose does the teardown
     ws.onmessage = ev => {
@@ -4810,12 +4916,12 @@ function relayConnect(region){
     };
     ws.onerror = () => { try { ws.close(); } catch(_){} };
     ws.onclose = () => {
-      clearTimeout(t);
+      clearTimeout(t); clearTimeout(c.idleT); _poolFree(c);
       const wasOpening = c.opening; c.opening = null; c.greeted = false; c.ws = null;
       c.pending.forEach(h => h.dropped()); c.pending.clear();   // in-flight callers settle as unanswered
       if (wasOpening) reject(new Error('relay connect failed'));
     };
-  });
+  }));
   return c.opening;
 }
 // Run one subscription (possibly several query strings) against a region mirror and decode its rows.
@@ -4833,6 +4939,7 @@ async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     const fin = () => {
       if (done) return; done = true;
       clearTimeout(t); clearTimeout(idle); c.pending.delete(id);
+      if (!c.pending.size){ _poolFree(c); _poolIdleSoon(c); }   // interim §8.3 budget: free the slot for the next region, close soon
       rows.ok = answered; noteRelayResult(answered); relayRecycle(c); resolve(rows);
     };
     const t = setTimeout(fin, timeoutMs);
@@ -10102,7 +10209,7 @@ function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
 // ══════════════════════════════════════════════════════════════════════════
-// PLAYER STATE (stamina / XP / buffs) — delivered by the relay feed (see onFeedRows).
+// PLAYER STATE (stamina / XP / buffs) — delivered by the live layer (see liveBridge).
 // This used to be an EventSource on our own /live route, with the proxy holding an upstream websocket
 // to live.bitjita and fanning it out. That was the last always-on connection through the host, and it
 // cost real bandwidth for data the browser can now read straight from the relay on sockets we already
@@ -10112,7 +10219,7 @@ function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].s
 let liveStamina = {};        // entityId -> { current, max }
 // "Connected" now means the relay feed is actually up, which is what alertsTick uses to decide whether
 // it still needs to poll stamina over REST.
-function liveConnected(){ return Object.values(feedConns).some(c => c.ws && c.ws.readyState === 1); }
+function liveConnected(){ return Object.values(liveConns).some(c => c.ws && c.ws.readyState === 1); }
 function liveNum(x){ if (x == null || x === '') return null; const n = +x; return isNaN(n) ? null : n; }
 // A buffs_state message means this player's buff set changed (gained/lost/refreshed). We don't parse its
 // payload — we use it purely as a trigger to re-run the authoritative REST buff check, throttled per player
@@ -10864,10 +10971,7 @@ async function renderGroupCraft(){
   if (trackedPlayers.length){
     // Discover the live region list BEFORE dialling, so a region the relay has added (or dropped) is
     // picked up without a code change. Falls back to the hardcoded list if /health can't be reached.
-    loadRelayRegions().then(() => {
-      startRelayKeepWarm();   // hold the query sockets warm for the session so no click ever pays a redial
-      startRelayFeed();       // hold the live feed so new crafts/orders arrive by push, on any tab
-    });
+    loadRelayRegions().then(() => liveStart());   // 13 held sockets, one Subscribe each — everything live from here (OVERHAUL §2)
   }
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
