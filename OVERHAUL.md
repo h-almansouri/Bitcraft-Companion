@@ -373,7 +373,21 @@ mirror of current state can't reconstruct it.
 - Market price history (`avg7d`, `vwap`, etc.)
 - Completed-trade history (the order row is deleted on completion — see 7.1;
   *collections* are NOT in this category, they're `closed_listing_state`)
-- `/storage-logs` — the 15-day deposit/withdraw feed Group Craft is built on
+- `/storage-logs` — the deposit/withdraw feed Group Craft is built on.
+  **ALL of it is HTTP-only, not just old entries** — a deposit from one second
+  ago is equally unavailable over the socket. A deposit is an *event*; the
+  database holds *state*. What changes is the chest's `inventory_state`
+  quantity; there is no "a deposit happened" row to subscribe to. The relay
+  offers this endpoint because it watches the stream and records the
+  transitions itself.
+  Separately, retention is **~15 days** — beyond that the history doesn't exist
+  anywhere, by any route.
+  *Deriving it ourselves doesn't work:* watching a container's `inventory_state`
+  shows quantities change but not **who** changed them (attribution is the whole
+  point of the tally), and only while the app is open — Group Craft events run
+  for days. One thread to check when we reach that tab: `TransactionUpdate`
+  carries a `caller_identity`, but for a mirrored game DB that is probably the
+  game server's connection rather than a player. Unverified; not counting on it.
 - Skill rankings (a leaderboard computed across every player in the game)
 - The Deals arbitrage scan
 
