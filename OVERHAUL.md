@@ -783,7 +783,16 @@ before, which silently breaks saving for *everything else*).
 Also: showing 24-hour-old crafts as though current is worse than an honest
 loading state.
 
-### 9.2 Move `/crafting-data` off the scrape
+### 9.2 Move `/crafting-data` off the scrape — ✅ DONE (2026-08-08, pulled forward)
+
+Done early after the scrape caused user-visible name flips: it disagreed with the
+game on the headline output of 3,812 of 7,620 recipes, silently dropped rare
+bonus outputs, and carried hand-added synthetic recipes. `build-crafting-data.js`
+now generates the same consumer shape from the GameData repo (bundle expansion
+via `item_list_desc`, 4e9 cargo offset, resolved name templates). The scrape and
+its debug helper are deleted.
+
+*(Original rationale below, kept for the record.)*
 `extract-crafting-data.js` scrapes **bitcraft-timer.com**, a third-party website,
 into a 4.4MB `craftingData.json` committed to the repo and refreshed only when
 someone manually runs the script. Most fragile source in the app.
