@@ -3774,9 +3774,10 @@ let liveRosterIds = [];      // player ids the current subscription covers
 function liveWantedRefs(){
   const tracked = new Set(trackedPlayers.map(p => String(p.entityId)));
   const containers = new Set();   // things whose inventory_state contents we need
-  const buildings = new Set();    // building_state + nickname + claim-name lookups
+  const buildings = new Set();    // building_state + nickname lookups
   const networks = new Set();     // house dimension networks
   const locs = new Set();         // buildings whose location (→ dimension) decides house membership
+  const claims = new Set();       // settlement names
   // house interiors: buildings this player constructed with NO claim (claim 0 = inside a dimension)
   liveRows('building_state', r => String(r.claim_entity_id) === '0' && tracked.has(String(r.constructed_by_player_entity_id)))
     .forEach(r => { const id = String(r.entity_id); containers.add(id); buildings.add(id); locs.add(id); });
@@ -3792,10 +3793,18 @@ function liveWantedRefs(){
     }));
   liveRows('player_housing_state', r => tracked.has(String(r.entity_id)))
     .forEach(r => { networks.add(String(r.network_entity_id)); buildings.add(String(r.entrance_building_entity_id)); });
+  // Claim names, SECOND-ORDER: the ids come from rows the subscription already delivers — a building's
+  // claim_entity_id, and the claim each order/listing sits in. This replaces one JOIN per building
+  // (73 of them on a busy region) with a handful of chunked plain lookups. Costs one more discovery
+  // hop, which is free now that discovery extends the open sockets instead of redialling.
+  const addClaim = v => { const c = String(v || '0'); if (c !== '0') claims.add(c); };
+  liveRows('building_state', () => true).forEach(r => addClaim(r.claim_entity_id));
+  ['sell_order_state','buy_order_state','closed_listing_state'].forEach(t =>
+    liveRows(t, r => tracked.has(String(r.owner_entity_id))).forEach(r => addClaim(r.claim_entity_id)));
   const cap = (s, n) => [...s].sort().slice(0, n);
-  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 600) };
+  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 600), claims: cap(claims, 400) };
 }
-const liveRefsKey = r => r.containers.join(',') + '|' + r.buildings.join(',') + '|' + r.networks.join(',') + '|' + r.locs.join(',');
+const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|');
 function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
 function liveSaveRefs(pKey, refs){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: refs })); } catch(e){} }
 // Discovery settles fast now that all 13 sockets are dialled at once — measured, every region's snapshot
@@ -3811,11 +3820,13 @@ onLiveChange(evs => {
     if (liveRefsKey(want) === liveRefsKey(liveRefs)) return;
     liveRefs = want;
     liveSaveRefs(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
-    // Extend the EXISTING sockets instead of redialling all 13 (§3.2's redial is for roster changes;
-    // this is just "we now know more ids to ask about"). Converges: the wanted set derives only from
-    // rows the base subscription carries, so a second pass sees the same set and stops.
-    const sent = liveAddSubscribe();
-    if (!sent) liveStart();   // nothing open to extend (boot race / all reconnecting) → fall back to a dial
+    // ⚠️ REDIAL, not an additive subscribe. Extending the open sockets with a second Subscribe looked
+    // ideal on paper (no new handshakes) and the frames were accepted — but the rows never arrived:
+    // location_state, building_nickname_state and every container's contents stayed at 0 while the
+    // queries sat on the socket. A full redial delivers all of it. Whatever v1.json does with a second
+    // Subscribe on a live socket, it is not "add these queries and send me their rows", so don't rely
+    // on it. Cost: one extra round of 13 dials on a cold boot, none once the ids are persisted.
+    liveStart();
   }, LIVE_DISCOVERY_DEBOUNCE_MS);
 });
 function liveQuerySet(ids, region){
@@ -3842,9 +3853,11 @@ function liveQuerySet(ids, region){
   const blds = here(liveRefs.buildings);
   chunked(blds, 'entity_id', 'building_state');            // bank/station/house buildings → descId + claim
   chunked(blds, 'entity_id', 'building_nickname_state');   // player-set names
-  // A JOIN can't be OR'd (the relay needs an index the OR defeats), so emit one per building — they all
-  // still ride the same single subscribe, which is what actually costs a round trip.
-  blds.forEach(b => sqls.push(`SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`));
+  // Claim names by plain id lookup, NOT one JOIN per building. Joins can't be OR'd (the relay needs an
+  // index the OR defeats), so the old shape emitted 73 of them on a busy region — heavy for a
+  // single-maintainer relay to evaluate against every transaction, for data a chunked lookup gets just
+  // as well once the building rows have told us the claim ids.
+  chunked(here(liveRefs.claims || []), 'entity_id', 'claim_state');
   chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
   chunked(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
   return {
@@ -3871,7 +3884,13 @@ function liveStart(){
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
   // discovery redial at all.
   const fromCache = liveWantedRefs();
-  liveRefs = fromCache.containers.length || fromCache.buildings.length ? fromCache : (liveLoadRefs(pKey) || fromCache);
+  const saved = liveLoadRefs(pKey);
+  // Prefer whichever set is richer: the cache is authoritative once populated, but on a cold boot it's
+  // empty and last session's persisted ids let the FIRST dial already cover everything.
+  liveRefs = (fromCache.containers.length || fromCache.buildings.length)
+    ? (saved ? { containers: fromCache.containers, buildings: fromCache.buildings, networks: fromCache.networks, locs: fromCache.locs,
+                 claims: (fromCache.claims && fromCache.claims.length) ? fromCache.claims : (saved.claims || []) } : fromCache)
+    : (saved || fromCache);
   const key = pKey + '#' + liveRefsKey(liveRefs);
   if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
   if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
