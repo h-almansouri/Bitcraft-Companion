@@ -3551,8 +3551,11 @@ const LIVE_COLS = {
   traveler_task_state: ['entity_id','player_entity_id','traveler_id','task_id','completed'],
   claim_state: ['entity_id','owner_player_entity_id','owner_building_entity_id','name','neutral'],
   world_region_name_state: ['id','player_facing_name','module_name_prefix'],
-  storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
   inventory_state: ['entity_id','pockets','inventory_index','cargo_index','owner_entity_id','player_owner_entity_id'],
+  building_state: ['entity_id','claim_entity_id','direction_index','building_description_id','constructed_by_player_entity_id'],
+  deployable_state_v2: ['entity_id','owner_id','claim_entity_id','direction','deployable_description_id','nickname','hidden','appearance_override_id'],
+  player_housing_state: ['entity_id','entrance_building_entity_id','network_entity_id','exit_portal_entity_id','rank','locked_until','is_empty','region_index'],
+  storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -3630,9 +3633,11 @@ function liveComplete(){
 function liveApplySnapshot(c, frame){
   const fresh = {};
   ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
-    const m = new Map();
+    // UNION, not overwrite: one subscribe can carry several queries against the SAME table (personal
+    // inventory by owner + banks by player_owner + container contents by id), and the snapshot may
+    // report them as separate table entries.
+    const m = fresh[t.table_name] || (fresh[t.table_name] = new Map());
     (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r){ r.__region = c.region; m.set(livePk(r), r); } }));
-    fresh[t.table_name] = m;
   });
   // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
   // snapshot didn't mention it), so rows from before a reconnect can never linger.
@@ -3675,23 +3680,64 @@ function liveApplyDelta(c, frame){
 // The roster is ALL tracked players (not just unpaused): tabs render paused players too, so their rows
 // must be in the cache — pausing only mutes alerts/monitoring, which filter elsewhere. This also means
 // pause/unpause never redials (the key doesn't change).
-const LIVE_TABLES_OWNED = ['progressive_action_state','passive_craft_state','public_progressive_action_state','sell_order_state','buy_order_state','closed_listing_state'];
-const LIVE_TABLES_SELF  = ['stamina_state','experience_state','character_stats_state','active_buff_state','equipment_state','signed_in_player_state'];
+const LIVE_TABLES_OWNED = ['progressive_action_state','passive_craft_state','public_progressive_action_state','sell_order_state','buy_order_state','closed_listing_state','inventory_state'];
+const LIVE_TABLES_SELF  = ['stamina_state','experience_state','character_stats_state','active_buff_state','equipment_state','signed_in_player_state','player_housing_state'];
 const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state'];   // filter column is player_entity_id
+// ── Owned-container discovery (inventory "hop 2") ──
+// A player's pockets/toolbelt/wallet hang off inventory_state.owner_entity_id = player and their banks
+// off player_owner_entity_id — both directly subscribable. But HOUSE chests and VEHICLES have their own
+// entity ids: the container row's owner_entity_id is the BUILDING or DEPLOYABLE, so we subscribe the
+// discovery tables (building_state by constructed_by, deployable_state_v2 by owner) and then need a
+// second hop for the contents. The discovered ids become part of the ROSTER KEY: when the cache reveals
+// an id we're not subscribed to (new wagon, new chest), the watcher below triggers the ONE redial path
+// (§3.2). Ids persist per roster, so a warm boot subscribes everything in its first dial — zero redials
+// steady-state.
+const LIVE_CONTAINERS_KEY = 'bcLiveContainers';
+let liveContainerIds = [];   // sorted container ids the current subscription covers
+let liveRosterIds = [];      // player ids the current subscription covers
+function liveWantedContainers(){
+  const tracked = new Set(trackedPlayers.map(p => String(p.entityId)));
+  const ids = new Set();
+  // house interiors: buildings this player constructed with NO claim (claim_entity_id 0 = inside the house)
+  liveRows('building_state', r => String(r.claim_entity_id) === '0' && tracked.has(String(r.constructed_by_player_entity_id)))
+    .forEach(r => ids.add(String(r.entity_id)));
+  liveRows('deployable_state_v2', r => tracked.has(String(r.owner_id)))
+    .forEach(r => ids.add(String(r.entity_id)));
+  return [...ids].sort().slice(0, 600);   // sanity cap
+}
+function liveLoadContainers(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); return Array.isArray(d[pKey]) ? d[pKey] : []; } catch(e){ return []; } }
+function liveSaveContainers(pKey, ids){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: ids })); } catch(e){} }
+let _liveContTimer = null;
+onLiveChange(evs => {
+  if (!evs.some(e => e.table === 'building_state' || e.table === 'deployable_state_v2')) return;
+  clearTimeout(_liveContTimer);
+  _liveContTimer = setTimeout(() => {
+    const want = liveWantedContainers();
+    if (want.join(',') === liveContainerIds.join(',')) return;
+    liveSaveContainers(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
+    liveStart();   // query set changed → the one redial path (§3.2). Converges: the wanted set derives
+                   // only from the discovery tables, so a second pass sees the same set and stops.
+  }, 1500);
+});
 function liveQuerySet(ids){
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
   const self  = ids.map(i => `entity_id = ${i}`).join(' OR ');
   const pcol  = ids.map(i => `player_entity_id = ${i}`).join(' OR ');
+  const sqls = [
+    ...LIVE_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
+    ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
+    ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
+    `SELECT * FROM inventory_state WHERE ${ids.map(i => `player_owner_entity_id = ${i}`).join(' OR ')}`,   // banks (per region)
+    `SELECT * FROM building_state WHERE ${ids.map(i => `constructed_by_player_entity_id = ${i}`).join(' OR ')}`,   // house-interior discovery
+    `SELECT * FROM deployable_state_v2 WHERE ${ids.map(i => `owner_id = ${i}`).join(' OR ')}`,             // vehicle discovery
+    // Unfiltered but bounded (§8.4): exactly ONE row per mirror — each region's own display name.
+    'SELECT * FROM world_region_name_state',
+  ];
+  for (let i = 0; i < liveContainerIds.length; i += 40)
+    sqls.push(`SELECT * FROM inventory_state WHERE ${liveContainerIds.slice(i, i + 40).map(c => `owner_entity_id = ${c}`).join(' OR ')}`);
   return {
-    sqls: [
-      ...LIVE_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
-      ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
-      ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
-      // Unfiltered but bounded (§8.4): exactly ONE row per mirror — each region's own display name
-      // ("Zephra"). Replaces the /api/regions HTTP call for naming, and never changes.
-      'SELECT * FROM world_region_name_state',
-    ],
-    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'world_region_name_state'],
+    sqls,
+    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2', 'world_region_name_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -3705,10 +3751,15 @@ function liveRegionName(rg){
 // only updates pause for the ~1s the redials take.
 function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
-  const key = ids.join(',');
   if (!ids.length){ liveStopAll(); return; }
+  const pKey = ids.join(',');
+  // Containers: what the cache says right now, else last session's persisted set (cold boot) — so the
+  // first dial already covers house chests and vehicles without waiting for a discovery redial.
+  const fromCache = liveWantedContainers();
+  liveContainerIds = fromCache.length ? fromCache : liveLoadContainers(pKey);
+  const key = pKey + '#' + liveContainerIds.join(',');
   if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
-  liveRosterKey = key;
+  liveRosterKey = key; liveRosterIds = ids;
   BC_REGIONS.forEach((rg, i) => setTimeout(() => liveDial(rg), i * 40));   // stagger — 13 simultaneous handshakes is the cliff (§8.1)
 }
 function liveStopAll(){
@@ -3726,8 +3777,7 @@ function liveDial(rg){
   const ex = liveConns[rg];
   if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
   if (ex) liveDrop(rg);
-  const ids = liveRosterKey.split(',');
-  const { sqls, tables } = liveQuerySet(ids);
+  const { sqls, tables } = liveQuerySet(liveRosterIds);
   const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
   liveConns[rg] = c;
   liveOpen(c);
@@ -4764,29 +4814,6 @@ function bsRead(bytes){
     str:()=>{const n=dv.getUint32(o,true);o+=4;const s=new TextDecoder().decode(bytes.subarray(o,o+n));o+=n;return s;},
     sub:(n)=>{const b=bytes.subarray(o,o+n);o+=n;return b;} };
 }
-// inventory_state row: entity_id u64, pockets[], inventory_index i32, cargo_index i32, owner u64, player_owner u64
-// pocket: volume i32, contents Sum(0=some{item_id i32, quantity i32, item_type Sum(0=Item,1=Cargo), durability Sum(0=some i32,1=none)} | 1=none), locked bool
-function readInvRow(r){
-  const entity_id = r.u64();
-  const n = r.u32(); const items = [];
-  for (let i=0;i<n;i++){
-    r.i32();                                     // volume
-    if (r.u8() === 0){                           // contents = some
-      const item_id = r.i32(), quantity = r.i32();
-      const item_type = r.u8();                  // 0 Item · 1 Cargo (unit variants)
-      if (r.u8() === 0) r.i32();                 // durability = some(i32)
-      if (quantity > 0) items.push({ item_id, quantity, item_type });
-    }
-    r.bool();                                    // locked
-  }
-  r.i32(); r.i32();
-  return { entity_id, items, owner_entity_id: r.u64(), player_owner_entity_id: r.u64() };
-}
-// deployable_state row: entity_id u64, owner_id u64, claim u64, direction i32, desc_id i32, nickname str, hidden bool
-function readDeployRow(r){
-  const entity_id = r.u64(); r.u64(); r.u64(); r.i32(); r.i32();
-  return { entity_id, nickname: r.str() };
-}
 // ClientMessage::Subscribe (tag 0) — note: client messages carry NO compression prefix.
 function relayEncSubscribe(sqls, reqId, qsId){
   const enc = new TextEncoder(); const qs = sqls.map(s => enc.encode(s));
@@ -4977,34 +5004,9 @@ async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
     try { c.ws.send(relayEncSubscribe(sqls, id, id)); c.subsOnSocket = (c.subsOnSocket||0)+1; } catch(e){ fin(); }
   });
 }
-// Which region mirror to ask about a player. The region encoded in their entity id is only where the
-// character was created — players travel, so ask the relay where they actually are (Aphilleon's id says
-// 17 while they're in 19), and fall back to the id when that lookup fails.
-async function relayPlayerRegion(id){
-  try {
-    const res = await fetch(`${RELAY_HTTP}/player/${id}`);
-    if (res.ok){ const j = await res.json(); if (j && j.region != null) return Number(j.region); }
-  } catch(e){}
-  return regionOfEntity(id);
-}
-// Vehicles/deployables: find the player's deployables, then the inventories owned by them.
-async function relayVehicleInvs(playerId, region){
-  // Both tables: deployable_state lags behind (it was missing 5 of Velcruza's 19, including the Skiff
-  // holding her fish), while v2 carries the full set. Query both and dedupe in case a mirror lacks one.
-  const deps = await relayQuery(region, [
-    `SELECT * FROM deployable_state_v2 WHERE owner_id = ${playerId}`,
-    `SELECT * FROM deployable_state WHERE owner_id = ${playerId}`
-  ], readDeployRow);
-  if (!deps.length) return [];
-  const nick = {}; deps.forEach(d => nick[d.entity_id.toString()] = d.nickname);
-  const rows = await relayQuery(region, Object.keys(nick).map(id => `SELECT * FROM inventory_state WHERE owner_entity_id = ${id}`), readInvRow);
-  const seen = new Set();
-  return rows.filter(x => x.items.length && !seen.has(x.entity_id.toString()) && seen.add(x.entity_id.toString()))
-             .map(x => ({ ...x, nickname: nick[x.owner_entity_id.toString()] || '' }));
-}
 // ── Equipment: worn gear (equipment_state) + saved loadouts (equipment_preset_state) ──
-// Not in any HTTP cache route, so both come over the WS in a single subscription. Note the presets'
-// `active` flag is false even for the gear actually being worn — equipment_state is the live set.
+// Both live in the cache (subscribed since the layer's birth). Note the presets' `active` flag is false
+// even for the gear actually being worn — equipment_state is the live set.
 const EQUIP_SLOTS = ['MainHand','OffHand','HeadArtifact','TorsoArtifact','HandArtifact','FeetArtifact',
   'HeadClothing','TorsoClothing','HandClothing','BeltClothing','LegClothing','FeetClothing','None'];
 const EQUIP_ORDER = ['HeadClothing','TorsoClothing','HandClothing','BeltClothing','LegClothing','FeetClothing',
@@ -5032,91 +5034,109 @@ function equipSetStats(slots, equipDefs){
   }));
   return Object.values(acc).sort((a,b) => Math.abs(b.value) - Math.abs(a.value));
 }
-// equipment_slots: Array<{ item: Sum[some(itemstack)|none], primary: Sum[slot…] }>
-function readEquipSlots(r){
-  const n = r.u32(); const out = [];
-  for (let i=0;i<n;i++){
-    let item = null;
-    if (r.u8() === 0){                                   // item = some
-      const itemId = r.i32(), quantity = r.i32();
-      const itemType = r.u8();                           // 0 Item · 1 Cargo
-      if (r.u8() === 0) r.i32();                         // durability = some(i32)
-      item = { itemId, itemType, quantity };
-    }
-    const slot = EQUIP_SLOTS[r.u8()] || 'None';
-    if (item) out.push({ slot, ...item });
-  }
+// A cached inventory_state row's pockets: POSITIONAL even in snapshots — [volume, contents, locked],
+// contents = Sum [0, [item_id, qty, [type], [durability]]] | [1, []]. Tolerates named forms too.
+function livePocketItems(row){
+  const out = [];
+  (row.pockets || []).forEach(p => {
+    const contents = Array.isArray(p) ? p[1] : (p && p.contents);
+    let stack = null;
+    if (Array.isArray(contents)){ if (contents[0] === 0) stack = contents[1]; }
+    else if (contents && contents.some !== undefined) stack = contents.some;
+    if (!stack) return;
+    const id  = Array.isArray(stack) ? stack[0] : stack.item_id;
+    const qty = Array.isArray(stack) ? stack[1] : stack.quantity;
+    const t   = Array.isArray(stack) ? stack[2] : stack.item_type;
+    if (+qty > 0) out.push({ itemId: +id, itemType: Array.isArray(t) ? t[0] : (+t || 0), quantity: +qty });
+  });
   return out;
 }
-async function relayEquipment(playerId, region){
-  const rows = await relayQuery(region, [
-    `SELECT * FROM equipment_state WHERE entity_id = ${playerId}`,
-    `SELECT * FROM equipment_preset_state WHERE player_entity_id = ${playerId}`
-  ], (r, table) => {
-    if (table === 'equipment_state'){ r.u64(); return { kind:'current', slots: readEquipSlots(r) }; }
-    r.u64(); r.u64(); const index = r.i32(); const active = r.bool();   // entity, player, index, active
-    return { kind:'preset', index, active, slots: readEquipSlots(r) };
+// equipment_slots entry: { item: Sum[some(stack)|none], primary: Sum[slot…] } — same tolerance.
+function liveEquipSlots(row){
+  const out = [];
+  (row.equipment_slots || []).forEach(s => {
+    const itemSum = Array.isArray(s) ? s[0] : (s && s.item);
+    const primSum = Array.isArray(s) ? s[1] : (s && s.primary);
+    let stack = null;
+    if (Array.isArray(itemSum)){ if (itemSum[0] === 0) stack = itemSum[1]; }
+    else if (itemSum && itemSum.some !== undefined) stack = itemSum.some;
+    if (!stack) return;
+    const id  = Array.isArray(stack) ? stack[0] : stack.item_id;
+    const qty = Array.isArray(stack) ? stack[1] : stack.quantity;
+    const t   = Array.isArray(stack) ? stack[2] : stack.item_type;
+    out.push({ slot: EQUIP_SLOTS[Array.isArray(primSum) ? primSum[0] : 12] || 'None',
+      itemId: +id, itemType: Array.isArray(t) ? t[0] : (+t || 0), quantity: +qty || 1 });
   });
-  return {
-    current: (rows.find(x => x.kind === 'current') || {}).slots || [],
-    presets: rows.filter(x => x.kind === 'preset').sort((a,b) => a.index - b.index)
-  };
+  return out;
 }
-
-// House storage — one pre-joined call returning every storage/cargo container inside the house.
-async function relayHousingInvs(id){
-  const res = await fetch(`${RELAY_HTTP}/player/${id}/housing`);
-  if (!res.ok) return [];
-  const j = await res.json();
-  const houseName = (j.house && j.house.name) || 'Housing';
-  const region = (j.house && j.house.region != null) ? j.house.region : null;
-  return (j.buildings||[]).filter(b => (b.items||[]).length).map(b => ({
-    entityId: String(b.entity_id),
-    inventoryName: b.nickname || b.name || 'Storage',
-    claimName: houseName, regionId: region != null ? region : regionOfEntity(b.entity_id),
-    _isHousing: true,
-    pockets: (b.items||[]).map(x => ({ contents: { itemId:x.item_id, itemType: x.item_type === 'Cargo' ? 1 : 0, quantity:x.quantity } }))
-  }));
-}
+// Inventory — ALL from the live cache, and therefore LIVE: a deposit ticks the tab without a refresh.
+// Sources (see liveQuerySet): personal rows (owner = player; inventory_index 0/1/2 = pockets/toolbelt/
+// wallet), banks (player_owner = player, one per claim per region), house chests (buildings the player
+// constructed with claim 0 → their inventory rows), vehicles (deployable_state_v2 → their inventory
+// rows). All 13 regions — the old current-region-only equipment/vehicle limitation is gone. The only
+// network here is the cached place/nickname resolve for buildings we've never seen.
 async function fetchPlayerInvRelay(id){
-  // Nothing here is allowed to block on anything it doesn't actually need. The region lookup used to be
-  // awaited FIRST and cost ~253ms during which nothing else ran — but only equipment and vehicles need
-  // it; the inventory and housing reads don't. Chaining those two off the region promise instead, and
-  // folding vehicles into the same batch rather than running it afterwards, makes the whole thing one
-  // parallel wave bounded by its slowest member instead of 253 + batch + 169.
-  const defsP    = loadGameItemDefs();
-  const regionP  = relayPlayerRegion(id).catch(() => regionOfEntity(id));
-  const invP     = fetch(`${RELAY_HTTP}/player/${id}/inventory`);
-  const housingP = relayHousingInvs(id).catch(() => []);
-  const equipP   = regionP.then(rg => rg != null ? relayEquipment(id, rg).catch(() => null) : null).catch(() => null);
-  const vehP     = regionP.then(rg => rg != null ? relayVehicleInvs(id, rg).catch(() => []) : []).catch(() => []);
-  const [defs, res, housing, equipment, vehicles, region] =
-    await Promise.all([defsP, invP, housingP, equipP, vehP, regionP]);
-  if (!res.ok) throw new Error('relay inventory HTTP ' + res.status);
-  const j = await res.json();
-  // `deployable` = a cart/boat/cache the player owns and carries around. They report the claim they
-  // happen to be parked in, but they belong with the player's own stuff, not that claim's storage.
-  const mk = (entityId, name, claimName, items, deployable) => ({
+  id = String(id);
+  if (!liveComplete()) throw new Error('live cache not ready');
+  hydrateRelayPlaces();
+  const defs = await loadGameItemDefs();
+  const mk = (entityId, name, claimName, items, flags) => ({
     entityId: String(entityId), inventoryName: name, claimName: claimName || null,
-    regionId: regionOfEntity(entityId), _isDeployable: !!deployable,
-    pockets: items.map(it => ({ contents: { itemId: it.item_id, itemType: it.item_type, quantity: it.quantity } }))
+    regionId: regionOfEntity(entityId), ...flags,
+    pockets: items.map(it => ({ contents: { itemId: it.itemId, itemType: it.itemType, quantity: it.quantity } }))
   });
-  // Drop empty containers. The relay lists every bank you have access to (most hold nothing); the
-  // Inventory tab hides them naturally since it builds from slots, but the Planner/Tool-crafting/Tasks
-  // location chips iterate containers directly and would otherwise list ~25 empty Town Banks.
-  const inventories = (j.inventories||[]).filter(c => (c.items||[]).length).map(c => mk(
-    c.entity_id, c.nickname || c.name || c.category || 'Inventory', c.claim_name,
-    c.items.map(x => ({ item_id:x.item_id, quantity:x.quantity, item_type: x.item_type === 'Cargo' ? 1 : 0 })),
-    !/bank/i.test(c.category || '')
-  ));
-  housing.forEach(h => inventories.push(h));
-  // Add only the deployable-owned containers the HTTP cache didn't already return — it covers most
-  // (cache/wagon/deployable), so dedupe by entity id or their contents would be counted twice.
-  const have = new Set(inventories.map(i => String(i.entityId)));
-  (vehicles || []).forEach(v => {
-    const eid = v.entity_id.toString();
-    if (!have.has(eid)) inventories.push(mk(eid, v.nickname || 'Vehicle', null, v.items, true));
+  const inventories = [];
+  // personal — `deployable: true` marks "belongs with the player's own stuff" for the location chips,
+  // exactly as the old HTTP path flagged every non-bank category.
+  const PERSONAL = { 0: 'pockets', 1: 'toolbelt', 2: 'wallet' };
+  liveRows('inventory_state', r => String(r.owner_entity_id) === id).forEach(r => {
+    const items = livePocketItems(r); if (!items.length) return;
+    inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'storage', null, items, { _isDeployable: true }));
   });
+  // banks — the row's owner is the bank BUILDING; resolve building → claim → name (persisted, no-op once seen)
+  const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
+  const unknown = {};
+  const wantPlace = (bid, rg) => { if (bid && bid !== '0' && !relayBuildingInfo[bid]) (unknown[rg] || (unknown[rg] = new Set())).add(bid); };
+  bankRows.forEach(r => wantPlace(String(r.owner_entity_id), r.__region));
+  // house chests + the house's entrance (for its display name)
+  const houseB = new Map();
+  liveRows('building_state', r => String(r.claim_entity_id) === '0' && String(r.constructed_by_player_entity_id) === id)
+    .forEach(r => { houseB.set(String(r.entity_id), r); wantPlace(String(r.entity_id), r.__region); });
+  const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
+  if (housing) wantPlace(String(housing.entrance_building_entity_id), housing.__region);
+  await Promise.all(Object.keys(unknown).map(rg => relayResolvePlaces(+rg, [...unknown[rg]]).catch(() => {})));
+  bankRows.forEach(r => {
+    const items = livePocketItems(r); if (!items.length) return;
+    const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
+    inventories.push(mk(r.entity_id, 'bank', (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, {}));
+  });
+  // house — named like the HTTP route did: "<player>'s House (<residence type>)"
+  const pName = (trackedPlayers.find(p => String(p.entityId) === id) || {}).name;
+  const ent = housing && relayBuildingInfo[String(housing.entrance_building_entity_id)];
+  const entName = ent && defs.buildings[ent.descId];
+  const houseName = (pName ? pName + "'s House" : 'Housing') + (entName ? ` (${entName})` : '');
+  liveRows('inventory_state', r => houseB.has(String(r.owner_entity_id))).forEach(r => {
+    const items = livePocketItems(r); if (!items.length) return;
+    const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
+    inventories.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Storage', houseName, items, { _isHousing: true }));
+  });
+  // vehicles/deployables (cart, boat, cache, wagon) — they report whatever claim they're parked in, but
+  // they belong with the player's own stuff, not that claim's storage.
+  const veh = new Map(liveRows('deployable_state_v2', r => String(r.owner_id) === id).map(r => [String(r.entity_id), r]));
+  const have = new Set(inventories.map(i => i.entityId));
+  liveRows('inventory_state', r => veh.has(String(r.owner_entity_id))).forEach(r => {
+    if (have.has(String(r.entity_id))) return;
+    const items = livePocketItems(r); if (!items.length) return;
+    inventories.push(mk(r.entity_id, (veh.get(String(r.owner_entity_id)) || {}).nickname || 'Vehicle', null, items, { _isDeployable: true }));
+  });
+  // equipment straight from the cache
+  const eqRow = liveRows('equipment_state', r => String(r.entity_id) === id)[0];
+  const equipment = {
+    current: eqRow ? liveEquipSlots(eqRow) : [],
+    presets: liveRows('equipment_preset_state', r => String(r.player_entity_id) === id)
+      .map(r => ({ index: r.index, active: !!r.active, slots: liveEquipSlots(r) }))
+      .sort((a, b) => a.index - b.index),
+  };
   // Shallow copies: callers may write extra item metadata in, and the defs are shared/cached.
   return { inventories, equipment, items: { ...defs.items }, cargos: { ...defs.cargos } };
 }
