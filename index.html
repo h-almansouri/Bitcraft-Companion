@@ -1630,20 +1630,17 @@ function applyPlayerOnlineDots(){
 // this sweeps all of them; warm that's one parallel wave on the pooled sockets, versus a bitjita call
 // per player before. Absence only means "offline" if a mirror actually answered, hence the `answered`
 // check — otherwise an unreachable relay would mark everyone offline, which is worse than stale.
+// Presence from the cache: signed_in_player_state is a held subscription (a row exists iff signed in),
+// and the bridge flips dots on its deltas — this read covers ABSENCE (a tracked player with no row is
+// offline) and the boot window before the cache completes.
 async function refreshPlayerOnline(){
   if (!trackedPlayers.length) return;
   const ids = trackedPlayers.map(p => String(p.entityId));
-  const filter = ids.map(i => `entity_id = ${i}`).join(' OR ');
-  let answered = false;
-  const per = await Promise.all(BC_REGIONS.map(rg =>
-    relayQuery(rg, [`SELECT * FROM signed_in_player_state WHERE ${filter}`], r => r.u64().toString(), 9000)
-      .then(rows => { if (rows.ok) answered = true; return rows; })
-      .catch(() => [])));
-  if (answered){
-    const online = new Set(per.flat().filter(Boolean).map(String));
+  if (liveComplete()){
+    const online = new Set(liveRows('signed_in_player_state', () => true).map(r => String(r.entity_id)));
     ids.forEach(id => playerOnline[id] = online.has(id));
-  } else {
-    await Promise.all(trackedPlayers.map(async p => {   // every mirror unreachable → bitjita
+  } else if (!bitjitaDisabled()){
+    await Promise.all(trackedPlayers.map(async p => {   // cache not ready → bitjita
       const id = String(p.entityId);
       try { const d = await apiFetch('/api/players/' + id); const pl = d.player || d; if (pl && typeof pl.signedIn === 'boolean') playerOnline[id] = pl.signedIn; } catch(e){}
     }));
@@ -2070,33 +2067,31 @@ async function relaySkillDescs(){
   } catch(e){}
   const CATS = ['None','Profession','Adventure'];   // the schema's own Sum variant names, so the strings match bitjita's exactly
   for (const rg of BC_REGIONS){
-    const rows = await relayQuery(rg, ['SELECT * FROM skill_desc'], r => {
-      const id = r.i32(); r.i32(); const name = r.str(); r.str(); r.str(); r.str();
-      const cat = r.u8(); r.i32();
-      return { id, name, skillCategoryStr: CATS[cat] || 'Other' };
-    }, 9000).catch(() => []);
-    if (rows.length){
-      const map = {}; rows.forEach(s => map[s.id] = { name: s.name, skillCategoryStr: s.skillCategoryStr });
-      _skillDescs = map;
-      safeSetItem(SKILL_DESC_KEY, JSON.stringify({ ts: Date.now(), map }));
-      return map;
-    }
+    try {
+      const rows = (await relayFetchOnce(rg, ['SELECT * FROM skill_desc'], 9000)).skill_desc || [];
+      if (rows.length){
+        const map = {};
+        rows.forEach(s => { const cat = Array.isArray(s.skill_category) ? s.skill_category[0] : (+s.skill_category || 0);
+          map[s.id] = { name: s.name, skillCategoryStr: CATS[cat] || 'Other' }; });
+        _skillDescs = map;
+        safeSetItem(SKILL_DESC_KEY, JSON.stringify({ ts: Date.now(), map }));
+        return map;
+      }
+    } catch(e){ /* mirror unreachable — try the next */ }
   }
   return null;   // no mirror answered — caller falls back to bitjita
 }
-// experience_state lives only in the region the player is currently in, so sweep all of them rather than
-// asking where they are first (that lookup is an HTTP round-trip, and this is one parallel wave anyway).
-// The same table is on the live feed, so between loads XP keeps updating without any of this re-running.
+// XP straight from the cache — experience_state is a held subscription, so this is a local read and the
+// tab keeps ticking live between renders. Only the skill-name map (static, 7d-persisted) can hit the wire.
 async function fetchSkillsRelay(id){
-  const [descs, per] = await Promise.all([
-    relaySkillDescs(),
-    Promise.all(BC_REGIONS.map(rg => relayQuery(rg, [`SELECT * FROM experience_state WHERE entity_id = ${id}`],
-      r => readExperienceRow(r), 9000).catch(() => [])))
-  ]);
+  if (!liveComplete()) throw new Error('live cache not ready');
+  const descs = await relaySkillDescs();
   if (!descs) throw new Error('skill_desc unavailable');
-  const row = per.flat().find(x => x && x.stacks && x.stacks.length);
+  const row = liveRows('experience_state', r => String(r.entity_id) === String(id)).find(r => (r.experience_stacks || []).length);
   if (!row) throw new Error('no experience_state');
-  return { player: { experience: row.stacks, skillMap: descs } };
+  // wire shape: stacks are [skill_id, quantity] pairs
+  const stacks = row.experience_stacks.map(s => Array.isArray(s) ? { skill_id: +s[0], quantity: +s[1] } : s);
+  return { player: { experience: stacks, skillMap: descs } };
 }
 async function loadSkillsInto(p, silent=false) {
   const eid = String(p.entityId);
@@ -2553,34 +2548,9 @@ async function renderInventoryTab(silent) {
 const TAB_STALE_MS = 60000;
 let ordersFetchedAt = 0, craftFetchedAt = 0;
 let ordersRunId = 0, craftRunId = 0;   // a superseded background revalidate must not overwrite newer data
-// The same caches persisted across sessions, so a page LOAD paints instantly too — the in-memory cache
-// above only helps once you've already visited the tab. Same trick bcRelayPlaces uses for place names.
-// Deliberately does NOT restore the fetched-at stamps: a reload always revalidates, it just isn't
-// staring at a spinner while it does. Payloads are small (~2-4KB/player) but a player with hundreds of
-// passive crafts could grow, and this app has hit the localStorage quota before (see _mktCache), so
-// oversized payloads are skipped rather than risking every other setItem silently failing.
-const TAB_CACHE_KEY = 'bcTabCache', TAB_CACHE_TTL = 24*60*60*1000, TAB_CACHE_MAX = 300*1024;
-let _tabCacheSaveTimer = null;
-function hydrateTabCaches(){
-  if (bitjitaDisabled()) return;   // relay-only test: no instant-paint from last session — show the real gap
-  try {
-    const d = JSON.parse(localStorage.getItem(TAB_CACHE_KEY) || 'null');
-    if (!d || !d.ts || (Date.now() - d.ts) > TAB_CACHE_TTL) return;
-    const known = new Set(trackedPlayers.map(p => String(p.entityId)));   // drop players no longer tracked
-    Object.entries(d.crafts || {}).forEach(([id, v]) => { if (known.has(id)) craftByPlayer[id] = v; });
-    Object.entries(d.orders || {}).forEach(([id, v]) => { if (known.has(id)) ordersByPlayer[id] = v; });
-  } catch(e){ /* corrupt or absent — just start cold */ }
-}
-function saveTabCaches(){
-  clearTimeout(_tabCacheSaveTimer);
-  _tabCacheSaveTimer = setTimeout(() => {
-    try {
-      const s = JSON.stringify({ ts: Date.now(), crafts: craftByPlayer, orders: ordersByPlayer });
-      if (s.length <= TAB_CACHE_MAX) safeSetItem(TAB_CACHE_KEY, s);
-      else localStorage.removeItem(TAB_CACHE_KEY);   // too big to persist — don't leave a stale copy behind
-    } catch(e){}
-  }, 1000);
-}
+// (bcTabCache — the 24h localStorage mirror of these two tabs — is deleted per OVERHAUL.md §9.1: the
+//  live cache fills every tab in ~1s, the bitjita fallback covers the boot window, and the quota risk
+//  outweighed an 800ms head start on two tabs out of thirteen.)
 // Small "Updating…" hint in a tab's toolbar, so a background revalidate is visible but not disruptive.
 function setTabBusy(tab, on){
   const el = document.getElementById(tab + '-busy');
@@ -2609,9 +2579,8 @@ function ordToggle(key){
 function relayResolveClaims(region, cids){
   const need = [...new Set(cids)].filter(c => c && c !== '0' && !relayClaimNames[c]);
   if (!need.length) return Promise.resolve();
-  return relayQuery(region, [`SELECT * FROM claim_state WHERE ${need.map(c => `entity_id = ${c}`).join(' OR ')}`],
-    r => { const e = r.u64(); r.u64(); r.u64(); return { id: e.toString(), name: r.str() }; }, 9000)
-    .then(rows => { rows.forEach(x => { if (x) relayClaimNames[x.id] = x.name; }); saveRelayPlaces(); });
+  return relayFetchOnce(region, [`SELECT * FROM claim_state WHERE ${need.map(c => `entity_id = ${c}`).join(' OR ')}`], 9000)
+    .then(byT => { (byT.claim_state || []).forEach(x => relayClaimNames[String(x.entity_id)] = x.name); saveRelayPlaces(); });
 }
 async function fetchMarketRelayMulti(ids){
   ids = ids.map(String);
@@ -2958,7 +2927,6 @@ async function renderOrdersTab(silent, force){
     if (myRun !== ordersRunId) return;
   }
   ordersFetchedAt = Date.now();
-  saveTabCaches();
   setTabBusy('orders', false);
   startLiveRefresh('orders');
 }
@@ -3556,6 +3524,7 @@ const LIVE_COLS = {
   deployable_state_v2: ['entity_id','owner_id','claim_entity_id','direction','deployable_description_id','nickname','hidden','appearance_override_id'],
   player_housing_state: ['entity_id','entrance_building_entity_id','network_entity_id','exit_portal_entity_id','rank','locked_until','is_empty','region_index'],
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
+  traveler_task_loop_timer: ['scheduled_id','scheduled_at'],
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -3730,14 +3699,16 @@ function liveQuerySet(ids){
     `SELECT * FROM inventory_state WHERE ${ids.map(i => `player_owner_entity_id = ${i}`).join(' OR ')}`,   // banks (per region)
     `SELECT * FROM building_state WHERE ${ids.map(i => `constructed_by_player_entity_id = ${i}`).join(' OR ')}`,   // house-interior discovery
     `SELECT * FROM deployable_state_v2 WHERE ${ids.map(i => `owner_id = ${i}`).join(' OR ')}`,             // vehicle discovery
-    // Unfiltered but bounded (§8.4): exactly ONE row per mirror — each region's own display name.
+    // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
+    // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
     'SELECT * FROM world_region_name_state',
+    'SELECT * FROM traveler_task_loop_timer',
   ];
   for (let i = 0; i < liveContainerIds.length; i += 40)
     sqls.push(`SELECT * FROM inventory_state WHERE ${liveContainerIds.slice(i, i + 40).map(c => `owner_entity_id = ${c}`).join(' OR ')}`);
   return {
     sqls,
-    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2', 'world_region_name_state'],
+    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2', 'world_region_name_state', 'traveler_task_loop_timer'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -3825,18 +3796,44 @@ function liveReschedule(c){
   clearTimeout(c.timer);
   c.timer = setTimeout(() => liveOpen(c), wait);
 }
+// ── Fetch-once: a scratch socket for on-demand lookups (place names, static desc tables) ──
+// The explorer's own model: open, ONE subscribe, take the snapshot, hang up. Nothing accumulates
+// because the socket dies with its subscription. Used only for by-id/name resolution that can't be a
+// held subscription (the id set is dynamic and the results are persisted forever); everything else
+// reads the cache. Rows decode through liveRow — snapshots are NAMED objects, so no column-order
+// dependency. Returns { tableName: [rows] }; throws on error/timeout so callers fall back.
+function relayFetchOnce(region, sqls, timeoutMs = 9000){
+  return new Promise((resolve, reject) => {
+    let ws;
+    try { ws = new WebSocket(relayWsUrl(region), ['v1.json.spacetimedb']); }
+    catch(e){ return reject(e); }
+    const t = setTimeout(() => { try { ws.close(); } catch(e){} reject(new Error('fetch-once timeout r' + region)); }, timeoutMs);
+    ws.onerror = () => { try { ws.close(); } catch(e){} };
+    ws.onclose = () => { clearTimeout(t); reject(new Error('fetch-once closed r' + region)); };   // no-op if already settled
+    ws.onopen = () => { try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: sqls } })); } catch(e){} };
+    ws.onmessage = ev => {
+      if (typeof ev.data !== 'string') return;
+      let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+      if (!m.InitialSubscription) return;
+      clearTimeout(t);
+      const byTable = {};
+      ((m.InitialSubscription.database_update && m.InitialSubscription.database_update.tables) || []).forEach(tb => {
+        const list = byTable[tb.table_name] || (byTable[tb.table_name] = []);
+        (tb.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb.table_name, raw); if (r) list.push(r); }));
+      });
+      ws.onclose = null;
+      try { ws.close(); } catch(e){}
+      resolve(byTable);
+    };
+  });
+}
 // Console/debug handle (not a public API): window.__live.status() etc.
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
-function readBuildingState(r){
-  const entityId = r.u64().toString(), claimId = r.u64().toString();
-  r.i32(); return { entityId, claimId, descId: r.i32() };
-}
-// Resolve building/claim names for buildings we haven't seen — in ONE round-trip. The per-connection
-// cost to the relay is ~1s once connections are churning, so what matters is round-trip COUNT, not query
-// count: building_state, its nickname, and the claim name (joined through the building) all come back
-// together. Persisted across sessions (saveRelayPlaces), so after the first-ever visit this is a no-op.
+// Resolve building/claim names for buildings we haven't seen — one fetch-once round-trip carrying
+// building_state, its nickname, and the claim name (joined through the building). Persisted across
+// sessions (saveRelayPlaces), so after the first-ever sight of a building this is a no-op.
 async function relayResolvePlaces(region, buildingIds){
   const unknown = [...new Set(buildingIds)].filter(b => b && b !== '0' && !relayBuildingInfo[b]);
   if (!unknown.length) return;
@@ -3845,16 +3842,11 @@ async function relayResolvePlaces(region, buildingIds){
     ...unknown.map(b => `SELECT * FROM building_nickname_state WHERE entity_id = ${b}`),
     ...unknown.map(b => `SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`)
   ];
-  const rows = await relayQuery(region, sqls, (r, table) => {
-    if (table === 'building_state'){ const b = readBuildingState(r); return { t:'bld', ...b }; }
-    if (table === 'building_nickname_state') return { t:'nick', id: r.u64().toString(), name: r.str() };
-    if (table === 'claim_state'){ const e = r.u64(); r.u64(); r.u64(); return { t:'claim', id: e.toString(), name: r.str() }; }
-    return null;
-  }, 9000);
-  rows.forEach(x => { if (!x) return;
-    if (x.t === 'bld') relayBuildingInfo[x.entityId] = { claimId: x.claimId, descId: x.descId, nickname: (relayBuildingInfo[x.entityId]||{}).nickname || '' };
-    else if (x.t === 'claim') relayClaimNames[x.id] = x.name; });
-  rows.forEach(x => { if (x && x.t === 'nick' && relayBuildingInfo[x.id]) relayBuildingInfo[x.id].nickname = x.name; });
+  const byT = await relayFetchOnce(region, sqls, 9000);
+  (byT.building_state || []).forEach(x => relayBuildingInfo[String(x.entity_id)] =
+    { claimId: String(x.claim_entity_id), descId: x.building_description_id, nickname: (relayBuildingInfo[String(x.entity_id)]||{}).nickname || '' });
+  (byT.claim_state || []).forEach(x => relayClaimNames[String(x.entity_id)] = x.name);
+  (byT.building_nickname_state || []).forEach(x => { const b = relayBuildingInfo[String(x.entity_id)]; if (b && x.nickname) b.nickname = x.nickname; });
   unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
   saveRelayPlaces();
 }
@@ -3996,13 +3988,6 @@ function craftProgressLatest(rows){
   return Object.values(latest);
 }
 let _feedTimer = null, _feedWant = { crafts:false, orders:false };
-// readExperienceRow outlives the feed it was written for: fetchSkillsRelay still decodes BSATN rows
-// with it until the Experience tab migrates onto the cache.
-function readExperienceRow(r){
-  const id = r.u64(); const n = r.u32(); const stacks = [];
-  for (let i=0;i<n;i++) stacks.push({ skill_id: r.i32(), quantity: r.i32() });
-  return { entityId: id.toString(), stacks };
-}
 function feedKnownCraftIds(){
   const s = new Set();
   Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => s.add(String(c.entityId || c.entity_id))));
@@ -4044,6 +4029,13 @@ function liveBridge(evs){
         (r.experience_stacks || []).map(s => Array.isArray(s) ? { skill_id: +s[0], quantity: +s[1] } : s)));
     } else if (ev.table === 'active_buff_state' && ev.isDelta){
       ev.rows.forEach(r => onLiveBuffs(r.entity_id));
+    } else if (ev.table === 'signed_in_player_state'){
+      // presence: a row EXISTS iff signed in — inserts mark online, deletes mark offline. Snapshots seed
+      // the truth for players present; absence is handled by refreshPlayerOnline's cache read.
+      let touched = false;
+      ev.rows.forEach(r => { playerOnline[String(r.entity_id)] = true; touched = true; });
+      if (ev.isDelta) ev.deletes.forEach(r => { playerOnline[String(r.entity_id)] = false; touched = true; });
+      if (touched) applyPlayerOnlineDots();
     }
   });
   // Doorbell: did a LIST change? (Progress rows tick 1-2/sec while someone works a station, so only a
@@ -4215,7 +4207,6 @@ async function renderCraftingTab(silent, force) {
       if (myRun !== craftRunId) return;
     }
     craftFetchedAt = Date.now();
-    saveTabCaches();
     setTabBusy('craft', false);
   }
   // Live by default: the session-long relay feed streams progress AND surfaces new crafts, and the list
@@ -4799,211 +4790,9 @@ async function loadGameItemDefs(){
 // BitCraft packs the region into the top byte of every entity id (verified against bitjita: 13/13).
 function regionOfEntity(id){ try { return Number(BigInt(id) >> 56n); } catch(e){ return null; } }
 
-// ── Minimal BSATN reader (all little-endian) ──
-function bsRead(bytes){
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let o = 0;
-  return { get o(){return o;}, set o(v){o=v;}, len: bytes.byteLength,
-    u8:()=>dv.getUint8(o++), bool:()=>dv.getUint8(o++)!==0,
-    u16:()=>{const v=dv.getUint16(o,true);o+=2;return v;},
-    i32:()=>{const v=dv.getInt32(o,true);o+=4;return v;},
-    u32:()=>{const v=dv.getUint32(o,true);o+=4;return v;},
-    f32:()=>{const v=dv.getFloat32(o,true);o+=4;return v;},
-    i64:()=>{const v=dv.getBigInt64(o,true);o+=8;return v;},
-    u64:()=>{const v=dv.getBigUint64(o,true);o+=8;return v;},
-    str:()=>{const n=dv.getUint32(o,true);o+=4;const s=new TextDecoder().decode(bytes.subarray(o,o+n));o+=n;return s;},
-    sub:(n)=>{const b=bytes.subarray(o,o+n);o+=n;return b;} };
-}
-// ClientMessage::Subscribe (tag 0) — note: client messages carry NO compression prefix.
-function relayEncSubscribe(sqls, reqId, qsId){
-  const enc = new TextEncoder(); const qs = sqls.map(s => enc.encode(s));
-  const size = 1 + 4 + 4 + 4 + qs.reduce((a,q)=>a+4+q.length, 0);
-  const buf = new Uint8Array(size); const dv = new DataView(buf.buffer);
-  let o = 0; buf[o++] = 0x00;
-  dv.setUint32(o, reqId, true); o += 4; dv.setUint32(o, qsId, true); o += 4;
-  dv.setUint32(o, qs.length, true); o += 4;
-  qs.forEach(q => { dv.setUint32(o, q.length, true); o += 4; buf.set(q, o); o += q.length; });
-  return buf;
-}
-// SubscribeApplied → decoded rows. Envelope: [compression][tag=1] req u32, query_set u32,
-// tables u32 → { name str, size_hint Sum(0=FixedSize u16 | 1=RowOffsets u32 n + n×u64), rows bytes }
-function relayDecodeRows(b, rowFn){
-  const r = bsRead(b); r.o = 2; r.u32(); r.u32();
-  const nTables = r.u32(); const rows = [];
-  for (let t=0;t<nTables;t++){
-    const table = r.str();     // passed to rowFn so one subscription can span several tables
-    const hint = r.u8(); let offsets = null, fixed = 0;
-    if (hint === 0) fixed = r.u16(); else { const n = r.u32(); offsets = []; for (let i=0;i<n;i++) offsets.push(Number(r.u64())); }
-    const data = r.sub(r.u32());
-    const starts = offsets || (fixed ? Array.from({length:Math.floor(data.length/fixed)},(_,i)=>i*fixed) : (data.length?[0]:[]));
-    for (let i=0;i<starts.length;i++){
-      const end = (i+1 < starts.length) ? starts[i+1] : data.length;
-      try { rows.push(rowFn(bsRead(data.subarray(starts[i], end)), table)); } catch(e){ /* skip malformed row */ }
-    }
-  }
-  return rows;
-}
-// ── Relay circuit breaker ──
-// A refused WebSocket only costs ~250ms on its own, but a tab load dials all 13 regions at once; once
-// they're failing, the browser throttles further connections to that host and a whole sweep degrades to
-// 5-10s. Meanwhile the bitjita fallback answers in ~180ms. So the relay being DOWN was costing far more
-// than the relay being slow ever did. Once it looks down, stop dialling and let callers fall back at once.
-// Self-healing: the streak is deliberately NOT reset when the cooldown lapses, so the next sweep sends
-// ONE probe — if it fails the breaker re-trips immediately and the other 12 short-circuit; if it
-// succeeds everything resets. Costs ~250ms per 2 min while down, instead of 5-10s per tab load.
-let relayFailStreak = 0, relayDownUntil = 0, relayProbing = false;
-// Trip only on a WHOLE sweep's worth of consecutive misses with no answer in between. A tab load queries
-// every region at once, so a couple of flaky/empty regions must never disable the relay — that would
-// silently cost the Inventory tab its vehicle and equipment rows (relayQuery serves those too) and push
-// crafts/orders onto bitjita for no reason. Healthy-but-empty regions still answer, so they reset the
-// streak; only a genuinely unreachable relay produces 13 misses in a row.
-// A function, not a const: BC_REGIONS is now discovered from /health at startup, so a value captured
-// here would freeze at the fallback length and mis-size the trip threshold if the relay adds a region.
-const relayTripAfter = () => BC_REGIONS.length, RELAY_COOLDOWN_MS = 60 * 1000;
-function relayIsDown(){ return Date.now() < relayDownUntil; }
-// A tab load fires all 13 regions through Promise.all, so they'd all read the breaker as "closed" in the
-// same tick and dial together — turning each cooldown lapse back into a full 5s sweep. Once we're in
-// probe mode (a trip has happened), let exactly ONE call through and make the rest wait for its verdict.
-function relayTakeSlot(){
-  if (relayIsDown()) return false;
-  if (relayFailStreak >= relayTripAfter()){
-    if (relayProbing) return false;
-    relayProbing = true;
-  }
-  return true;
-}
-function noteRelayResult(answered){
-  relayProbing = false;
-  if (answered){ relayFailStreak = 0; relayDownUntil = 0; return; }
-  if (++relayFailStreak >= relayTripAfter()) relayDownUntil = Date.now() + RELAY_COOLDOWN_MS;
-}
-// ── Relay connection pool ──
-// Measured: a lone socket connects+answers in ~338ms, but a tab load opens all 13 regions at once and
-// they degrade to 1357-2355ms contending on TLS handshakes. A SECOND subscribe on an already-open
-// socket answers in ~80ms. So the handshake is nearly the whole cost, and the cure is to stop paying
-// it — hold one socket per region and multiplex subscribes over it, routing replies by request id
-// (SubscribeApplied echoes `req`/`query_set`, verified: sent qs=1 and qs=2, got req=1 and req=2 back).
-// Sockets idle-close so we don't sit on 13 open connections to a community-run box indefinitely.
-const relayPool = {};   // region -> { ws, greeted, opening, pending:Map(reqId->handler), nextId }
-// ⚠️ INTERIM (until the last relayQuery consumers move onto the live cache and this pool is deleted):
-// the live layer now holds 13 sockets permanently, and the browser's socket budget to one host is a
-// SHARED ~22 (measured, OVERHAUL §8.3) — so the pool can no longer keep its own 13 warm. Pool sockets
-// are instead dialled on demand, capped at POOL_MAX_OPEN concurrent, and closed shortly after their
-// last answer. A 13-region sweep runs 4-wide (~1-2s) — slower than the old warm pool, acceptable for
-// the migration window. Peak sockets: 13 live + 4 opening + a few idling ≈ 20, under the ceiling.
-const POOL_MAX_OPEN = 4, POOL_IDLE_MS = 800;
-let _poolQ = [];
-function _poolSlot(c){
-  if (c.slot) return Promise.resolve();
-  return new Promise(res => {
-    const tryGo = () => {
-      if (Object.values(relayPool).filter(x => x.slot).length < POOL_MAX_OPEN){ c.slot = true; res(); }
-      else _poolQ.push(tryGo);
-    };
-    tryGo();
-  });
-}
-function _poolFree(c){
-  if (!c.slot) return;
-  c.slot = false;
-  const n = _poolQ.shift(); if (n) n();
-}
-// Close an answered socket soon: the slot frees when its last pending query settles (so sweeps keep
-// moving), and the socket itself closes shortly after so open-socket count stays near the cap.
-function _poolIdleSoon(c){
-  clearTimeout(c.idleT);
-  c.idleT = setTimeout(() => { if (!c.pending.size){ try { c.ws && c.ws.close(); } catch(e){} } }, POOL_IDLE_MS);
-}
-// ⚠️ A one-shot query leaves its subscription registered on the connection, and there's no cheap way to
-// retract it: subscriptions are ADDITIVE (verified — a second Subscribe doesn't replace the first, both
-// keep streaming) and the v2 Unsubscribe wire format isn't documented (a guessed frame killed the
-// socket). They accumulate server-side, and that quietly breaks live updates: on a fresh connection a
-// held subscription received 164 TransactionUpdates in 6s, but after 30 one-shot queries on that same
-// socket it received ZERO — snapshots keep answering, so nothing looks broken. So bound it: retire a
-// socket once it has issued RELAY_MAX_SUBS subscribes. nextId keeps climbing across recycles so a
-// reused connection can never hand out an id that's still in flight; subsOnSocket resets per socket.
-// ⚠️ STAGGER THE THRESHOLD PER REGION. A tab sweep queries all 13 regions once, so every socket's count
-// climbs in lockstep and a flat threshold retires all 13 on the SAME sweep — 13 simultaneous handshakes,
-// the exact contention this pool exists to avoid. Observed as a clean sawtooth: three fast sweeps
-// (85ms), then every socket recycling at once and the next sweep costing 371-1400ms. Spreading the
-// thresholds means at most one or two sockets retire per sweep, and a lone reconnect hides behind the
-// twelve that are still warm.
-const RELAY_MAX_SUBS = 20;
-function relayMaxSubs(region){ return RELAY_MAX_SUBS + (region % 11) * 3; }   // 20..50, distinct per region
-function relayRecycle(c){
-  if ((c.subsOnSocket || 0) < relayMaxSubs(c.region) || c.pending.size) return;
-  try { c.ws && c.ws.close(); } catch(_){}      // onclose clears state
-  setTimeout(() => relayConnect(c.region).catch(()=>{}), 50);   // straight back to warm — don't make the next query pay the handshake
-}
-function relayConnect(region){
-  const c = relayPool[region] || (relayPool[region] = { pending:new Map(), nextId:1, region });
-  if (c.greeted && c.ws && c.ws.readyState === 1){ clearTimeout(c.idleT); return Promise.resolve(c); }
-  if (c.opening) return c.opening;
-  c.opening = _poolSlot(c).then(() => new Promise((resolve, reject) => {
-    let ws;
-    try { ws = new WebSocket(relayWsUrl(region), ['v2.bsatn.spacetimedb']); }
-    catch(e){ c.opening = null; _poolFree(c); return reject(e); }
-    ws.binaryType = 'arraybuffer'; c.ws = ws; c.greeted = false; c.subsOnSocket = 0;
-    const t = setTimeout(() => { try { ws.close(); } catch(_){} }, 12000);   // onclose does the teardown
-    ws.onmessage = ev => {
-      const b = new Uint8Array(ev.data);
-      if (!c.greeted){ c.greeted = true; clearTimeout(t); c.opening = null; resolve(c); return; }
-      // ⚠️ The two frame types carry the id in DIFFERENT slots. SubscribeApplied (tag 1) is
-      // [comp][tag][request_id][query_set_id]; TransactionUpdate (tag 4) is [comp][tag][?][query_set_id]
-      // — its first u32 is NOT the request id (observed as 1 while we'd sent 777). Routing deltas off
-      // offset 2 therefore matched nothing and silently dropped every live update. We always send
-      // request_id === query_set_id, so keying both on the right slot lands them on the same handler.
-      let key = 0;
-      try { const r = bsRead(b); r.o = 2; const a = r.u32(), qs = r.u32(); key = (b[1] === 4) ? qs : a; }
-      catch(e){ return; }
-      const h = c.pending.get(key);
-      if (h) h.frame(b);
-    };
-    ws.onerror = () => { try { ws.close(); } catch(_){} };
-    ws.onclose = () => {
-      clearTimeout(t); clearTimeout(c.idleT); _poolFree(c);
-      const wasOpening = c.opening; c.opening = null; c.greeted = false; c.ws = null;
-      c.pending.forEach(h => h.dropped()); c.pending.clear();   // in-flight callers settle as unanswered
-      if (wasOpening) reject(new Error('relay connect failed'));
-    };
-  }));
-  return c.opening;
-}
-// Run one subscription (possibly several query strings) against a region mirror and decode its rows.
-async function relayQuery(region, sqls, rowFn, timeoutMs=12000){
-  const fail = () => { const rows = []; rows.ok = false; return rows; };
-  if (!relayTakeSlot()) return fail();                       // breaker open → caller falls back at once
-  let c;
-  try { c = await relayConnect(region); }
-  catch(e){ noteRelayResult(false); return fail(); }
-  return new Promise(resolve => {
-    const id = c.nextId++;
-    let rows = [], answered = false, idle = null, done = false;
-    // `rows.ok` tells callers the mirror actually answered — an empty result is otherwise
-    // indistinguishable from an unreachable relay, which would silently skip a bitjita fallback.
-    const fin = () => {
-      if (done) return; done = true;
-      clearTimeout(t); clearTimeout(idle); c.pending.delete(id);
-      if (!c.pending.size){ _poolFree(c); _poolIdleSoon(c); }   // interim §8.3 budget: free the slot for the next region, close soon
-      rows.ok = answered; noteRelayResult(answered); relayRecycle(c); resolve(rows);
-    };
-    const t = setTimeout(fin, timeoutMs);
-    c.pending.set(id, {
-      // The relay answers a whole subscribe — however many queries — with exactly ONE SubscribeApplied
-      // frame, so settle the moment it lands. Re-verified here at 1/3/6/36 queries: always one frame,
-      // ~85ms. The old 60ms "straggler grace" was pure latency on every round-trip, and worse, it put a
-      // setTimeout on the critical path — background-tab throttling stretched that 60ms to ~585ms.
-      frame: b => {
-        if (b[1] !== 1) return;                                    // ignore anything that isn't SubscribeApplied
-        answered = true;
-        try { rows = rows.concat(relayDecodeRows(b, rowFn)); } catch(e){}
-        fin();
-      },
-      dropped: fin      // socket died under us — settle as unanswered so the caller can fall back
-    });
-    try { c.ws.send(relayEncSubscribe(sqls, id, id)); c.subsOnSocket = (c.subsOnSocket||0)+1; } catch(e){ fin(); }
-  });
-}
+// (The BSATN decoder, request/response connection pool, socket recycling and circuit breaker that used
+//  to live here are GONE — the live layer's held v1.json subscriptions and relayFetchOnce replaced every
+//  consumer. See OVERHAUL.md §9.4.)
 // ── Equipment: worn gear (equipment_state) + saved loadouts (equipment_preset_state) ──
 // Both live in the cache (subscribed since the layer's birth). Note the presets' `active` flag is false
 // even for the gear actually being worn — equipment_state is the live set.
@@ -5183,12 +4972,11 @@ let taskPlayersById = {}; // entityId -> { player, travTasks, itemMetaMap, expir
 const TASK_REF_KEY = 'bcTaskRefs', TASK_REF_TTL = 7*24*60*60*1000;
 let _taskRefs = null;
 // A task item stack: { item_id i32, quantity i32, item_type Sum(1 byte), durability Sum(some i32|none) }
-function readTaskStack(r){
-  const item_id = r.i32(), quantity = r.i32();
-  const t = r.u8();
-  let durability = 0;
-  if (r.u8() === 0) durability = r.i32();
-  return { item_id, quantity, item_type: t === 1 ? 'cargo' : 'item', durability };
+// A task item stack on the v1 JSON wire: [item_id, qty, [type], [durability]] (positional product).
+function taskStackFromJson(s){
+  if (!Array.isArray(s)) return { item_id: +s.item_id || 0, quantity: +s.quantity || 0, item_type: (Array.isArray(s.item_type) ? s.item_type[0] : +s.item_type) === 1 ? 'cargo' : 'item', durability: 0 };
+  const t = Array.isArray(s[2]) ? s[2][0] : (+s[2] || 0);
+  return { item_id: +s[0], quantity: +s[1], item_type: t === 1 ? 'cargo' : 'item', durability: 0 };
 }
 async function relayTaskRefs(){
   if (_taskRefs) return _taskRefs;
@@ -5197,58 +4985,64 @@ async function relayTaskRefs(){
     if (d && d.ts && (Date.now() - d.ts) < TASK_REF_TTL && d.tasks && d.npcs) return (_taskRefs = { tasks:d.tasks, npcs:d.npcs });
   } catch(e){}
   for (const rg of BC_REGIONS){
-    const rows = await relayQuery(rg, ['SELECT * FROM traveler_task_desc', 'SELECT * FROM npc_desc'], (r, table) => {
-      if (table === 'npc_desc'){ const npc_type = r.i32(); return { kind:'npc', npc_type, name: r.str() }; }
-      const id = r.i32();
-      const levelRequirement = { skill_id: r.i32(), min_level: r.i32(), max_level: r.i32() };
-      const nReq = r.u32(); const requiredItems = []; for (let i=0;i<nReq;i++) requiredItems.push(readTaskStack(r));
-      const nRew = r.u32(); const rewardedItems = []; for (let i=0;i<nRew;i++) rewardedItems.push(readTaskStack(r));
-      const rewardedExperience = { skill_id: r.i32(), quantity: r.f32() };
-      return { kind:'task', id, levelRequirement, requiredItems, rewardedItems, rewardedExperience, description: r.str() };
-    }, 12000).catch(() => []);
-    if (rows.length){
+    try {
+      const byT = await relayFetchOnce(rg, ['SELECT * FROM traveler_task_desc', 'SELECT * FROM npc_desc'], 12000);
       const tasks = {}, npcs = {};
-      rows.forEach(x => { if (!x) return; if (x.kind === 'npc') npcs[x.npc_type] = x.name; else { const { kind, id, ...rest } = x; tasks[id] = rest; } });
+      (byT.npc_desc || []).forEach(n => npcs[n.npc_type] = n.name);
+      (byT.traveler_task_desc || []).forEach(t => {
+        const lr = t.level_requirement || {};
+        tasks[t.id] = {
+          levelRequirement: Array.isArray(lr) ? { skill_id: +lr[0], min_level: +lr[1], max_level: +lr[2] } : { skill_id: +lr.skill_id || 0, min_level: +lr.min_level || 0, max_level: +lr.max_level || 0 },
+          requiredItems: (t.required_items || []).map(taskStackFromJson),
+          rewardedItems: (t.rewarded_items || []).map(taskStackFromJson),
+          rewardedExperience: (x => Array.isArray(x) ? { skill_id: +x[0], quantity: +x[1] } : { skill_id: +x.skill_id || 0, quantity: +x.quantity || 0 })(t.rewarded_experience || {}),
+          description: t.description || ''
+        };
+      });
       if (Object.keys(tasks).length){
         _taskRefs = { tasks, npcs };
         safeSetItem(TASK_REF_KEY, JSON.stringify({ ts: Date.now(), tasks, npcs }));
         return _taskRefs;
       }
-    }
+    } catch(e){ /* mirror unreachable — try the next */ }
   }
   return null;   // no mirror answered — caller falls back to bitjita
 }
+// Task rows + the rotation timer are held subscriptions — this is a cache read; only the static desc
+// catalogue (7d-persisted) can hit the wire, once.
 async function fetchTasksRelay(playerId){
+  if (!liveComplete()) throw new Error('live cache not ready');
   const [refs, skills] = await Promise.all([relayTaskRefs(), relaySkillDescs()]);
   if (!refs) throw new Error('task refs unavailable');
+  // rotation timer: scheduled_at is a Sum([tag, payload]) around a timestamp — dig the micros out
   let expires = null;
-  const per = await Promise.all(BC_REGIONS.map(rg => relayQuery(rg, [
-    `SELECT * FROM traveler_task_state WHERE player_entity_id = ${playerId}`,
-    'SELECT * FROM traveler_task_loop_timer'
-  ], (r, table) => {
-    if (table === 'traveler_task_loop_timer'){ r.u64(); r.u8(); return { kind:'timer', micros: r.i64() }; }
-    const entityId = r.u64(); r.u64();
-    return { kind:'task', entityId: entityId.toString(), travelerId: r.i32(), taskId: r.i32(), completed: r.bool(), regionId: rg };
-  }, 9000).catch(() => [])));
+  liveRows('traveler_task_loop_timer', () => true).some(r => {
+    let v = r.scheduled_at;
+    if (Array.isArray(v)) v = v[1];
+    if (Array.isArray(v)) v = v[0];
+    if (v && typeof v === 'object') v = v.__timestamp_micros_since_unix_epoch__;
+    const n = Number(v);
+    if (isFinite(n) && n > 0){ expires = Math.floor(n / 1e6); return true; }
+    return false;
+  });
   const tasks = [];
-  per.flat().forEach(x => {
-    if (!x) return;
-    if (x.kind === 'timer'){ if (expires == null) expires = Math.floor(Number(x.micros) / 1e6); return; }
-    const d = refs.tasks[x.taskId] || {};
+  liveRows('traveler_task_state', r => String(r.player_entity_id) === String(playerId)).forEach(x => {
+    const d = refs.tasks[x.task_id] || {};
     tasks.push({
-      entityId: x.entityId, taskId: x.taskId, travelerId: x.travelerId, completed: x.completed, regionId: x.regionId,
+      entityId: String(x.entity_id), taskId: x.task_id, travelerId: x.traveler_id, completed: !!x.completed, regionId: x.__region,
       description: d.description || '', levelRequirement: d.levelRequirement || null,
       requiredItems: d.requiredItems || [], rewardedItems: d.rewardedItems || [],
       rewardedExperience: d.rewardedExperience || null,
       // The renderer guesses the trader from the description's first word when it has no name. We can do
       // better: npc_desc maps traveler_id straight to the real name.
-      npcName: refs.npcs[x.travelerId] || null,
+      npcName: refs.npcs[x.traveler_id] || null,
       skillName: (d.levelRequirement && skills && skills[d.levelRequirement.skill_id]) ? skills[d.levelRequirement.skill_id].name : ''
     });
   });
   if (!tasks.length) throw new Error('no traveler_task_state');
-  // Item names/icons come from /itemdefs, which the app already loads and caches for a day.
-  const defs = gameItemDefs || { items:{}, cargos:{} };
+  // AWAIT the item defs — the cache read above is instant now, so unlike the old sweeping version this
+  // path can win the race against /itemdefs and would return nameless "Item 3100010" rows.
+  const defs = await loadGameItemDefs();
   return { tasks, expirationTimestamp: expires, items: defs.items, cargo: defs.cargos };
 }
 async function loadTasks(id, silent=false) {
@@ -11005,7 +10799,7 @@ async function renderGroupCraft(){
   openCraftLive = localStorage.getItem('bc_opencraft_live') === '1';
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
-  hydrateTabCaches();            // last session's Orders/Crafts data → the saved tab paints instantly, then revalidates
+  try { localStorage.removeItem('bcTabCache'); } catch(e){}   // §9.1: retired — reclaim its quota once
   if (trackedPlayers.length){
     // Discover the live region list BEFORE dialling, so a region the relay has added (or dropped) is
     // picked up without a code change. Falls back to the hardcoded list if /health can't be reached.
