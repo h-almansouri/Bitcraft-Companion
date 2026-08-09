@@ -3506,10 +3506,17 @@ async function loadRelayRegions(){
 // relay-mirror-bcN, so trust /health over the tutorial. One helper so a future rename is a one-line fix.
 // Dev instrumentation: `sessionStorage.bc_count_sockets = 1` then reload to tally every socket the app
 // opens, with what it was for. Read it back via window.__sockLog.
-if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('bc_count_sockets')){
-  window.__sockLog = [];
+if (typeof sessionStorage !== 'undefined' && (sessionStorage.getItem('bc_count_sockets') || sessionStorage.getItem('bc_track_concurrent'))){
+  window.__sockLog = []; window.__sockLive = 0; window.__sockPeak = 0;
   const _W = window.WebSocket;
-  window.WebSocket = function(u, p){ window.__sockLog.push({ port: (String(u).match(/:(\d+)\//)||[])[1], at: Math.round(performance.now()) }); return new _W(u, p); };
+  window.WebSocket = function(u, p){
+    window.__sockLog.push({ port: (String(u).match(/:(\d+)\//)||[])[1], at: Math.round(performance.now()) });
+    window.__sockLive++; window.__sockPeak = Math.max(window.__sockPeak, window.__sockLive);
+    const w = new _W(u, p);
+    const done = () => { window.__sockLive = Math.max(0, window.__sockLive - 1); };
+    w.addEventListener('close', done); w.addEventListener('error', done);
+    return w;
+  };
   window.WebSocket.prototype = _W.prototype;
 }
 const relayWsUrl = region => `wss://relay.bitcraftsync.app:${3000+region}/v1/database/bitcraft-live-${region}/subscribe?compression=None`;
@@ -3663,7 +3670,10 @@ function liveReady(){
   if (!rgs.length) return false;
   return rgs.some(rg => liveConns[rg].snapshotTs > 0) && rgs.every(rg => liveConns[rg].snapshotTs > 0 || liveConns[rg].tried);
 }
-function liveApplySnapshot(c, frame){
+// `additive` = this snapshot answers a SECOND Subscribe sent on an already-open socket, so it contains
+// ONLY that subscribe's rows. Replacing the region slice with it (correct for a full dial) would delete
+// everything the first subscribe established. Merge instead.
+function liveApplySnapshot(c, frame, additive){
   const fresh = {};
   ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
     // UNION, not overwrite: one subscribe can carry several queries against the SAME table (personal
@@ -3672,14 +3682,24 @@ function liveApplySnapshot(c, frame){
     const m = fresh[t.table_name] || (fresh[t.table_name] = new Map());
     (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r){ r.__region = c.region; m.set(livePk(r), r); } }));
   });
-  // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
-  // snapshot didn't mention it), so rows from before a reconnect can never linger.
   const evs = [];
-  c.tables.forEach(tb => {
-    const slice = fresh[tb] || new Map();
-    (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
-    evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
-  });
+  if (additive){
+    // Merge: only tables this snapshot actually mentioned, and only adding rows.
+    Object.keys(fresh).forEach(tb => {
+      const byRegion = liveCache[tb] || (liveCache[tb] = {});
+      const slice = byRegion[c.region] || (byRegion[c.region] = new Map());
+      fresh[tb].forEach((row, pk) => slice.set(pk, row));
+      evs.push({ table: tb, region: c.region, isDelta: false, rows: [...fresh[tb].values()], deletes: [] });
+    });
+  } else {
+    // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
+    // snapshot didn't mention it), so rows from before a reconnect can never linger.
+    c.tables.forEach(tb => {
+      const slice = fresh[tb] || new Map();
+      (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
+      evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
+    });
+  }
   liveNotify(evs);
   // The moment the LAST region's snapshot lands, ring the doorbells once: tabs that rendered (or
   // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
@@ -3778,6 +3798,10 @@ function liveWantedRefs(){
 const liveRefsKey = r => r.containers.join(',') + '|' + r.buildings.join(',') + '|' + r.networks.join(',') + '|' + r.locs.join(',');
 function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
 function liveSaveRefs(pKey, refs){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: refs })); } catch(e){} }
+// Discovery settles fast now that all 13 sockets are dialled at once — measured, every region's snapshot
+// lands within ~310-470ms of the first, versus 620-1550ms when the dials were staggered. 350ms is enough
+// to collapse that burst into one action; 1500ms was just dead time on every cold boot.
+const LIVE_DISCOVERY_DEBOUNCE_MS = 350;
 let _liveContTimer = null;
 onLiveChange(evs => {
   if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
@@ -3785,10 +3809,14 @@ onLiveChange(evs => {
   _liveContTimer = setTimeout(() => {
     const want = liveWantedRefs();
     if (liveRefsKey(want) === liveRefsKey(liveRefs)) return;
+    liveRefs = want;
     liveSaveRefs(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
-    liveStart();   // query set changed → the one redial path (§3.2). Converges: the wanted set derives
-                   // only from rows the base subscription carries, so a second pass sees the same set.
-  }, 1500);
+    // Extend the EXISTING sockets instead of redialling all 13 (§3.2's redial is for roster changes;
+    // this is just "we now know more ids to ask about"). Converges: the wanted set derives only from
+    // rows the base subscription carries, so a second pass sees the same set and stops.
+    const sent = liveAddSubscribe();
+    if (!sent) liveStart();   // nothing open to extend (boot race / all reconnecting) → fall back to a dial
+  }, LIVE_DISCOVERY_DEBOUNCE_MS);
 });
 function liveQuerySet(ids, region){
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
@@ -3848,7 +3876,12 @@ function liveStart(){
   if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
   if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
   liveRosterKey = key; liveRosterIds = ids;
-  BC_REGIONS.forEach((rg, i) => setTimeout(() => liveDial(rg), i * 40));   // stagger — 13 simultaneous handshakes is the cliff (§8.1)
+  // ⚠️ NO STAGGER. §8.1's cliff is at 26 sockets, not 13 — 13 at once was always fine, and spacing them
+  // 40ms apart only delayed the later regions AND spread out their replies, which the discovery debounce
+  // then had to wait out. Measured, twice: simultaneous puts the LAST snapshot at 647-812ms with a
+  // 311-471ms spread; staggered pushed it to 953-1884ms with a 619-1550ms spread. The FIRST reply was
+  // ~335ms either way, so the stagger bought nothing and cost up to a second.
+  BC_REGIONS.forEach(rg => liveDial(rg));
 }
 function liveStopAll(){
   Object.keys(liveConns).forEach(rg => liveDrop(rg));
@@ -3866,9 +3899,32 @@ function liveDial(rg){
   if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
   if (ex) liveDrop(rg);
   const { sqls, tables } = liveQuerySet(liveRosterIds, rg);
-  const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
+  const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false, subs: 1 };
   liveConns[rg] = c;
   liveOpen(c);
+}
+// Send an ADDITIVE Subscribe on the sockets that are already open, rather than redialling. Used only
+// for discovery: at boot we can't name bank buildings or house chests until the first snapshot tells us
+// they exist, and redialling for that cost a whole second round of 13 handshakes. Subscriptions are
+// additive, so this just extends what each socket is watching — no new sockets, no blind window.
+// It is bounded: ONE extra subscribe per socket for the whole session (the measured danger zone is ~30),
+// and the next roster redial collapses everything back to a single subscription per socket.
+function liveAddSubscribe(){
+  let sent = 0;
+  Object.values(liveConns).forEach(c => {
+    if (c.closed || c.key !== liveRosterKey || !c.ws || c.ws.readyState !== 1) return;
+    const { sqls, tables } = liveQuerySet(liveRosterIds, c.region);
+    // Only the queries the socket isn't already carrying.
+    const have = new Set(c.sqls);
+    const extra = sqls.filter(s => !have.has(s));
+    if (!extra.length) return;
+    try {
+      c.ws.send(JSON.stringify({ Subscribe: { request_id: ++c.subs, query_strings: extra } }));
+      c.sqls = sqls; c.tables = tables;   // the socket now covers the full set (a reconnect dials it whole)
+      sent++;
+    } catch(e){}
+  });
+  return sent;
 }
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey) return;
@@ -3876,6 +3932,10 @@ function liveOpen(c){
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
   c.ws = ws; c.status = 'connecting';
+  // Per-SOCKET, not per-region: a reconnect re-sends the whole query set, so its snapshot must REPLACE
+  // the region slice. Keying "is this additive?" off c.snapshotTs (which survives a reconnect) would
+  // wrongly treat that full snapshot as a merge and leave pre-outage rows lingering forever.
+  c.snapOnThisSocket = false;
   // §8.3 stuck-CONNECTING watchdog: past the browser's ~22-socket SHARED budget a socket hangs in
   // CONNECTING forever with no event — the region would render as genuinely empty. Surface it and keep
   // retrying; the moment budget frees (other app tab closed), a redial succeeds instantly.
@@ -3908,8 +3968,13 @@ function liveOpen(c){
     if (m.InitialSubscription){
       clearTimeout(c.snapTimer);
       const first = !c.snapshotTs;
+      // Not the first snapshot ON THIS SOCKET → it answers the ADDITIVE discovery subscribe, so it
+      // carries only those queries' rows and must merge, not replace (replacing would wipe the base
+      // subscribe's rows and make every player's data vanish).
+      const additive = c.snapOnThisSocket;
+      c.snapOnThisSocket = true;
       c.status = 'live'; c.snapshotTs = Date.now(); c.tried = true;
-      liveApplySnapshot(c, m.InitialSubscription);
+      liveApplySnapshot(c, m.InitialSubscription, additive);
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
       // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
       if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
@@ -3959,15 +4024,14 @@ function liveWatchdog(){
 }
 setInterval(liveWatchdog, LIVE_WATCHDOG_MS);
 // Returning to a backgrounded tab is the realistic way to find a frozen socket: browsers suspend and
-// quietly reap them. Anything not OPEN gets redialled at once — staggered, and leaving CONNECTING alone
-// so a legitimate in-flight dial isn't killed (liveOpen's own 15s watchdog covers a stuck one).
+// quietly reap them. Anything not OPEN gets redialled at once (no stagger — see liveStart), leaving
+// CONNECTING alone so a legitimate in-flight dial isn't killed (liveOpen's 15s watchdog covers a stuck one).
 document.addEventListener('visibilitychange', () => {
   if (document.hidden || !liveOn()) return;
-  let n = 0;
   BC_REGIONS.forEach(rg => {
     const c = liveConns[rg];
     if (c && !c.closed && c.ws && (c.ws.readyState === 0 || c.ws.readyState === 1)) return;   // connecting or open → leave it
-    setTimeout(() => { if (liveOn()){ liveDrop(rg); liveDial(rg); } }, (n++) * 60);
+    liveDrop(rg); liveDial(rg);
   });
 });
 // ── Fetch-once: a scratch socket for on-demand lookups (place names, static desc tables) ──
