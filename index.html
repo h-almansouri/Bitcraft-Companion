@@ -1452,7 +1452,7 @@ function toggleRemovedPanel(btn) {
 // ── NAV ──
 const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft'};
 function switchTab(tab) {
-  stopLiveRefresh();
+  stopPassiveCraftTimer();   // the passive countdown belongs to the Crafts tab; re-armed by renderCraftingTab
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
@@ -1577,7 +1577,7 @@ function removeTrackedPlayer(id) {
     invData = null; plannerTrackedInvs = null; plannerInvMap = {};
     toolTrackedInvs = null;
     tasksTrackedInvs = new Set(); tasksInvsInited = false;
-    stopAllLive(); stopLiveRefresh();
+    stopAllLive(); stopPassiveCraftTimer();
   }
   renderPlayerArea();
   refreshPlayerTabs();
@@ -2047,10 +2047,12 @@ async function renderExperienceTab() {
   const el = document.getElementById('tab-skills');
   if (!el) return;
   if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
-  try { await ensureThresholds(); } catch(e) {}
+  // Paint the skeleton BEFORE awaiting anything. loadSkillsInto bails when a player's container is
+  // missing, so if the live cache completed while this function was parked on ensureThresholds(), the
+  // completion kick would fire into an empty document and the tab would sit on "Loading…" forever.
   el.innerHTML = trackedPlayers.map(p => playerSection(p, loading(), 'psec-skills-' + p.entityId)).join('');
+  try { await ensureThresholds(); } catch(e) {}   // needed for xpToLevel etc, not for the skeleton
   trackedPlayers.forEach(p => loadSkillsInto(p));
-  startLiveRefresh('skills');
 }
 // ── Skills from the relay ──
 // skill_desc is static reference data (20 rows, ~83ms) — fetched once per session and persisted, since
@@ -2127,7 +2129,12 @@ async function loadSkillsInto(p, silent=false) {
       });
       if (openJourney[eid]) renderJourney(eid);   // the calculator panel shows the rank as well
     }).catch(()=>{});
-  } catch(e) { if (!silent) body.innerHTML = errBox(e); }
+  } catch(e) {
+    if (silent) return;
+    // "live cache not ready" is the layer still dialling, not a failure — show the spinner it already
+    // had, and the completion kick re-renders the instant the cache fills. Only a REAL error boxes out.
+    body.innerHTML = /not ready/i.test(e && e.message || '') ? loading() : errBox(e);
+  }
 }
 function skillsSectionHtml(pData, rankData, entityId) {
     const player = pData.player || {};
@@ -2202,45 +2209,60 @@ function skillsSectionHtml(pData, rankData, entityId) {
       <div class="skill-journey-host" id="sj-${entityId}"></div>`;
 }
 
-// ── LIVE REFRESH ──
-let liveRefreshId = null;
-const tabLiveIds = {};   // user-controlled per-tab live refresh
-const REFRESH_MS = {skills:10000, inventory:30000, crafting:10000, tasks:10000, orders:30000};
-function startLiveRefresh(tab) {
-  stopLiveRefresh();
-  const ms = REFRESH_MS[tab];
-  if (!ms || !currentPlayer) return;
-  liveRefreshId = setInterval(() => {
-    if (document.hidden) return;
-    if (tab === 'tasks') loadTasks(currentPlayer.entityId, true);
-    else if (tab === 'skills') activePlayers().forEach(p => loadSkillsInto(p, true)); // refresh non-paused players in place
-    else loadTab(tab, true);
-  }, ms);
+// ── REFRESH ──
+// The per-tab poll timers are GONE. Every tab below renders from the live cache, and two push signals
+// keep it current: the doorbell (feedKick — "the game changed") and the completion kick ("*we* became
+// able to answer"). A timer that re-reads the same in-memory cache protects against nothing — it can't
+// even detect a frozen cache, since it would re-read the frozen rows. The ONE case that genuinely needs
+// a timer is the bitjita fallback, which has no push at all — see the degraded-mode poller below.
+const tabLiveIds = {};   // user-controlled live refresh, only on tabs whose data is still HTTP-fetched
+// Re-render whatever cache-backed tab is showing. `silent` keeps the toolbar/skeleton in place so the
+// refresh is invisible; callers that must include PAUSED players clear the per-player caches first
+// (the paused short-circuit only fires when cached data already exists).
+function refreshCacheBackedTab(silent){
+  const t = currentTab, pid = currentPlayer ? currentPlayer.entityId : null;
+  if (t === 'skills')          activePlayers().forEach(p => loadSkillsInto(p, silent));
+  else if (t === 'inventory')  renderInventoryTab(silent);
+  else if (t === 'crafting')   renderCraftingTab(silent);
+  else if (t === 'orders')     renderOrdersTab(silent);
+  else if (t === 'tasks')      loadTasks(pid, silent);
+  else if (t === 'planner')    refreshPlannerInv();
+  else if (t === 'tools')      refreshToolInv();
+  else if (t === 'jsn')        renderJsnTab(true);
 }
-function stopLiveRefresh() {
-  if (liveRefreshId) { clearInterval(liveRefreshId); liveRefreshId = null; }
-  stopPassiveCraftTimer();
+// ── Degraded-mode fallback poller ──
+// Runs ONLY while the live layer is genuinely unhealthy, never merely while it's still booting: every
+// page load spends ~1-2s on the bitjita fallback while the sockets dial, and treating THAT as degraded
+// would poll bitjita on every healthy load — reintroducing exactly the host bandwidth this overhaul
+// removed. So: healthy or still-within-grace → do nothing at all.
+const FALLBACK_POLL_MS = 30000, LIVE_BOOT_GRACE_MS = 20000;
+let _liveLayerStartedAt = 0;
+function liveDegraded(){
+  if (!trackedPlayers.length || !_liveLayerStartedAt) return false;
+  if (liveComplete()) return false;                                      // healthy → the cache is the source
+  return (Date.now() - _liveLayerStartedAt) > LIVE_BOOT_GRACE_MS;        // still not ready long after boot → really degraded
 }
+setInterval(() => {
+  if (document.hidden || !liveDegraded()) return;
+  refreshCacheBackedTab(true);
+}, FALLBACK_POLL_MS);
 
-// ── USER-CONTROLLED PER-TAB LIVE REFRESH ──
+// ── USER-CONTROLLED LIVE REFRESH — HTTP-fetched tabs only ──
+// Shopping and Networth price their contents over HTTP (no relay table backs a price), so a timer is
+// the only way to keep them moving. Every cache-backed tab lost its toggle: they're always live.
+const TAB_LIVE_MS = { shopping: 300000, jsn: 120000 };
 function isTabLive(tab) { return !!tabLiveIds[tab]; }
-
 function toggleTabLive(tab) {
   if (tabLiveIds[tab]) {
     clearInterval(tabLiveIds[tab]);
     tabLiveIds[tab] = null;
   } else {
     if (!currentPlayer && tab !== 'shopping') return;
-    const ms = tab === 'planner' ? 30000 : tab === 'shopping' ? 300000 : tab === 'jsn' ? 120000 : (REFRESH_MS[tab] || 30000);
     tabLiveIds[tab] = setInterval(() => {
       if (document.hidden) return;
-      if (tab === 'tasks')   loadTasks(currentPlayer?.entityId, true);
-      else if (tab === 'planner') refreshPlannerInv();
-      else if (tab === 'tools') refreshToolInv();
-      else if (tab === 'shopping') fetchAllShoppingPrices();
+      if (tab === 'shopping') fetchAllShoppingPrices();
       else if (tab === 'jsn') renderJsnTab(true);
-      else loadTab(tab, true);
-    }, ms);
+    }, TAB_LIVE_MS[tab] || 120000);
   }
   updateLiveBtns();
 }
@@ -2252,8 +2274,10 @@ function stopAllLive() {
   updateLiveBtns();
 }
 
+// Only tabs whose data still comes over HTTP keep a Live toggle — the cache-backed ones are always live
+// now, so a toggle there would be a lie in its OFF state.
 function updateLiveBtns() {
-  ['inventory', 'crafting', 'tasks', 'planner', 'shopping', 'tools', 'jsn'].forEach(tab => {
+  ['shopping', 'jsn'].forEach(tab => {
     const btn = document.getElementById('live-btn-' + tab);
     if (!btn) return;
     const on = isTabLive(tab);
@@ -2512,7 +2536,6 @@ async function renderInventoryTab(silent) {
   if (!silent || !document.getElementById('inv-toolbar')) {
     el.innerHTML = `
       <div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
-        <button id="live-btn-inventory" class="btn live-btn" onclick="toggleTabLive('inventory')"><i class="ti ti-player-play"></i> Live</button>
         <button class="btn ctrl-btn" onclick="renderInventoryTab()"><i class="ti ti-refresh"></i> Refresh</button>
         <span style="flex:1"></span>
         <div id="inv-toggle" class="inv-toggle" style="margin:0">
@@ -2532,7 +2555,6 @@ async function renderInventoryTab(silent) {
     catch(e) { if (!invByPlayer[p.entityId]) invByPlayer[p.entityId] = { inventories:[], items:{}, cargos:{} }; }
     fillPlayerInvCached(p.entityId);
   }));
-  startLiveRefresh('inventory');
 }
 
 // ── ORDERS (market listings + collections) ──
@@ -2882,7 +2904,6 @@ async function renderOrdersTab(silent, force){
   if (!silent || !document.getElementById('orders-toolbar')){
     el.innerHTML = `
       <div id="orders-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
-        <button id="live-btn-orders" class="btn live-btn" onclick="toggleTabLive('orders')"><i class="ti ti-player-play"></i> Live</button>
         <button class="btn ctrl-btn" onclick="renderOrdersTab(false,true)"><i class="ti ti-refresh"></i> Refresh</button>
         ${tabBusyHtml('orders')}
       </div>
@@ -2894,7 +2915,7 @@ async function renderOrdersTab(silent, force){
   }
   // Still fresh → skip the 13-connection scan entirely. Refresh (force) and the live poll (silent) opt out.
   if (!force && !silent && ordersFetchedAt && (Date.now() - ordersFetchedAt) < TAB_STALE_MS
-      && trackedPlayers.every(p => ordersByPlayer[p.entityId])){ setTabBusy('orders', false); startLiveRefresh('orders'); return; }
+      && trackedPlayers.every(p => ordersByPlayer[p.entityId])){ setTabBusy('orders', false); return; }
   // Batched relay pass for all tracked players (13 connections total, not per player); per-player
   // bitjita fallback only if every mirror is unreachable.
   const myRun = ++ordersRunId;
@@ -2928,7 +2949,6 @@ async function renderOrdersTab(silent, force){
   }
   ordersFetchedAt = Date.now();
   setTabBusy('orders', false);
-  startLiveRefresh('orders');
 }
 
 // ── JSN (inventory market value) ──
@@ -3621,8 +3641,14 @@ function liveApplySnapshot(c, frame){
   // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
   if (!_liveCompleteKicked && liveComplete()){
     _liveCompleteKicked = true;
+    // Everything rendered before this moment came from the bitjita fallback, which is less complete than
+    // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
+    // the doorbell only fires when the GAME changes, and the cache filling isn't a game change. So drop
+    // every per-player result and re-render. Clearing the caches also defeats the paused-player
+    // short-circuit in the silent path, so paused players get corrected too.
     craftFetchedAt = 0; ordersFetchedAt = 0;
-    _feedWant.crafts = true; _feedWant.orders = true; feedKick();
+    invByPlayer = {}; taskPlayersById = {}; invData = null;
+    refreshCacheBackedTab(true);
   }
 }
 let _liveCompleteKicked = false;
@@ -3730,6 +3756,7 @@ function liveStart(){
   liveContainerIds = fromCache.length ? fromCache : liveLoadContainers(pKey);
   const key = pKey + '#' + liveContainerIds.join(',');
   if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
+  if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
   liveRosterKey = key; liveRosterIds = ids;
   BC_REGIONS.forEach((rg, i) => setTimeout(() => liveDial(rg), i * 40));   // stagger — 13 simultaneous handshakes is the cliff (§8.1)
 }
@@ -3987,7 +4014,7 @@ function craftProgressLatest(rows){
   rows.forEach(x => { if (!x || x.entityId == null) return; const c = latest[x.entityId]; if (!c || x.progress > c.progress) latest[x.entityId] = x; });
   return Object.values(latest);
 }
-let _feedTimer = null, _feedWant = { crafts:false, orders:false };
+let _feedTimer = null, _feedInvTimer = null, _feedWant = { crafts:false, orders:false, inv:false, tasks:false };
 function feedKnownCraftIds(){
   const s = new Set();
   Object.values(craftByPlayer).forEach(cd => ((cd && cd.active) || []).forEach(c => s.add(String(c.entityId || c.entity_id))));
@@ -3998,11 +4025,27 @@ function feedKnownCraftIds(){
 function feedKick(){
   clearTimeout(_feedTimer);
   _feedTimer = setTimeout(() => {
-    const w = { ..._feedWant }; _feedWant = { crafts:false, orders:false };
+    const w = { ..._feedWant }; _feedWant.crafts = _feedWant.orders = _feedWant.tasks = false;
     if (w.crafts){ craftFetchedAt = 0; if (currentTab === 'crafting') renderCraftingTab(true); }
     if (w.orders){ ordersFetchedAt = 0; if (currentTab === 'orders') renderOrdersTab(true); }
+    if (w.tasks && currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null, true);
     // Not on that tab? Clearing the stamp is enough — re-entry revalidates instead of serving a stale cache.
   }, 500);   // coalesce a burst; one game action often lands as several table updates at once
+  // Inventory gets its OWN, much longer window. Item deltas fire several times a second while someone is
+  // gathering or crafting, and an inventory re-render rebuilds each player's whole section — at 500ms
+  // that would be a visible churn (the same class of problem as the Active-crafts reshuffle). 2.5s is
+  // still ~12× fresher than the 30s poll it replaces, and calm to look at.
+  if (_feedWant.inv && !_feedInvTimer){
+    _feedInvTimer = setTimeout(() => {
+      _feedInvTimer = null; _feedWant.inv = false;
+      invData = null;   // the merged view Planner + Tool crafting build from
+      if (currentTab === 'inventory') renderInventoryTab(true);
+      else if (currentTab === 'planner') refreshPlannerInv();
+      else if (currentTab === 'tools') refreshToolInv();
+      else if (currentTab === 'jsn') renderJsnTab(true);
+      else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null, true);   // shows pooled material counts
+    }, 2500);
+  }
 }
 // ── Bridge: live-layer cache events → the existing per-value handlers ──
 // Same semantics the old dedicated feed had, now driven by the held subscriptions. Stamina/XP/max are
@@ -4041,7 +4084,7 @@ function liveBridge(evs){
   // Doorbell: did a LIST change? (Progress rows tick 1-2/sec while someone works a station, so only a
   // craft we've never seen counts.) Interim — once the tabs render straight from the cache this whole
   // refetch cycle disappears.
-  let crafts = false, orders = false;
+  let crafts = false, orders = false, inv = false, tasks = false;
   const known = feedKnownCraftIds();
   evs.forEach(ev => {
     if (!ev.isDelta) return;
@@ -4055,10 +4098,14 @@ function liveBridge(evs){
     }
     else if (ev.table === 'passive_craft_state') crafts = true;
     else if (ev.table === 'sell_order_state' || ev.table === 'buy_order_state' || ev.table === 'closed_listing_state') orders = true;
+    else if (ev.table === 'inventory_state') inv = true;
+    else if (ev.table === 'traveler_task_state') tasks = true;
   });
-  if (!crafts && !orders) return;
+  if (!crafts && !orders && !inv && !tasks) return;
   if (crafts) _feedWant.crafts = true;
   if (orders) _feedWant.orders = true;
+  if (inv)    _feedWant.inv    = true;
+  if (tasks)  _feedWant.tasks  = true;
   feedKick();
 }
 onLiveChange(liveBridge);
@@ -4209,11 +4256,8 @@ async function renderCraftingTab(silent, force) {
     craftFetchedAt = Date.now();
     setTabBusy('craft', false);
   }
-  // Live by default: the session-long relay feed streams progress AND surfaces new crafts, and the list
-  // auto-refreshes on the tab poll (startLiveRefresh — tab-scoped, stopped by stopLiveRefresh on leaving).
-  // The Refresh button forces an immediate reload. startLiveRefresh() clears the passive countdown timer,
-  // so run it FIRST (and only on the initial render, so silent polls don't reset the interval/timer).
-  if (!silent && currentTab === 'crafting') startLiveRefresh('crafting');   // guard: async render may finish after a tab switch
+  // Always live: progress bars patch in place from the delta stream, and the doorbell re-renders the list
+  // when a craft starts, finishes or is cancelled. No poll — the Refresh button is just for impatience.
   if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
 }
 
@@ -5349,7 +5393,6 @@ function renderTasksUI() {
       ${expires
         ? `<div class="task-rotation" style="margin-bottom:0;flex:1"><i class="ti ti-clock"></i> Next rotation in <span class="task-countdown" id="task-countdown">${getCountdown()}</span></div>`
         : '<div style="flex:1"></div>'}
-      <button id="live-btn-tasks" class="btn live-btn" onclick="toggleTabLive('tasks')"><i class="ti ti-player-play"></i> Live</button>
       <button class="btn ctrl-btn" onclick="loadTasks(null)"><i class="ti ti-refresh"></i> Refresh</button>
     </div>
     ${renderTaskInvSelector()}
@@ -9109,7 +9152,6 @@ function renderPlannerInventory() {
       <span style="color:var(--text3)">·</span>
       <span class="planner-inv-toggle" onclick="toggleAllPlannerInvs(false)">None</span>
       <span style="flex:1"></span>
-      <button id="live-btn-planner" class="btn live-btn" onclick="toggleTabLive('planner')"><i class="ti ti-player-play"></i> Live</button>
       <button class="btn ctrl-btn" onclick="refreshPlannerInv()"><i class="ti ti-refresh"></i> Refresh</button>
     </div>`;
   updateLiveBtns();
@@ -9223,7 +9265,6 @@ function toolInvSelectorHtml(){
         <span style="color:var(--text3)">·</span>
         <span class="planner-inv-toggle" onclick="toggleAllToolInvs(false)">None</span>
         <span style="flex:1"></span>
-        <button id="live-btn-tools" class="btn live-btn" onclick="toggleTabLive('tools')"><i class="ti ti-player-play"></i> Live</button>
         <button class="btn ctrl-btn" onclick="refreshToolInv()"><i class="ti ti-refresh"></i> Refresh</button>
       </div>
     </div>
