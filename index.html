@@ -1620,7 +1620,11 @@ function renderPlayerArea() {
 // ── Online / offline status for tracked players (green dot = signed in, grey = offline) ──
 let playerOnline = {};   // entityId -> boolean (current signedIn); absent = unknown
 let playerOnlineTimer = null;
-function playerIsOnline(p){ const id = String(p.entityId); return (id in playerOnline) ? playerOnline[id] : (typeof p.signedIn === 'boolean' ? p.signedIn : undefined); }
+// Live truth only. This used to fall back to the `signedIn` captured on the saved player object — which
+// is whatever it was when you first added them, so a player who was online back then flashed GREEN on
+// every load until the real status arrived. Unknown now renders grey and only goes green once the live
+// cache (or the bitjita fallback) actually says so.
+function playerIsOnline(p){ const id = String(p.entityId); return (id in playerOnline) ? playerOnline[id] : undefined; }
 // Update the status dots in place (not a full re-render) so a poll never disturbs the search box.
 function applyPlayerOnlineDots(){
   trackedPlayers.forEach(p => {
@@ -1830,17 +1834,34 @@ function skillXpRowHtml(sk, rank){
   return `${fmtNum(sk.intoLevel)} / ${fmtNum(sk.intoLevel + sk.toNext)} XP` + (rank ? ` &nbsp;·&nbsp; <span style="color:var(--text3)">#${rank.rank}</span>` : '');
 }
 // ── LIVE XP SESSION TRACKING ──  detects the "active" skill + measures a real XP/hr rate
-const SKILL_ACTIVE_GRACE = 3000;    // clear the "active" tag ~3s after the last XP gain. Appearance is driven by the live experience_state stream (instant); disappearance by startSkillActiveTick. Bump up if it blinks off between slow actions.
+// "Active" appears instantly (driven by the live experience_state stream) but can only DISAPPEAR on a
+// timeout — nothing announces "I stopped", so absence of gains is the only signal. A fixed 3s grace plus
+// a 1s tick meant up to 4s of lag. Instead, learn each skill's actual cadence: measured on a live
+// grinding session, gains arrive every ~1.3s with a p90 of 1.42s and very little spread, so ~1.6× the
+// slowest recent gap clears the tag promptly without blinking between two normal actions. Slow actions
+// widen their own grace automatically.
+const SKILL_GRACE_MIN = 1200, SKILL_GRACE_MAX = 4000, SKILL_GRACE_UNKNOWN = 2500, SKILL_ACTIVE_TICK_MS = 250;
+const SKILL_GAP_MAX = 15000;        // a longer pause is "stopped then restarted", not cadence — don't learn from it
 let _skillGainSeq = 0;              // monotonic counter — orders gains even within the same millisecond
+function skillGrace(e){
+  const gaps = e && e.gaps;
+  if (!gaps || !gaps.length) return SKILL_GRACE_UNKNOWN;
+  return Math.min(SKILL_GRACE_MAX, Math.max(SKILL_GRACE_MIN, Math.round(Math.max(...gaps) * 1.6)));
+}
 function updateSkillSession(entityId, skills){
   const now = Date.now();
   const s = skillSession[entityId] || (skillSession[entityId] = {});
   skills.forEach(sk => {
     const e = s[sk.skillId];
-    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0, gainSeq:0}; return; }
+    if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0, gainSeq:0, gaps:[]}; return; }
     if (sk.xp > e.curXp){
       // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
       if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
+      if (e.lastGainTs){
+        const gap = now - e.lastGainTs;
+        if (gap <= SKILL_GAP_MAX){ (e.gaps = e.gaps || []).push(gap); if (e.gaps.length > 5) e.gaps.shift(); }
+        else e.gaps = [];   // resumed after a break — relearn rather than carry a stale cadence
+      }
       e.lastGainTs = now;
       e.gainSeq = ++_skillGainSeq;
     }
@@ -1857,7 +1878,7 @@ function recomputeSkillActive(entityId){
   const now = Date.now();
   let best = null;
   for (const id in s){ const e = s[id]; if (e.gainSeq && (!best || e.gainSeq > best.gainSeq)) best = e; }
-  const live = best && (now - best.lastGainTs) <= SKILL_ACTIVE_GRACE;
+  const live = best && (now - best.lastGainTs) <= skillGrace(best);
   let changed = false;
   for (const id in s){ const a = live && s[id] === best; if (s[id].active !== a){ s[id].active = a; changed = true; } }
   return changed;
@@ -1870,7 +1891,7 @@ function startSkillActiveTick(){
   skillActiveTick = setInterval(() => {
     if (document.hidden) return;
     trackedPlayers.forEach(p => { const id = String(p.entityId); if (recomputeSkillActive(id) && currentTab === 'skills') syncSkillActiveStates(id); });
-  }, 1000);
+  }, SKILL_ACTIVE_TICK_MS);   // 250ms, not 1s: the tick's own resolution was adding up to a second of lag on top of the grace
 }
 function stopSkillActiveTick(){ if (skillActiveTick){ clearInterval(skillActiveTick); skillActiveTick = null; } }
 function sessionRate(entityId, skillId){
@@ -4975,7 +4996,7 @@ async function fetchPlayerInvRelay(id){
   // personal — `deployable: true` marks "belongs with the player's own stuff" for the location chips,
   // exactly as the old HTTP path flagged every non-bank category. Ordered by the game's own slot index
   // (Pockets, Toolbelt, Wallet), not alphabetically.
-  const PERSONAL = { 0: 'Pockets', 1: 'Toolbelt', 2: 'Wallet' };
+  const PERSONAL = { 0: 'Inventory', 1: 'Toolbelt', 2: 'Wallet' };   // "Inventory" matches what the bitjita path calls slot 0
   liveRows('inventory_state', r => String(r.owner_entity_id) === id)
     .sort((a, b) => (a.inventory_index - b.inventory_index) || String(a.entity_id).localeCompare(String(b.entity_id)))
     .forEach(r => {
