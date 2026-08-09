@@ -4921,10 +4921,10 @@ async function fetchPlayerInvRelay(id){
   const inventories = [];
   // personal — `deployable: true` marks "belongs with the player's own stuff" for the location chips,
   // exactly as the old HTTP path flagged every non-bank category.
-  const PERSONAL = { 0: 'pockets', 1: 'toolbelt', 2: 'wallet' };
+  const PERSONAL = { 0: 'Pockets', 1: 'Toolbelt', 2: 'Wallet' };
   liveRows('inventory_state', r => String(r.owner_entity_id) === id).forEach(r => {
     const items = livePocketItems(r); if (!items.length) return;
-    inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'storage', null, items, { _isDeployable: true }));
+    inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'Storage', null, items, { _isDeployable: true }));
   });
   // banks — the row's owner is the bank BUILDING; resolve building → claim → name (persisted, no-op once seen)
   const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
@@ -4941,7 +4941,10 @@ async function fetchPlayerInvRelay(id){
   bankRows.forEach(r => {
     const items = livePocketItems(r); if (!items.length) return;
     const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
-    inventories.push(mk(r.entity_id, 'bank', (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, {}));
+    // Name it after the actual building ("Town Bank", or your nickname) the way the old HTTP route did —
+    // buildSlotsFor still classifies it as a bank by matching /bank/i case-insensitively on the name.
+    inventories.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Bank',
+      (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, {}));
   });
   // house — named like the HTTP route did: "<player>'s House (<residence type>)"
   const pName = (trackedPlayers.find(p => String(p.entityId) === id) || {}).name;
