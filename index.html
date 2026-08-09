@@ -1162,13 +1162,22 @@ let toolInvOpen = false;       // whether the Tool crafting inventory selector i
 // ── Inventory tracking persistence helpers ──
 // Include owner id so identically-named inventories from different players don't collide (the merged
 // invData used by Planner + Tool crafting spans all tracked players).
-function _invNameKey(inv) {
-  return (inv._ownerId || '') + '||' + (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
+// ⚠️ PREFER THE ENTITY ID. Keying purely by NAME broke every saved selection the moment the same
+// container was described by a different source: the boot-window bitjita render calls your main
+// container "Inventory", the live cache calls it "Pockets", so the key changed under the selection and
+// it silently vanished a second after load. Entity ids are identical across both paths and survive
+// renames. The name key is still generated as a FALLBACK, both for matching selections saved before
+// this change and for bitjita-shaped containers that carry no entity id.
+function _invKeys(inv) {
+  const owner = inv._ownerId || '';
+  const nameKey = owner + '||' + (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
+  return inv.entityId ? [owner + '||#' + inv.entityId, nameKey] : [nameKey];
 }
+function _invNameKey(inv) { return _invKeys(inv)[0]; }   // what we SAVE: the id key when there is one
 function _resolveTrackedByName(invs, names) {
   const nameSet = new Set(names);
   const result = new Set();
-  invs.forEach((inv, i) => { if (nameSet.has(_invNameKey(inv))) result.add(i); });
+  invs.forEach((inv, i) => { if (_invKeys(inv).some(k => nameSet.has(k))) result.add(i); });
   return result;
 }
 function _savePlannerTrackedNames() {
@@ -1196,7 +1205,9 @@ function _saveTasksTrackedNames() {
 }
 function _resolveTrackedTasks(names) {
   const nameSet = new Set(names), result = new Set();
-  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => { if (nameSet.has(_taskInvNameKey(p.entityId, inv))) result.add(p.entityId + '#' + idx); }); });
+  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => {
+    if (_invKeys(inv).some(k => nameSet.has(p.entityId + '||' + k))) result.add(p.entityId + '#' + idx);
+  }); });
   return result;
 }
 function allTaskInvKeys() {
@@ -3803,6 +3814,7 @@ function liveOpen(c){
   };
   ws.onmessage = ev => {
     if (typeof ev.data !== 'string') return;
+    c.lastMsgAt = Date.now();   // liveness (see liveWatchdog) — ANY frame counts, including IdentityToken
     let m; try { m = JSON.parse(ev.data); } catch(e){ return; }   // outer frame is safe to parse plainly — rows are still strings inside it
     if (m.InitialSubscription){ c.status = 'live'; c.snapshotTs = Date.now(); liveApplySnapshot(c, m.InitialSubscription); }
     else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
@@ -3823,6 +3835,43 @@ function liveReschedule(c){
   clearTimeout(c.timer);
   c.timer = setTimeout(() => liveOpen(c), wait);
 }
+// ── §3.4 LIVENESS: the frozen-cache problem ──
+// A socket can go half-open — TCP dead, no close event, readyState stuck at OPEN — and then that
+// region's cache silently freezes while still looking correct. It can't be detected directly: the
+// browser exposes no ping/pong, and a heartbeat would have to be another Subscribe (which accumulate,
+// the very thing this architecture exists to avoid). "No data" isn't proof either — a filtered
+// subscription legitimately goes quiet for minutes when nobody's playing.
+// The way out is to stop trying to detect death: WHEN A SOCKET IS SILENT, REDIALLING IT COSTS NOTHING.
+// There are no updates in flight to miss, the cache keeps rendering throughout, and the fresh snapshot
+// atomically replaces the region's slice. So a quiet socket is either dead (redial fixes it) or truly
+// idle (redial was free) — no diagnosis required. This never fires while data is flowing, so it isn't
+// the "redial on a timer" the design rules out; that rule is about redialling ACTIVE sockets.
+const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000;
+function liveWatchdog(){
+  if (!liveOn() || document.hidden) return;
+  const now = Date.now();
+  // At most ONE per sweep: a dead relay must not turn into 13 simultaneous redials (§8.1).
+  const stale = Object.values(liveConns).find(c =>
+    !c.closed && c.key === liveRosterKey && c.ws && c.ws.readyState === 1 &&
+    c.lastMsgAt && (now - c.lastMsgAt) > LIVE_QUIET_MS);
+  if (!stale) return;
+  console.warn(`[live] r${stale.region} silent ${Math.round((now - stale.lastMsgAt)/1000)}s — redialling (free if it was merely idle)`);
+  const rg = stale.region;
+  liveDrop(rg); liveDial(rg);
+}
+setInterval(liveWatchdog, LIVE_WATCHDOG_MS);
+// Returning to a backgrounded tab is the realistic way to find a frozen socket: browsers suspend and
+// quietly reap them. Anything not OPEN gets redialled at once — staggered, and leaving CONNECTING alone
+// so a legitimate in-flight dial isn't killed (liveOpen's own 15s watchdog covers a stuck one).
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !liveOn()) return;
+  let n = 0;
+  BC_REGIONS.forEach(rg => {
+    const c = liveConns[rg];
+    if (c && !c.closed && c.ws && (c.ws.readyState === 0 || c.ws.readyState === 1)) return;   // connecting or open → leave it
+    setTimeout(() => { if (liveOn()){ liveDrop(rg); liveDial(rg); } }, (n++) * 60);
+  });
+});
 // ── Fetch-once: a scratch socket for on-demand lookups (place names, static desc tables) ──
 // The explorer's own model: open, ONE subscribe, take the snapshot, hang up. Nothing accumulates
 // because the socket dies with its subscription. Used only for by-id/name resolution that can't be a
@@ -4919,13 +4968,20 @@ async function fetchPlayerInvRelay(id){
     pockets: items.map(it => ({ contents: { itemId: it.itemId, itemType: it.itemType, quantity: it.quantity } }))
   });
   const inventories = [];
+  // ⚠️ EVERY group below is sorted before it's appended. liveRows returns cache-Map iteration order,
+  // which shifts whenever a delta re-inserts a row — so an unsorted list visibly reshuffles (banks
+  // swapping places on refresh) exactly like the Active-crafts jumping did.
+  const byName = (a, b) => (a.inventoryName || '').localeCompare(b.inventoryName || '') || String(a.entityId).localeCompare(String(b.entityId));
   // personal — `deployable: true` marks "belongs with the player's own stuff" for the location chips,
-  // exactly as the old HTTP path flagged every non-bank category.
+  // exactly as the old HTTP path flagged every non-bank category. Ordered by the game's own slot index
+  // (Pockets, Toolbelt, Wallet), not alphabetically.
   const PERSONAL = { 0: 'Pockets', 1: 'Toolbelt', 2: 'Wallet' };
-  liveRows('inventory_state', r => String(r.owner_entity_id) === id).forEach(r => {
-    const items = livePocketItems(r); if (!items.length) return;
-    inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'Storage', null, items, { _isDeployable: true }));
-  });
+  liveRows('inventory_state', r => String(r.owner_entity_id) === id)
+    .sort((a, b) => (a.inventory_index - b.inventory_index) || String(a.entity_id).localeCompare(String(b.entity_id)))
+    .forEach(r => {
+      const items = livePocketItems(r); if (!items.length) return;
+      inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'Storage', null, items, { _isDeployable: true }));
+    });
   // banks — the row's owner is the bank BUILDING; resolve building → claim → name (persisted, no-op once seen)
   const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
   const unknown = {};
@@ -4938,33 +4994,41 @@ async function fetchPlayerInvRelay(id){
   const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
   if (housing) wantPlace(String(housing.entrance_building_entity_id), housing.__region);
   await Promise.all(Object.keys(unknown).map(rg => relayResolvePlaces(+rg, [...unknown[rg]]).catch(() => {})));
+  const bankInvs = [];
   bankRows.forEach(r => {
     const items = livePocketItems(r); if (!items.length) return;
     const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
     // Name it after the actual building ("Town Bank", or your nickname) the way the old HTTP route did —
     // buildSlotsFor still classifies it as a bank by matching /bank/i case-insensitively on the name.
-    inventories.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Bank',
+    bankInvs.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Bank',
       (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, {}));
   });
+  // sort by settlement first — banks read as a list of towns
+  bankInvs.sort((a, b) => (a.claimName || '').localeCompare(b.claimName || '') || byName(a, b));
+  bankInvs.forEach(i => inventories.push(i));
   // house — named like the HTTP route did: "<player>'s House (<residence type>)"
   const pName = (trackedPlayers.find(p => String(p.entityId) === id) || {}).name;
   const ent = housing && relayBuildingInfo[String(housing.entrance_building_entity_id)];
   const entName = ent && defs.buildings[ent.descId];
   const houseName = (pName ? pName + "'s House" : 'Housing') + (entName ? ` (${entName})` : '');
+  const houseInvs = [];
   liveRows('inventory_state', r => houseB.has(String(r.owner_entity_id))).forEach(r => {
     const items = livePocketItems(r); if (!items.length) return;
     const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
-    inventories.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Storage', houseName, items, { _isHousing: true }));
+    houseInvs.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Storage', houseName, items, { _isHousing: true }));
   });
+  houseInvs.sort(byName).forEach(i => inventories.push(i));
   // vehicles/deployables (cart, boat, cache, wagon) — they report whatever claim they're parked in, but
   // they belong with the player's own stuff, not that claim's storage.
   const veh = new Map(liveRows('deployable_state_v2', r => String(r.owner_id) === id).map(r => [String(r.entity_id), r]));
   const have = new Set(inventories.map(i => i.entityId));
+  const vehInvs = [];
   liveRows('inventory_state', r => veh.has(String(r.owner_entity_id))).forEach(r => {
     if (have.has(String(r.entity_id))) return;
     const items = livePocketItems(r); if (!items.length) return;
-    inventories.push(mk(r.entity_id, (veh.get(String(r.owner_entity_id)) || {}).nickname || 'Vehicle', null, items, { _isDeployable: true }));
+    vehInvs.push(mk(r.entity_id, (veh.get(String(r.owner_entity_id)) || {}).nickname || 'Vehicle', null, items, { _isDeployable: true }));
   });
+  vehInvs.sort(byName).forEach(i => inventories.push(i));
   // equipment straight from the cache
   const eqRow = liveRows('equipment_state', r => String(r.entity_id) === id)[0];
   const equipment = {
