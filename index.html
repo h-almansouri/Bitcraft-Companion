@@ -1651,7 +1651,7 @@ function applyPlayerOnlineDots(){
 async function refreshPlayerOnline(){
   if (!trackedPlayers.length) return;
   const ids = trackedPlayers.map(p => String(p.entityId));
-  if (liveReady()){
+  if (usingCache()){
     const online = new Set(liveRows('signed_in_player_state', () => true).map(r => String(r.entity_id)));
     ids.forEach(id => playerOnline[id] = online.has(id));
   } else if (!bitjitaDisabled()){
@@ -2091,6 +2091,35 @@ async function renderExperienceTab() {
 // it only changes on a game patch. Layout from the relay schema:
 //   { id i32, skill_type i32, name str, description str, icon_asset_name str, title str,
 //     skill_category Sum(0=None,1=Profession,2=Adventure) → 1 byte, max_level i32 }
+// Buff catalogue: buff_id → { name, beneficial }. Two static desc tables joined in JS —
+// active_buff_state gives a buff_id, buff_desc maps that to a buff_type_id + `beneficial`, and
+// buff_type_desc supplies the display name the alert matches /food/i against. Static, so fetched once
+// and persisted for a week exactly like skill_desc.
+const BUFF_DESC_KEY = 'bcBuffDescs', BUFF_DESC_TTL = 7*24*60*60*1000;
+let _buffDescs = null;
+async function relayBuffDescs(){
+  if (_buffDescs) return _buffDescs;
+  try {
+    const d = JSON.parse(localStorage.getItem(BUFF_DESC_KEY) || 'null');
+    if (d && d.ts && (Date.now() - d.ts) < BUFF_DESC_TTL && d.map) return (_buffDescs = d.map);
+  } catch(e){}
+  for (const rg of BC_REGIONS){
+    try {
+      const byT = await relayFetchOnce(rg, ['SELECT * FROM buff_desc', 'SELECT * FROM buff_type_desc'], 12000);
+      const types = {}; (byT.buff_type_desc || []).forEach(t => types[t.id] = t.name);
+      const map = {};
+      (byT.buff_desc || []).forEach(b => {
+        map[b.id] = { name: types[b.buff_type_id] || ('Buff ' + b.id), beneficial: !!b.beneficial };
+      });
+      if (Object.keys(map).length){
+        _buffDescs = map;
+        safeSetItem(BUFF_DESC_KEY, JSON.stringify({ ts: Date.now(), map }));
+        return map;
+      }
+    } catch(e){ /* try the next mirror */ }
+  }
+  return null;
+}
 const SKILL_DESC_KEY = 'bcSkillDescs', SKILL_DESC_TTL = 7*24*60*60*1000;
 let _skillDescs = null;
 async function relaySkillDescs(){
@@ -2118,7 +2147,7 @@ async function relaySkillDescs(){
 // XP straight from the cache — experience_state is a held subscription, so this is a local read and the
 // tab keeps ticking live between renders. Only the skill-name map (static, 7d-persisted) can hit the wire.
 async function fetchSkillsRelay(id){
-  if (!liveReady()) throw new Error('live cache not ready');
+  if (!usingCache()) throw new Error('live cache not ready');
   const descs = await relaySkillDescs();
   if (!descs) throw new Error('skill_desc unavailable');
   const row = liveRows('experience_state', r => String(r.entity_id) === String(id)).find(r => (r.experience_stacks || []).length);
@@ -2262,22 +2291,31 @@ function refreshCacheBackedTab(silent){
   else if (t === 'tools')      refreshToolInv();
   else if (t === 'jsn')        renderJsnTab(true);
 }
-// ── Degraded-mode fallback poller ──
-// Runs ONLY while the live layer is genuinely unhealthy, never merely while it's still booting: every
-// page load spends ~1-2s on the bitjita fallback while the sockets dial, and treating THAT as degraded
-// would poll bitjita on every healthy load — reintroducing exactly the host bandwidth this overhaul
-// removed. So: healthy or still-within-grace → do nothing at all.
-const FALLBACK_POLL_MS = 30000, LIVE_BOOT_GRACE_MS = 20000;
-let _liveLayerStartedAt = 0;
+// ── BITJITA-MODE POLLING ──
+// The relay pushes; bitjita doesn't. So whenever the source switch says 'bitjita' — because a mirror is
+// down, or because we're still in the first seconds of boot — the ONLY way anything updates is a timer.
+// These are the intervals the app used before the relay existed, restored verbatim, and they are the
+// reason the Experience tab's "Active" chip works at all without the relay: it's driven by comparing
+// successive XP reads, so no poll means no chip. While on cache these fire zero times.
+// Boot grace: every healthy load spends ~1-2s on bitjita while the sockets dial. Polling in that window
+// would put bitjita traffic on every load even when the relay is perfectly fine.
+const LIVE_BOOT_GRACE_MS = 20000;
+const BITJITA_POLL_MS = { skills: 10000, crafting: 10000, tasks: 10000, inventory: 30000, orders: 30000 };
+let _liveLayerStartedAt = 0, _bitjitaPollAt = {};
 function liveDegraded(){
   if (!trackedPlayers.length || !_liveLayerStartedAt) return false;
-  if (liveReady()) return false;                                         // usable → the cache is the source
-  return (Date.now() - _liveLayerStartedAt) > LIVE_BOOT_GRACE_MS;        // still not ready long after boot → really degraded
+  if (usingCache()) return false;                                        // on cache → it is the source
+  return (Date.now() - _liveLayerStartedAt) > LIVE_BOOT_GRACE_MS;        // still not on cache long after boot → really on bitjita
 }
 setInterval(() => {
   if (document.hidden || !liveDegraded()) return;
+  const now = Date.now();
+  // Only the tab you're looking at, at its own historic cadence.
+  const every = BITJITA_POLL_MS[currentTab]; if (!every) return;
+  if (_bitjitaPollAt[currentTab] && (now - _bitjitaPollAt[currentTab]) < every) return;
+  _bitjitaPollAt[currentTab] = now;
   refreshCacheBackedTab(true);
-}, FALLBACK_POLL_MS);
+}, 2000);
 
 // ── USER-CONTROLLED LIVE REFRESH — HTTP-fetched tabs only ──
 // Shopping and Networth price their contents over HTTP (no relay table backs a price), so a timer is
@@ -2583,12 +2621,44 @@ async function renderInventoryTab(silent) {
     inp.addEventListener('input', () => { invSearch = inp.value; renderAllInvBodies(); });
     updateLiveBtns();
   }
+  await loadInventories(silent);
+  trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId));
+}
+// ── THE single assembled inventory ──
+// invByPlayer is the ONE store; invData (the flat list Planner/Tool crafting/Networth/Tasks select from)
+// is DERIVED from it, never fetched separately. Two independently-fetched copies is what let the
+// Inventory tab and the dropdowns disagree — each had captured a different moment of a flapping relay,
+// so a player's house storage could appear in one and be absent from the other.
+async function loadInventories(silent){
   await Promise.all(trackedPlayers.map(async p => {
-    if (silent && isPlayerPaused(p.entityId) && invByPlayer[p.entityId]) return; // keep cached for paused
+    if (silent && isPlayerPaused(p.entityId) && invByPlayer[p.entityId]) return;   // paused players keep what they have
     try { invByPlayer[p.entityId] = await fetchPlayerInv(p.entityId); }
     catch(e) { if (!invByPlayer[p.entityId]) invByPlayer[p.entityId] = { inventories:[], items:{}, cargos:{} }; }
-    fillPlayerInvCached(p.entityId);
   }));
+  Object.keys(invByPlayer).forEach(id => { if (!isPlayerTracked(id)) delete invByPlayer[id]; });
+  rebuildInvData();
+}
+// Flatten the per-player store into the merged view. Deterministic: tracked-player order, then each
+// player's own (already sorted) container order — so the INDICES the selection sets use stay put.
+function rebuildInvData(){
+  if (!trackedPlayers.length){ invData = null; return; }
+  const merged = { inventories: [], items: {}, cargos: {} };
+  trackedPlayers.forEach(p => {
+    const inv = invByPlayer[p.entityId]; if (!inv) return;
+    Object.assign(merged.items, inv.items || {});
+    Object.assign(merged.cargos, inv.cargos || {});
+    (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
+  });
+  invData = merged;
+  // Re-attach selections captured before an invalidation (keys are entity ids, so they survive both
+  // reordering and renames). Only the dropdown selections live here — the Inventory tab's expand state
+  // is keyed by player+section name in invSectionCollapsed and is deliberately untouched.
+  if (_pendingInvSel){
+    const sel = _pendingInvSel; _pendingInvSel = null;
+    if (sel.planner) plannerTrackedInvs = _resolveTrackedByName(merged.inventories, sel.planner);
+    if (sel.tools)   toolTrackedInvs   = _resolveTrackedByName(merged.inventories, sel.tools);
+    if (sel.jsn)     jsnTrackedInvs    = _resolveTrackedByName(merged.inventories, sel.jsn);
+  }
 }
 
 // ── ORDERS (market listings + collections) ──
@@ -2634,7 +2704,7 @@ function ordToggle(key){
 // untouched. Throws while the layer hasn't snapshotted every region — callers fall back as before.
 async function fetchMarketRelayMulti(ids){
   ids = ids.map(String);
-  if (!liveReady()) throw new Error('live cache not ready');
+  if (!usingCache()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
   const want = new Set(ids);
@@ -2676,8 +2746,8 @@ async function fetchMarketRelayMulti(ids){
     if (b) b.buyOrders.push({ ...shape(r, +r.item_id, sumIdx(r.item_type), r.quantity), priceThreshold: String(r.price_threshold), storedCoins: String(r.stored_coins) }); });
   closed.forEach(r => { const b = out[String(r.owner_entity_id)]; if (!b) return;
     const s = stack(r.item_stack); b.collections.push(shape(r, s.itemId, s.itemType, s.quantity)); });
-  // Renders on a partial view (liveReady) but reports honestly: a stalled mirror means incomplete.
-  try { Object.defineProperty(out, '_complete', { value: liveComplete(), enumerable: false }); } catch(e){}
+  // Complete by construction — see fetchCraftsRelayMulti.
+  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerMarketRelay(id){   // single-player wrapper
@@ -3583,6 +3653,9 @@ const LIVE_COLS = {
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
   traveler_task_loop_timer: ['scheduled_id','scheduled_at'],
   building_nickname_state: ['entity_id','nickname'],
+  // active_buffs element: { buff_id i32, buff_start_timestamp Timestamp, buff_duration i32, values [f32] }
+  buff_desc: ['id','buff_type_id','description','priority','duration','warn_time','online_timestamp','beneficial','icon_asset_name','stats','vfx','vfx_attachment_point'],
+  buff_type_desc: ['id','name','category'],
   dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
   location_state: ['entity_id','chunk_index','x','z','dimension'],
 };
@@ -3670,6 +3743,29 @@ function liveReady(){
   if (!rgs.length) return false;
   return rgs.some(rg => liveConns[rg].snapshotTs > 0) && rgs.every(rg => liveConns[rg].snapshotTs > 0 || liveConns[rg].tried);
 }
+// ═══════════ THE SOURCE SWITCH — one source at a time, never a blend ═══════════
+// Rendering from the cache while ONE mirror is missing produced views with silent holes: a player's
+// house storage vanished because it all lives in one region, and nothing said so. Worse, two tabs could
+// disagree because they assembled at different moments of a flapping relay. So: the cache is used only
+// when EVERY region is live, and otherwise bitjita serves everything. Never per-region — bitjita's
+// endpoints are per-PLAYER, so a partial fallback fetches the same payload while creating a hybrid
+// nobody can reason about.
+// Boot deliberately renders from bitjita and STAYS there until all 13 are live: one repaint when the
+// relay is fully ready, or none at all. We never render a half-complete cache and walk it back.
+// Dropping BACK to bitjita waits out LIVE_DROP_GRACE_MS so a blip doesn't repaint everything.
+const LIVE_DROP_GRACE_MS = 10000;
+let _cacheModeSince = 0, _incompleteSince = 0;
+function dataSource(){
+  const whole = liveComplete();
+  const now = Date.now();
+  if (whole){ _incompleteSince = 0; if (!_cacheModeSince) _cacheModeSince = now; return 'cache'; }
+  if (!_incompleteSince) _incompleteSince = now;
+  // already trusting the cache? give the relay a grace period before tearing everything back to bitjita
+  if (_cacheModeSince && (now - _incompleteSince) < LIVE_DROP_GRACE_MS) return 'cache';
+  _cacheModeSince = 0;
+  return 'bitjita';
+}
+const usingCache = () => dataSource() === 'cache';
 // `additive` = this snapshot answers a SECOND Subscribe sent on an already-open socket, so it contains
 // ONLY that subscribe's rows. Replacing the region slice with it (correct for a full dial) would delete
 // everything the first subscribe established. Merge instead.
@@ -3703,7 +3799,7 @@ function liveApplySnapshot(c, frame, additive){
   liveNotify(evs);
   // The moment the LAST region's snapshot lands, ring the doorbells once: tabs that rendered (or
   // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
-  if (!_liveCompleteKicked && liveReady()){
+  if (!_liveCompleteKicked && liveComplete()){
     _liveCompleteKicked = true;
     // Everything rendered before this moment came from the bitjita fallback, which is less complete than
     // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
@@ -3711,14 +3807,11 @@ function liveApplySnapshot(c, frame, additive){
     // every per-player result and re-render. Clearing the caches also defeats the paused-player
     // short-circuit in the silent path, so paused players get corrected too.
     craftFetchedAt = 0; ordersFetchedAt = 0;
-    invByPlayer = {}; taskPlayersById = {}; invalidateMergedInv();
-    // The boot-window resolution ran against BITJITA-shaped containers, whose housing rows carry no
-    // entity id — so id-keyed selections found nothing and resolved to an EMPTY set, and Planner/Tools
-    // only consult localStorage while their set is still null, so the empty result stuck forever. Reset
-    // them here to re-read the saved choice against the cache-shaped list. (Networth always looked fine
-    // because it re-reads localStorage on every render.)
-    _pendingInvSel = null;
-    plannerTrackedInvs = null; toolTrackedInvs = null; jsnTrackedInvs = null; tasksInvsInited = false;
+    taskPlayersById = {}; invalidateMergedInv();
+    // Selections are carried across by invalidateMergedInv as ENTITY-ID keys, which match whichever
+    // shape the list is rebuilt in — so unlike before, the swap doesn't need to throw them away and
+    // re-read localStorage. Tasks re-resolves because its keys are per-player indices, not ids.
+    tasksInvsInited = false;
     refreshCacheBackedTab(true);
     // Warm the inventory path for every tracked player even when you're looking at another tab. The
     // FIRST fetchPlayerInvRelay per player pays place-name resolution plus the two house-scope
@@ -4118,7 +4211,7 @@ function syncRelayPlaces(){
 // back exactly as they did when a sweep failed.
 async function fetchCraftsRelayMulti(ids){
   ids = ids.map(String);
-  if (!liveReady()) throw new Error('live cache not ready');
+  if (!usingCache()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
   const want = new Set(ids);
@@ -4186,10 +4279,9 @@ async function fetchCraftsRelayMulti(ids){
       timestamp: new Date(r.timestamp).toISOString(),
       craftedItem: outputsOf(r.recipe_id, bucket.itemMap), ...place(r) });
   });
-  // Entry is gated on liveReady() so tabs render even when a mirror is refusing to answer — but the
-  // ALERT differ must only trust a WHOLE view (§3.5), so _complete tracks liveComplete(). A partial
-  // view therefore renders, and the alert path falls back to bitjita exactly as it did for a partial sweep.
-  try { Object.defineProperty(out, '_complete', { value: liveComplete(), enumerable: false }); } catch(e){}
+  // Complete by construction: usingCache() only returns true when EVERY region is live, so a cache read
+  // can never be a partial sweep — which is exactly the guarantee the craft-alert differ needs (§3.5).
+  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
@@ -5151,7 +5243,7 @@ function buildingsInHouse(housing){
 }
 async function fetchPlayerInvRelay(id){
   id = String(id);
-  if (!liveReady()) throw new Error('live cache not ready');
+  if (!usingCache()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
   const mk = (entityId, name, claimName, items, flags) => ({
@@ -5320,7 +5412,7 @@ async function relayTaskRefs(){
 // Task rows + the rotation timer are held subscriptions — this is a cache read; only the static desc
 // catalogue (7d-persisted) can hit the wire, once.
 async function fetchTasksRelay(playerId){
-  if (!liveReady()) throw new Error('live cache not ready');
+  if (!usingCache()) throw new Error('live cache not ready');
   const [refs, skills] = await Promise.all([relayTaskRefs(), relaySkillDescs()]);
   if (!refs) throw new Error('task refs unavailable');
   // rotation timer: scheduled_at is a Sum([tag, payload]) around a timestamp — dig the micros out
@@ -5359,15 +5451,17 @@ async function loadTasks(id, silent=false) {
   if (!el) return;
   if (!trackedPlayers.length) { taskPlayersById = {}; renderTasksUI(); return; }
   if (!silent) el.innerHTML = loading();
+  // Inventory comes from the ONE store (a third independently-fetched copy is exactly how the tabs
+  // ended up disagreeing); `inv` below is a reference to it, not a separate fetch.
+  await loadInventories(silent);
   await Promise.all(trackedPlayers.map(async p => {
     if (silent && isPlayerPaused(p.entityId) && taskPlayersById[p.entityId]) return; // keep cached for paused
+    const inv = invByPlayer[p.entityId] || { inventories: [], items: {}, cargos: {} };
     try {
-      const [taskData, inv] = await Promise.all([
-        fetchTasksRelay(p.entityId).catch(e => { if (bitjitaDisabled()) throw e; return apiFetch(`/api/players/${p.entityId}/traveler-tasks`); }),
-        fetchPlayerInv(p.entityId)
-      ]);
+      const taskData = await fetchTasksRelay(p.entityId)
+        .catch(e => { if (bitjitaDisabled()) throw e; return apiFetch(`/api/players/${p.entityId}/traveler-tasks`); });
       taskPlayersById[p.entityId] = { player: p, travTasks: taskData.tasks || [], itemMetaMap: {...(taskData.items||{}), ...(taskData.cargo||{})}, expires: taskData.expirationTimestamp, inv };
-    } catch(e) { if (!taskPlayersById[p.entityId]) taskPlayersById[p.entityId] = { player: p, travTasks: [], itemMetaMap: {}, expires: null, inv: { inventories: [], items: {}, cargos: {} } }; }
+    } catch(e) { if (!taskPlayersById[p.entityId]) taskPlayersById[p.entityId] = { player: p, travTasks: [], itemMetaMap: {}, expires: null, inv }; }
   }));
   Object.keys(taskPlayersById).forEach(eid => { if (!isPlayerTracked(eid)) delete taskPlayersById[eid]; }); // prune removed
   // Restore tracked-inventory selection once (now that inventories are loaded for resolution)
@@ -9266,27 +9360,16 @@ function invalidateMergedInv(){
     _pendingInvSel = { planner: keys(plannerTrackedInvs), tools: keys(toolTrackedInvs), jsn: keys(jsnTrackedInvs) };
   }
   invData = null;
+  invByPlayer = {};   // the derived view is rebuilt FROM this, so clearing only invData would just re-derive the same stale rows
 }
+// Planner/Tool crafting/Networth entry point. Just ensures the ONE store is populated and derives the
+// merged view from it — no second fetch, so these tabs can never hold a different vintage than the
+// Inventory tab.
 async function loadPlannerInventory() {
   if (!trackedPlayers.length) return;
-  if (invData) return; // already loaded
-  const merged = { inventories: [], items: {}, cargos: {} };
-  const results = await Promise.all(trackedPlayers.map(p =>
-    fetchPlayerInv(p.entityId).then(inv => ({ p, inv })).catch(() => ({ p, inv: { inventories: [], items: {}, cargos: {} } }))
-  ));
-  results.forEach(({ p, inv }) => {
-    Object.assign(merged.items, inv.items || {});
-    Object.assign(merged.cargos, inv.cargos || {});
-    (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
-  });
-  invData = merged;
-  // Re-attach selections captured by invalidateMergedInv (keys survive reordering AND renames).
-  if (_pendingInvSel){
-    const sel = _pendingInvSel; _pendingInvSel = null;
-    if (sel.planner) plannerTrackedInvs = _resolveTrackedByName(merged.inventories, sel.planner);
-    if (sel.tools)   toolTrackedInvs   = _resolveTrackedByName(merged.inventories, sel.tools);
-    if (sel.jsn)     jsnTrackedInvs    = _resolveTrackedByName(merged.inventories, sel.jsn);
-  }
+  if (invData) return; // already derived
+  if (!trackedPlayers.every(p => invByPlayer[p.entityId])) await loadInventories(true);
+  else rebuildInvData();
 }
 
 function computePlannerInvMap() {
@@ -10142,8 +10225,41 @@ async function checkPlayerBuffs(p){
   if (!palOn(id,'buffLost') || st.buffCheckInFlight) return;
   st.buffCheckInFlight = true;
   try {
-    const d = await apiFetch(`/api/players/${id}/buffs`);
-    const active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
+    // The relay is primary: active_buff_state carries buff_id + start + duration per player, and the
+    // buff catalogue supplies the name and `beneficial`. bitjita is the fallback for when we're not on
+    // the cache — it used to be the only source, with the relay row serving as a mere doorbell.
+    let active = null;
+    if (usingCache()){
+      const descs = await relayBuffDescs();
+      const row = liveRows('active_buff_state', r => String(r.entity_id) === id)[0];
+      if (descs && row){
+        // ⚠️ active_buffs is a FIXED ~238-slot array covering every buff, NOT a list of what's on you —
+        // 236 of those slots read start=0/duration=0. A slot is active only with a real start that
+        // hasn't expired. Verified against bitjita for the same player: both said exactly
+        // "Food Regen" + "Food Buffs".
+        // ⚠️ buff_start_timestamp arrives in SECONDS here (1785571683), unlike the micros every other
+        // timestamp column uses — dividing by 1e6 gave 1785 and made every buff look long expired.
+        const nowSec = Math.floor(Date.now()/1000);
+        active = (row.active_buffs || []).map(b => {
+          const arr = Array.isArray(b);
+          const buffId = arr ? b[0] : b.buff_id;
+          const dur = +(arr ? b[2] : b.buff_duration) || 0;
+          let sv = arr ? b[1] : b.buff_start_timestamp;
+          if (Array.isArray(sv)) sv = sv[0];
+          if (sv && typeof sv === 'object') sv = sv.__timestamp_micros_since_unix_epoch__;
+          let start = Number(sv || 0);
+          if (start > 1e12) start = Math.floor(start / 1e6);   // tolerate micros should the shape ever change
+          const d0 = descs[buffId] || {};
+          return { buffTypeName: d0.name, buffName: d0.name, beneficial: d0.beneficial,
+                   buffStartTimestamp: start, buffDuration: dur,
+                   timeRemaining: dur > 0 ? (start + dur) - nowSec : 1 };
+        }).filter(b => b.buffTypeName && b.buffStartTimestamp > 0 && (b.buffDuration <= 0 || b.timeRemaining > 0));
+      }
+    }
+    if (active === null){
+      const d = await apiFetch(`/api/players/${id}/buffs`);
+      active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
+    }
     const wanted = b => t.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
     const watched = active.filter(wanted);
     const cur = new Set(watched.map(b => b.buffTypeName || b.buffName));
@@ -10215,7 +10331,10 @@ async function _alertsTickInner(){
     const st = alertState[id] || (alertState[id] = {});
     try {
       if (palOn(id,'buffLost')) await checkPlayerBuffs(p);   // also fired instantly by the live buffs_state feed (onLiveBuffs) — this poll is the backstop
-      if (palOn(id,'stamina') && !liveConnected()){   // live feed handles stamina instantly when connected
+      // Follows the SOURCE switch, not 'is any socket open'. Twelve live mirrors and one stalled used
+      // to count as connected, so the bitjita poll was skipped while the stamina deltas for that
+      // player's region never arrived — the alert just silently stopped.
+      if (palOn(id,'stamina') && !usingCache()){
         const d = await apiFetch(`/api/players/${id}/stats`);
         const v = d.stats && d.stats.values;
         const cur = v ? v[STAT_IDX.stamina] : undefined;
@@ -10382,7 +10501,6 @@ function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].s
 let liveStamina = {};        // entityId -> { current, max }
 // "Connected" now means the relay feed is actually up, which is what alertsTick uses to decide whether
 // it still needs to poll stamina over REST.
-function liveConnected(){ return Object.values(liveConns).some(c => c.ws && c.ws.readyState === 1); }
 function liveNum(x){ if (x == null || x === '') return null; const n = +x; return isNaN(n) ? null : n; }
 // A buffs_state message means this player's buff set changed (gained/lost/refreshed). We don't parse its
 // payload — we use it purely as a trigger to re-run the authoritative REST buff check, throttled per player
