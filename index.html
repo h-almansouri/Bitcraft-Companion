@@ -2326,7 +2326,9 @@ async function refreshPlannerInv() {
   if (plannerTrackedInvs && invData) (invData.inventories || []).forEach((inv, i) => { if (plannerTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
   invData = null;
   await loadPlannerInventory();
-  plannerTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories || [], savedNames) : new Set();
+  // null (uninitialised) rather than an empty Set — see refreshToolInv: it lets the selector re-read the
+  // saved choice instead of locking in a blank selection.
+  plannerTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories || [], savedNames) : null;
   computePlannerInvMap();
   renderPlannerInventory();
   renderPlanPanel();
@@ -3680,7 +3682,19 @@ function liveApplySnapshot(c, frame){
     // short-circuit in the silent path, so paused players get corrected too.
     craftFetchedAt = 0; ordersFetchedAt = 0;
     invByPlayer = {}; taskPlayersById = {}; invalidateMergedInv();
+    // The boot-window resolution ran against BITJITA-shaped containers, whose housing rows carry no
+    // entity id — so id-keyed selections found nothing and resolved to an EMPTY set, and Planner/Tools
+    // only consult localStorage while their set is still null, so the empty result stuck forever. Reset
+    // them here to re-read the saved choice against the cache-shaped list. (Networth always looked fine
+    // because it re-reads localStorage on every render.)
+    _pendingInvSel = null;
+    plannerTrackedInvs = null; toolTrackedInvs = null; jsnTrackedInvs = null; tasksInvsInited = false;
     refreshCacheBackedTab(true);
+    // Warm the inventory path for every tracked player even when you're looking at another tab. The
+    // FIRST fetchPlayerInvRelay per player pays place-name resolution plus the two house-scope
+    // round-trips; paying that lazily is exactly why opening Inventory (or Tools/Planner) later felt
+    // slow while booting straight onto it felt fast — the work was just hidden behind the boot spinner.
+    trackedPlayers.forEach(p => { fetchPlayerInv(p.entityId).catch(() => {}); });
   }
 }
 let _liveCompleteKicked = false;
@@ -9384,7 +9398,10 @@ async function refreshToolInv(){
   if (toolTrackedInvs && invData) (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
   invData = null;
   await loadPlannerInventory();
-  toolTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories||[], savedNames) : new Set();
+  // null, NOT an empty Set, when there was nothing live to preserve: null means "uninitialised", which
+  // makes the selector re-read the saved choice from localStorage. Forcing an empty Set here is what
+  // swallowed the completion kick's reset and left the dropdown blank after booting on this tab.
+  toolTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories||[], savedNames) : null;
   renderToolCrafting();
 }
 function toolInvSelectorHtml(){
