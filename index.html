@@ -3679,7 +3679,7 @@ function liveApplySnapshot(c, frame){
     // every per-player result and re-render. Clearing the caches also defeats the paused-player
     // short-circuit in the silent path, so paused players get corrected too.
     craftFetchedAt = 0; ordersFetchedAt = 0;
-    invByPlayer = {}; taskPlayersById = {}; invData = null;
+    invByPlayer = {}; taskPlayersById = {}; invalidateMergedInv();
     refreshCacheBackedTab(true);
   }
 }
@@ -4108,7 +4108,7 @@ function feedKick(){
   if (_feedWant.inv && !_feedInvTimer){
     _feedInvTimer = setTimeout(() => {
       _feedInvTimer = null; _feedWant.inv = false;
-      invData = null;   // the merged view Planner + Tool crafting build from
+      invalidateMergedInv();   // the merged view Planner + Tool crafting build from — preserves selections
       if (currentTab === 'inventory') renderInventoryTab(true);
       else if (currentTab === 'planner') refreshPlannerInv();
       else if (currentTab === 'tools') refreshToolInv();
@@ -4978,6 +4978,27 @@ function liveEquipSlots(row){
 // constructed with claim 0 → their inventory rows), vehicles (deployable_state_v2 → their inventory
 // rows). All 13 regions — the old current-region-only equipment/vehicle limitation is gone. The only
 // network here is the cached place/nickname resolve for buildings we've never seen.
+// Which buildings are actually INSIDE a player's house. Two hops off the housing row, both fetch-once
+// and both cached for the session: the dimension(s) belonging to the house's network, then everything
+// located in them. Buildings don't move between dimensions, so this only re-resolves when a candidate
+// we've never classified appears (you built a new chest).
+const _houseScope = {};   // playerId -> { members:Set, seen:Set }
+async function houseMembers(playerId, housing, candidateIds){
+  let sc = _houseScope[playerId];
+  if (sc && candidateIds.every(c => sc.seen.has(c))) return sc.members;
+  // The housing row is mirrored in several regions, so __region is just "whichever mirror answered
+  // first" (observed 3 for a house that lives in 19, which made the dimension lookup find nothing and
+  // silently disable the filter). The row names its own region — trust that.
+  const rg = (housing.region_index != null) ? Number(housing.region_index) : housing.__region;
+  try {
+    const dimRows = (await relayFetchOnce(rg, [`SELECT * FROM dimension_description_state WHERE dimension_network_entity_id = ${housing.network_entity_id}`], 9000)).dimension_description_state || [];
+    const dims = [...new Set(dimRows.map(d => d.dimension_id).filter(d => d != null))];
+    if (!dims.length) return null;   // unknown → don't filter at all rather than hide real containers
+    const locs = (await relayFetchOnce(rg, dims.map(d => `SELECT * FROM location_state WHERE dimension = ${d}`), 12000)).location_state || [];
+    sc = _houseScope[playerId] = { members: new Set(locs.map(l => String(l.entity_id))), seen: new Set(candidateIds) };
+    return sc.members;
+  } catch(e){ return sc ? sc.members : null; }   // lookup failed → keep the old answer, else don't filter
+}
 async function fetchPlayerInvRelay(id){
   id = String(id);
   if (!liveComplete()) throw new Error('live cache not ready');
@@ -5009,10 +5030,19 @@ async function fetchPlayerInvRelay(id){
   const wantPlace = (bid, rg) => { if (bid && bid !== '0' && !relayBuildingInfo[bid]) (unknown[rg] || (unknown[rg] = new Set())).add(bid); };
   bankRows.forEach(r => wantPlace(String(r.owner_entity_id), r.__region));
   // house chests + the house's entrance (for its display name)
-  const houseB = new Map();
-  liveRows('building_state', r => String(r.claim_entity_id) === '0' && String(r.constructed_by_player_entity_id) === id)
-    .forEach(r => { houseB.set(String(r.entity_id), r); wantPlace(String(r.entity_id), r.__region); });
   const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
+  // ⚠️ "built by this player, in no claim" is NOT the same as "inside their house" — it also matches
+  // storage they placed elsewhere in the world, which showed up as phantom containers (5 extra for a
+  // 46-chest house, all merging under one building-type name because the tab groups by name). Scope to
+  // the house's actual interior: player_housing_state.network_entity_id → dimension_description_state
+  // → location_state.dimension. Verified to reproduce the relay's own housing view exactly.
+  const candidates = liveRows('building_state', r => String(r.claim_entity_id) === '0' && String(r.constructed_by_player_entity_id) === id);
+  const inHouse = housing ? await houseMembers(id, housing, candidates.map(r => String(r.entity_id))) : null;
+  const houseB = new Map();
+  candidates.forEach(r => {
+    if (inHouse && !inHouse.has(String(r.entity_id))) return;   // placed somewhere else — not house storage
+    houseB.set(String(r.entity_id), r); wantPlace(String(r.entity_id), r.__region);
+  });
   if (housing) wantPlace(String(housing.entrance_building_entity_id), housing.__region);
   await Promise.all(Object.keys(unknown).map(rg => relayResolvePlaces(+rg, [...unknown[rg]]).catch(() => {})));
   const bankInvs = [];
@@ -9075,6 +9105,21 @@ async function renderCraftVsBuy(){
 // ── PLANNER INVENTORY ──
 // Load ALL tracked players' inventories, merged into one invData tagged by owner. Shared by the
 // Planner and Tool crafting tabs (both index into invData.inventories with their own tracked Set).
+// ⚠️ Tracked selections are sets of INDICES into invData.inventories, so nulling invData without first
+// converting them to stable keys destroys them: the refresh helpers snapshot names from invData, and a
+// caller that cleared it beat them to it and re-resolved against nothing. Always invalidate through
+// here — it converts each selection to entity-id keys first, and loadPlannerInventory re-resolves them
+// against the rebuilt list. (This is what silently wiped Planner/Tool-crafting picks a second after
+// load: the cache-complete kick nulled invData, then the refresh found nothing to preserve.)
+let _pendingInvSel = null;
+function invalidateMergedInv(){
+  if (invData){
+    const invs = invData.inventories || [];
+    const keys = s => s ? invs.filter((_, i) => s.has(i)).map(_invNameKey) : null;
+    _pendingInvSel = { planner: keys(plannerTrackedInvs), tools: keys(toolTrackedInvs), jsn: keys(jsnTrackedInvs) };
+  }
+  invData = null;
+}
 async function loadPlannerInventory() {
   if (!trackedPlayers.length) return;
   if (invData) return; // already loaded
@@ -9088,6 +9133,13 @@ async function loadPlannerInventory() {
     (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
   });
   invData = merged;
+  // Re-attach selections captured by invalidateMergedInv (keys survive reordering AND renames).
+  if (_pendingInvSel){
+    const sel = _pendingInvSel; _pendingInvSel = null;
+    if (sel.planner) plannerTrackedInvs = _resolveTrackedByName(merged.inventories, sel.planner);
+    if (sel.tools)   toolTrackedInvs   = _resolveTrackedByName(merged.inventories, sel.tools);
+    if (sel.jsn)     jsnTrackedInvs    = _resolveTrackedByName(merged.inventories, sel.jsn);
+  }
 }
 
 function computePlannerInvMap() {
