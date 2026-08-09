@@ -1651,7 +1651,7 @@ function applyPlayerOnlineDots(){
 async function refreshPlayerOnline(){
   if (!trackedPlayers.length) return;
   const ids = trackedPlayers.map(p => String(p.entityId));
-  if (liveComplete()){
+  if (liveReady()){
     const online = new Set(liveRows('signed_in_player_state', () => true).map(r => String(r.entity_id)));
     ids.forEach(id => playerOnline[id] = online.has(id));
   } else if (!bitjitaDisabled()){
@@ -2118,7 +2118,7 @@ async function relaySkillDescs(){
 // XP straight from the cache — experience_state is a held subscription, so this is a local read and the
 // tab keeps ticking live between renders. Only the skill-name map (static, 7d-persisted) can hit the wire.
 async function fetchSkillsRelay(id){
-  if (!liveComplete()) throw new Error('live cache not ready');
+  if (!liveReady()) throw new Error('live cache not ready');
   const descs = await relaySkillDescs();
   if (!descs) throw new Error('skill_desc unavailable');
   const row = liveRows('experience_state', r => String(r.entity_id) === String(id)).find(r => (r.experience_stacks || []).length);
@@ -2271,7 +2271,7 @@ const FALLBACK_POLL_MS = 30000, LIVE_BOOT_GRACE_MS = 20000;
 let _liveLayerStartedAt = 0;
 function liveDegraded(){
   if (!trackedPlayers.length || !_liveLayerStartedAt) return false;
-  if (liveComplete()) return false;                                      // healthy → the cache is the source
+  if (liveReady()) return false;                                         // usable → the cache is the source
   return (Date.now() - _liveLayerStartedAt) > LIVE_BOOT_GRACE_MS;        // still not ready long after boot → really degraded
 }
 setInterval(() => {
@@ -2632,15 +2632,9 @@ function ordToggle(key){
 // claims we've never seen (persisted via bcRelayPlaces, so a no-op after first sight). Output shape is
 // IDENTICAL to the old join-per-refresh version, so the tab render and the bitjita fallback are
 // untouched. Throws while the layer hasn't snapshotted every region — callers fall back as before.
-function relayResolveClaims(region, cids){
-  const need = [...new Set(cids)].filter(c => c && c !== '0' && !relayClaimNames[c]);
-  if (!need.length) return Promise.resolve();
-  return relayFetchOnce(region, [`SELECT * FROM claim_state WHERE ${need.map(c => `entity_id = ${c}`).join(' OR ')}`], 9000)
-    .then(byT => { (byT.claim_state || []).forEach(x => relayClaimNames[String(x.entity_id)] = x.name); saveRelayPlaces(); });
-}
 async function fetchMarketRelayMulti(ids){
   ids = ids.map(String);
-  if (!liveComplete()) throw new Error('live cache not ready');
+  if (!liveReady()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
   const want = new Set(ids);
@@ -2649,13 +2643,7 @@ async function fetchMarketRelayMulti(ids){
   const sells  = liveRows('sell_order_state',     r => want.has(String(r.owner_entity_id))).sort(byId);
   const buys   = liveRows('buy_order_state',      r => want.has(String(r.owner_entity_id))).sort(byId);
   const closed = liveRows('closed_listing_state', r => want.has(String(r.owner_entity_id))).sort(byId);
-  // Resolve claim names we've never seen, grouped by the region the rows came from.
-  const unknown = {};
-  sells.concat(buys, closed).forEach(r => {
-    const cid = String(r.claim_entity_id || '0');
-    if (cid !== '0' && !relayClaimNames[cid]) (unknown[r.__region] || (unknown[r.__region] = new Set())).add(cid);
-  });
-  await Promise.all(Object.keys(unknown).map(rg => relayResolveClaims(+rg, [...unknown[rg]]).catch(() => {})));
+  syncRelayPlaces();   // claim names ride the subscription — no lookup round trip
   // Region display names ("Zephra") come from the cache too — world_region_name_state, one row per
   // mirror — so no /api/regions call. (marketRegions, if some other tab loaded it, is only a fallback.)
   const regionName = {};
@@ -2688,8 +2676,8 @@ async function fetchMarketRelayMulti(ids){
     if (b) b.buyOrders.push({ ...shape(r, +r.item_id, sumIdx(r.item_type), r.quantity), priceThreshold: String(r.price_threshold), storedCoins: String(r.stored_coins) }); });
   closed.forEach(r => { const b = out[String(r.owner_entity_id)]; if (!b) return;
     const s = stack(r.item_stack); b.collections.push(shape(r, s.itemId, s.itemType, s.quantity)); });
-  // Complete by construction: liveComplete() gated entry, so this can never be a partial sweep.
-  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
+  // Renders on a partial view (liveReady) but reports honestly: a stalled mirror means incomplete.
+  try { Object.defineProperty(out, '_complete', { value: liveComplete(), enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerMarketRelay(id){   // single-player wrapper
@@ -3516,6 +3504,14 @@ async function loadRelayRegions(){
 // The authoritative list is /health (`sources[].database` + `.port`); the relay's own explorer reads it
 // from there at runtime, which is why the explorer kept working while we broke. Their docs still say
 // relay-mirror-bcN, so trust /health over the tutorial. One helper so a future rename is a one-line fix.
+// Dev instrumentation: `sessionStorage.bc_count_sockets = 1` then reload to tally every socket the app
+// opens, with what it was for. Read it back via window.__sockLog.
+if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('bc_count_sockets')){
+  window.__sockLog = [];
+  const _W = window.WebSocket;
+  window.WebSocket = function(u, p){ window.__sockLog.push({ port: (String(u).match(/:(\d+)\//)||[])[1], at: Math.round(performance.now()) }); return new _W(u, p); };
+  window.WebSocket.prototype = _W.prototype;
+}
 const relayWsUrl = region => `wss://relay.bitcraftsync.app:${3000+region}/v1/database/bitcraft-live-${region}/subscribe?compression=None`;
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
@@ -3579,6 +3575,9 @@ const LIVE_COLS = {
   player_housing_state: ['entity_id','entrance_building_entity_id','network_entity_id','exit_portal_entity_id','rank','locked_until','is_empty','region_index'],
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
   traveler_task_loop_timer: ['scheduled_id','scheduled_at'],
+  building_nickname_state: ['entity_id','nickname'],
+  dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
+  location_state: ['entity_id','chunk_index','x','z','dimension'],
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -3647,11 +3646,22 @@ function liveStatus(){
   Object.keys(liveConns).forEach(rg => { const c = liveConns[rg]; out[rg] = { status: c.status, snapshotTs: c.snapshotTs }; });
   return out;
 }
-// Have all dialled regions delivered a snapshot? (Callers that need a COMPLETE view — the alert differ —
-// check this instead of trusting whatever's arrived so far; a partial view isn't wrong, just incomplete.)
+// ⚠️ TWO different questions, and conflating them made ONE sick mirror disable the whole relay path.
+// liveComplete() = every region answered → the view is whole. Only the ALERT path needs this, because a
+// craft missing from a partial sweep silently breaks the done-diff (§3.5).
 function liveComplete(){
   const rgs = Object.keys(liveConns);
   return rgs.length > 0 && rgs.every(rg => liveConns[rg].snapshotTs > 0 && liveConns[rg].status === 'live');
+}
+// liveReady() = every region has either answered or demonstrably failed, and at least one answered → we
+// know as much as we're going to for now, so RENDER it. A region whose mirror is up but refuses to
+// answer subscribes (observed on r19: connects in 253ms, never sends a frame, while /health still calls
+// it live) must not hold twelve healthy regions hostage — the alternative was every tab silently
+// serving bitjita forever.
+function liveReady(){
+  const rgs = Object.keys(liveConns);
+  if (!rgs.length) return false;
+  return rgs.some(rg => liveConns[rg].snapshotTs > 0) && rgs.every(rg => liveConns[rg].snapshotTs > 0 || liveConns[rg].tried);
 }
 function liveApplySnapshot(c, frame){
   const fresh = {};
@@ -3673,7 +3683,7 @@ function liveApplySnapshot(c, frame){
   liveNotify(evs);
   // The moment the LAST region's snapshot lands, ring the doorbells once: tabs that rendered (or
   // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
-  if (!_liveCompleteKicked && liveComplete()){
+  if (!_liveCompleteKicked && liveReady()){
     _liveCompleteKicked = true;
     // Everything rendered before this moment came from the bitjita fallback, which is less complete than
     // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
@@ -3734,33 +3744,53 @@ const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state']; 
 // (§3.2). Ids persist per roster, so a warm boot subscribes everything in its first dial — zero redials
 // steady-state.
 const LIVE_CONTAINERS_KEY = 'bcLiveContainers';
-let liveContainerIds = [];   // sorted container ids the current subscription covers
+let liveRefs = { containers: [], buildings: [], networks: [], locs: [] };   // discovered ids the subscription covers
 let liveRosterIds = [];      // player ids the current subscription covers
-function liveWantedContainers(){
+// Everything the app needs that ISN'T matched by a player-id filter: the buildings behind bank/house
+// containers and craft stations (they belong to other people, or carry no owner column), their
+// nicknames and claim names, and the house-interior scope. All of it is DISCOVERABLE from rows the base
+// subscription already carries, so it joins the query set and rides the same 13 sockets. It must never
+// become a side-channel of one-off sockets — that mistake cost a cold inventory load 24 dials and ~5s.
+function liveWantedRefs(){
   const tracked = new Set(trackedPlayers.map(p => String(p.entityId)));
-  const ids = new Set();
-  // house interiors: buildings this player constructed with NO claim (claim_entity_id 0 = inside the house)
+  const containers = new Set();   // things whose inventory_state contents we need
+  const buildings = new Set();    // building_state + nickname + claim-name lookups
+  const networks = new Set();     // house dimension networks
+  const locs = new Set();         // buildings whose location (→ dimension) decides house membership
+  // house interiors: buildings this player constructed with NO claim (claim 0 = inside a dimension)
   liveRows('building_state', r => String(r.claim_entity_id) === '0' && tracked.has(String(r.constructed_by_player_entity_id)))
-    .forEach(r => ids.add(String(r.entity_id)));
+    .forEach(r => { const id = String(r.entity_id); containers.add(id); buildings.add(id); locs.add(id); });
   liveRows('deployable_state_v2', r => tracked.has(String(r.owner_id)))
-    .forEach(r => ids.add(String(r.entity_id)));
-  return [...ids].sort().slice(0, 600);   // sanity cap
+    .forEach(r => containers.add(String(r.entity_id)));
+  // bank buildings — the OWNER of a bank inventory row, owned by whoever runs the settlement
+  liveRows('inventory_state', r => tracked.has(String(r.player_owner_entity_id)) && !tracked.has(String(r.owner_entity_id)))
+    .forEach(r => buildings.add(String(r.owner_entity_id)));
+  // craft stations, so the Crafts tab resolves its place names from the cache too
+  ['progressive_action_state','passive_craft_state'].forEach(t =>
+    liveRows(t, r => tracked.has(String(r.owner_entity_id))).forEach(r => {
+      const b = String(r.building_entity_id || '0'); if (b !== '0') buildings.add(b);
+    }));
+  liveRows('player_housing_state', r => tracked.has(String(r.entity_id)))
+    .forEach(r => { networks.add(String(r.network_entity_id)); buildings.add(String(r.entrance_building_entity_id)); });
+  const cap = (s, n) => [...s].sort().slice(0, n);
+  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 600) };
 }
-function liveLoadContainers(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); return Array.isArray(d[pKey]) ? d[pKey] : []; } catch(e){ return []; } }
-function liveSaveContainers(pKey, ids){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: ids })); } catch(e){} }
+const liveRefsKey = r => r.containers.join(',') + '|' + r.buildings.join(',') + '|' + r.networks.join(',') + '|' + r.locs.join(',');
+function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
+function liveSaveRefs(pKey, refs){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: refs })); } catch(e){} }
 let _liveContTimer = null;
 onLiveChange(evs => {
-  if (!evs.some(e => e.table === 'building_state' || e.table === 'deployable_state_v2')) return;
+  if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
   clearTimeout(_liveContTimer);
   _liveContTimer = setTimeout(() => {
-    const want = liveWantedContainers();
-    if (want.join(',') === liveContainerIds.join(',')) return;
-    liveSaveContainers(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
+    const want = liveWantedRefs();
+    if (liveRefsKey(want) === liveRefsKey(liveRefs)) return;
+    liveSaveRefs(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
     liveStart();   // query set changed → the one redial path (§3.2). Converges: the wanted set derives
-                   // only from the discovery tables, so a second pass sees the same set and stops.
+                   // only from rows the base subscription carries, so a second pass sees the same set.
   }, 1500);
 });
-function liveQuerySet(ids){
+function liveQuerySet(ids, region){
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
   const self  = ids.map(i => `entity_id = ${i}`).join(' OR ');
   const pcol  = ids.map(i => `player_entity_id = ${i}`).join(' OR ');
@@ -3776,11 +3806,24 @@ function liveQuerySet(ids){
     'SELECT * FROM world_region_name_state',
     'SELECT * FROM traveler_task_loop_timer',
   ];
-  for (let i = 0; i < liveContainerIds.length; i += 40)
-    sqls.push(`SELECT * FROM inventory_state WHERE ${liveContainerIds.slice(i, i + 40).map(c => `owner_entity_id = ${c}`).join(' OR ')}`);
+  // Discovered references. An entity id encodes its region in the top byte, so each socket only carries
+  // the ids that actually live in ITS mirror — 13 regions don't all get all 900 lookups.
+  const here = list => list.filter(x => regionOfEntity(x) === region);
+  const chunked = (list, col, table) => { for (let i = 0; i < list.length; i += 40) sqls.push(`SELECT * FROM ${table} WHERE ${list.slice(i, i + 40).map(v => `${col} = ${v}`).join(' OR ')}`); };
+  chunked(here(liveRefs.containers), 'owner_entity_id', 'inventory_state');   // contents of house chests + vehicles
+  const blds = here(liveRefs.buildings);
+  chunked(blds, 'entity_id', 'building_state');            // bank/station/house buildings → descId + claim
+  chunked(blds, 'entity_id', 'building_nickname_state');   // player-set names
+  // A JOIN can't be OR'd (the relay needs an index the OR defeats), so emit one per building — they all
+  // still ride the same single subscribe, which is what actually costs a round trip.
+  blds.forEach(b => sqls.push(`SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`));
+  chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
+  chunked(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
   return {
     sqls,
-    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2', 'world_region_name_state', 'traveler_task_loop_timer'],
+    tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
+      'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
+      'dimension_description_state', 'location_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -3796,11 +3839,12 @@ function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
   if (!ids.length){ liveStopAll(); return; }
   const pKey = ids.join(',');
-  // Containers: what the cache says right now, else last session's persisted set (cold boot) — so the
-  // first dial already covers house chests and vehicles without waiting for a discovery redial.
-  const fromCache = liveWantedContainers();
-  liveContainerIds = fromCache.length ? fromCache : liveLoadContainers(pKey);
-  const key = pKey + '#' + liveContainerIds.join(',');
+  // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
+  // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
+  // discovery redial at all.
+  const fromCache = liveWantedRefs();
+  liveRefs = fromCache.containers.length || fromCache.buildings.length ? fromCache : (liveLoadRefs(pKey) || fromCache);
+  const key = pKey + '#' + liveRefsKey(liveRefs);
   if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
   if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
   liveRosterKey = key; liveRosterIds = ids;
@@ -3821,7 +3865,7 @@ function liveDial(rg){
   const ex = liveConns[rg];
   if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
   if (ex) liveDrop(rg);
-  const { sqls, tables } = liveQuerySet(liveRosterIds);
+  const { sqls, tables } = liveQuerySet(liveRosterIds, rg);
   const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
   liveConns[rg] = c;
   liveOpen(c);
@@ -3846,18 +3890,37 @@ function liveOpen(c){
   ws.onopen = () => {
     c.status = 'open'; c.backoff = 1500; clearTimeout(c.timer);
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
+    // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
+    // this the region sits at 'open' forever and liveReady() never trips. Give up, mark it tried, and
+    // let onclose reschedule with backoff — the region rejoins the moment it starts answering again.
+    clearTimeout(c.snapTimer);
+    c.snapTimer = setTimeout(() => {
+      if (c.snapshotTs || c.closed) return;
+      c.status = 'stalled'; c.tried = true;
+      console.warn(`[live] r${c.region} accepted the socket but never answered its subscribe — retrying`);
+      try { ws.close(); } catch(e){}
+    }, LIVE_SNAPSHOT_TIMEOUT_MS);
   };
   ws.onmessage = ev => {
     if (typeof ev.data !== 'string') return;
     c.lastMsgAt = Date.now();   // liveness (see liveWatchdog) — ANY frame counts, including IdentityToken
     let m; try { m = JSON.parse(ev.data); } catch(e){ return; }   // outer frame is safe to parse plainly — rows are still strings inside it
-    if (m.InitialSubscription){ c.status = 'live'; c.snapshotTs = Date.now(); liveApplySnapshot(c, m.InitialSubscription); }
+    if (m.InitialSubscription){
+      clearTimeout(c.snapTimer);
+      const first = !c.snapshotTs;
+      c.status = 'live'; c.snapshotTs = Date.now(); c.tried = true;
+      liveApplySnapshot(c, m.InitialSubscription);
+      // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
+      // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
+      if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
+    }
     else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
+    else if (m.SubscriptionError){ c.tried = true; console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
     // IdentityToken (first frame) and anything unrecognised: ignore.
   };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onclose = () => {
-    c.ws = null;
+    c.ws = null; clearTimeout(c.snapTimer); c.tried = true;
     if (c.closed || c.key !== liveRosterKey) return;
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     liveReschedule(c);
@@ -3881,7 +3944,7 @@ function liveReschedule(c){
 // atomically replaces the region's slice. So a quiet socket is either dead (redial fixes it) or truly
 // idle (redial was free) — no diagnosis required. This never fires while data is flowing, so it isn't
 // the "redial on a timer" the design rules out; that rule is about redialling ACTIVE sockets.
-const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000;
+const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000, LIVE_SNAPSHOT_TIMEOUT_MS = 12000;
 function liveWatchdog(){
   if (!liveOn() || document.hidden) return;
   const now = Date.now();
@@ -3942,24 +4005,27 @@ function relayFetchOnce(region, sqls, timeoutMs = 9000){
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
-// Resolve building/claim names for buildings we haven't seen — one fetch-once round-trip carrying
-// building_state, its nickname, and the claim name (joined through the building). Persisted across
-// sessions (saveRelayPlaces), so after the first-ever sight of a building this is a no-op.
-async function relayResolvePlaces(region, buildingIds){
-  const unknown = [...new Set(buildingIds)].filter(b => b && b !== '0' && !relayBuildingInfo[b]);
-  if (!unknown.length) return;
-  const sqls = [
-    ...unknown.map(b => `SELECT * FROM building_state WHERE entity_id = ${b}`),
-    ...unknown.map(b => `SELECT * FROM building_nickname_state WHERE entity_id = ${b}`),
-    ...unknown.map(b => `SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`)
-  ];
-  const byT = await relayFetchOnce(region, sqls, 9000);
-  (byT.building_state || []).forEach(x => relayBuildingInfo[String(x.entity_id)] =
-    { claimId: String(x.claim_entity_id), descId: x.building_description_id, nickname: (relayBuildingInfo[String(x.entity_id)]||{}).nickname || '' });
-  (byT.claim_state || []).forEach(x => relayClaimNames[String(x.entity_id)] = x.name);
-  (byT.building_nickname_state || []).forEach(x => { const b = relayBuildingInfo[String(x.entity_id)]; if (b && x.nickname) b.nickname = x.nickname; });
-  unknown.forEach(b => { if (!relayBuildingInfo[b]) relayBuildingInfo[b] = { claimId:'0', descId:0, nickname:'' }; });   // don't re-ask
-  saveRelayPlaces();
+// Fold the cache's building/nickname/claim rows into the persisted place maps. NO NETWORK — these
+// tables are part of the held subscription (see liveWantedRefs), so the names arrive with the snapshot.
+// The maps stay because they persist across sessions, giving a warm start before the first snapshot.
+function syncRelayPlaces(){
+  hydrateRelayPlaces();
+  let n = 0;
+  liveRows('building_state', () => true).forEach(x => {
+    const id = String(x.entity_id), prev = relayBuildingInfo[id];
+    const claimId = String(x.claim_entity_id), descId = x.building_description_id;
+    if (!prev || prev.claimId !== claimId || prev.descId !== descId){
+      relayBuildingInfo[id] = { claimId, descId, nickname: (prev || {}).nickname || '' }; n++;
+    }
+  });
+  liveRows('building_nickname_state', () => true).forEach(x => {
+    const b = relayBuildingInfo[String(x.entity_id)];
+    if (b && x.nickname && b.nickname !== x.nickname){ b.nickname = x.nickname; n++; }
+  });
+  liveRows('claim_state', () => true).forEach(x => {
+    const id = String(x.entity_id); if (x.name && relayClaimNames[id] !== x.name){ relayClaimNames[id] = x.name; n++; }
+  });
+  if (n) saveRelayPlaces();
 }
 // Crafts for MANY players — assembled from the LIVE CACHE, no network. The held subscriptions keep the
 // cache current, so a "fetch" is a local read plus (rarely) a place-name resolve for buildings we've
@@ -3969,7 +4035,7 @@ async function relayResolvePlaces(region, buildingIds){
 // back exactly as they did when a sweep failed.
 async function fetchCraftsRelayMulti(ids){
   ids = ids.map(String);
-  if (!liveComplete()) throw new Error('live cache not ready');
+  if (!liveReady()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   await Promise.all([loadCraftingData().catch(()=>{}), loadGameItemDefs()]);
   const want = new Set(ids);
@@ -3981,14 +4047,7 @@ async function fetchCraftsRelayMulti(ids){
   const prog = liveRows('progressive_action_state', r => want.has(String(r.owner_entity_id))).sort(byId);
   const pass = liveRows('passive_craft_state',      r => want.has(String(r.owner_entity_id))).sort(byId);
   const pub  = new Set(liveRows('public_progressive_action_state', r => want.has(String(r.owner_entity_id))).map(r => String(r.entity_id)));
-  // Resolve names for buildings we haven't seen, grouped by the region their rows came from (persisted
-  // across sessions via bcRelayPlaces, so this is a no-op on every load after the first).
-  const unknownByRegion = {};
-  prog.concat(pass).forEach(r => {
-    const b = String(r.building_entity_id || '0');
-    if (b !== '0' && !relayBuildingInfo[b]) (unknownByRegion[r.__region] || (unknownByRegion[r.__region] = new Set())).add(b);
-  });
-  await Promise.all(Object.keys(unknownByRegion).map(rg => relayResolvePlaces(+rg, [...unknownByRegion[rg]]).catch(() => {})));
+  syncRelayPlaces();   // station/claim names ride the subscription — no lookup round trip
   const recipes = (craftingData && craftingData.recipesById) || {};
   const defs = gameItemDefs || { items:{}, cargos:{}, buildings:{} };
   const out = {}; ids.forEach(id => out[id] = { active: [], done: [], passive: [], itemMap: {} });
@@ -4044,9 +4103,10 @@ async function fetchCraftsRelayMulti(ids){
       timestamp: new Date(r.timestamp).toISOString(),
       craftedItem: outputsOf(r.recipe_id, bucket.itemMap), ...place(r) });
   });
-  // The cache is complete by construction here — liveComplete() gated entry, so the alert differ can
-  // trust this view the same way it trusted a 13/13 sweep.
-  try { Object.defineProperty(out, '_complete', { value: true, enumerable: false }); } catch(e){}
+  // Entry is gated on liveReady() so tabs render even when a mirror is refusing to answer — but the
+  // ALERT differ must only trust a WHOLE view (§3.5), so _complete tracks liveComplete(). A partial
+  // view therefore renders, and the alert path falls back to bitjita exactly as it did for a partial sweep.
+  try { Object.defineProperty(out, '_complete', { value: liveComplete(), enumerable: false }); } catch(e){}
   return out;
 }
 async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for callers that load one)
@@ -4992,30 +5052,23 @@ function liveEquipSlots(row){
 // constructed with claim 0 → their inventory rows), vehicles (deployable_state_v2 → their inventory
 // rows). All 13 regions — the old current-region-only equipment/vehicle limitation is gone. The only
 // network here is the cached place/nickname resolve for buildings we've never seen.
-// Which buildings are actually INSIDE a player's house. Two hops off the housing row, both fetch-once
-// and both cached for the session: the dimension(s) belonging to the house's network, then everything
-// located in them. Buildings don't move between dimensions, so this only re-resolves when a candidate
-// we've never classified appears (you built a new chest).
-const _houseScope = {};   // playerId -> { members:Set, seen:Set }
-async function houseMembers(playerId, housing, candidateIds){
-  let sc = _houseScope[playerId];
-  if (sc && candidateIds.every(c => sc.seen.has(c))) return sc.members;
-  // The housing row is mirrored in several regions, so __region is just "whichever mirror answered
-  // first" (observed 3 for a house that lives in 19, which made the dimension lookup find nothing and
-  // silently disable the filter). The row names its own region — trust that.
-  const rg = (housing.region_index != null) ? Number(housing.region_index) : housing.__region;
-  try {
-    const dimRows = (await relayFetchOnce(rg, [`SELECT * FROM dimension_description_state WHERE dimension_network_entity_id = ${housing.network_entity_id}`], 9000)).dimension_description_state || [];
-    const dims = [...new Set(dimRows.map(d => d.dimension_id).filter(d => d != null))];
-    if (!dims.length) return null;   // unknown → don't filter at all rather than hide real containers
-    const locs = (await relayFetchOnce(rg, dims.map(d => `SELECT * FROM location_state WHERE dimension = ${d}`), 12000)).location_state || [];
-    sc = _houseScope[playerId] = { members: new Set(locs.map(l => String(l.entity_id))), seen: new Set(candidateIds) };
-    return sc.members;
-  } catch(e){ return sc ? sc.members : null; }   // lookup failed → keep the old answer, else don't filter
+// Which buildings are actually INSIDE a player's house — read straight from the cache. The house's
+// dimension(s) come from dimension_description_state (subscribed by the player's network id) and each
+// candidate's dimension from location_state (subscribed by building id); both are part of the held
+// subscription, so this is a local comparison with no round trip.
+function houseDimensions(housing){
+  const net = String(housing.network_entity_id);
+  return new Set(liveRows('dimension_description_state', r => String(r.dimension_network_entity_id) === net)
+    .map(r => String(r.dimension_id)).filter(d => d !== 'null' && d !== 'undefined'));
+}
+function buildingsInHouse(housing){
+  const dims = houseDimensions(housing);
+  if (!dims.size) return null;   // not resolved yet → don't filter at all rather than hide real containers
+  return new Set(liveRows('location_state', r => dims.has(String(r.dimension))).map(r => String(r.entity_id)));
 }
 async function fetchPlayerInvRelay(id){
   id = String(id);
-  if (!liveComplete()) throw new Error('live cache not ready');
+  if (!liveReady()) throw new Error('live cache not ready');
   hydrateRelayPlaces();
   const defs = await loadGameItemDefs();
   const mk = (entityId, name, claimName, items, flags) => ({
@@ -5038,11 +5091,9 @@ async function fetchPlayerInvRelay(id){
       const items = livePocketItems(r); if (!items.length) return;
       inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'Storage', null, items, { _isDeployable: true }));
     });
-  // banks — the row's owner is the bank BUILDING; resolve building → claim → name (persisted, no-op once seen)
+  // banks — the row's owner is the bank BUILDING. Its name and claim come from the cache (the building,
+  // nickname and claim rows are all part of the held subscription), so there's nothing to fetch.
   const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
-  const unknown = {};
-  const wantPlace = (bid, rg) => { if (bid && bid !== '0' && !relayBuildingInfo[bid]) (unknown[rg] || (unknown[rg] = new Set())).add(bid); };
-  bankRows.forEach(r => wantPlace(String(r.owner_entity_id), r.__region));
   // house chests + the house's entrance (for its display name)
   const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
   // ⚠️ "built by this player, in no claim" is NOT the same as "inside their house" — it also matches
@@ -5051,14 +5102,13 @@ async function fetchPlayerInvRelay(id){
   // the house's actual interior: player_housing_state.network_entity_id → dimension_description_state
   // → location_state.dimension. Verified to reproduce the relay's own housing view exactly.
   const candidates = liveRows('building_state', r => String(r.claim_entity_id) === '0' && String(r.constructed_by_player_entity_id) === id);
-  const inHouse = housing ? await houseMembers(id, housing, candidates.map(r => String(r.entity_id))) : null;
+  const inHouse = housing ? buildingsInHouse(housing) : null;
   const houseB = new Map();
   candidates.forEach(r => {
     if (inHouse && !inHouse.has(String(r.entity_id))) return;   // placed somewhere else — not house storage
-    houseB.set(String(r.entity_id), r); wantPlace(String(r.entity_id), r.__region);
+    houseB.set(String(r.entity_id), r);
   });
-  if (housing) wantPlace(String(housing.entrance_building_entity_id), housing.__region);
-  await Promise.all(Object.keys(unknown).map(rg => relayResolvePlaces(+rg, [...unknown[rg]]).catch(() => {})));
+  syncRelayPlaces();   // fold the cache's building/nickname/claim rows into the persisted name maps
   const bankInvs = [];
   bankRows.forEach(r => {
     const items = livePocketItems(r); if (!items.length) return;
@@ -5187,7 +5237,7 @@ async function relayTaskRefs(){
 // Task rows + the rotation timer are held subscriptions — this is a cache read; only the static desc
 // catalogue (7d-persisted) can hit the wire, once.
 async function fetchTasksRelay(playerId){
-  if (!liveComplete()) throw new Error('live cache not ready');
+  if (!liveReady()) throw new Error('live cache not ready');
   const [refs, skills] = await Promise.all([relayTaskRefs(), relaySkillDescs()]);
   if (!refs) throw new Error('task refs unavailable');
   // rotation timer: scheduled_at is a Sum([tag, payload]) around a timestamp — dig the micros out
