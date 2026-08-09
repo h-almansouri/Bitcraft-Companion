@@ -846,6 +846,19 @@ user's device wall clock, no timer running, just a subtraction at read time.)
 
 ## 10. Sequencing
 
+**STATUS 2026-08-08 — steps 1–7 DONE, in production locally.** Wire format v1.json
+(1); layer built (2); Crafts (3), Inventory incl. two-hop container discovery
+(4), Orders + Experience + Tasks + presence (5) all render from the cache with
+zero dials; alerts read the same cache-backed fetchers, and craft alerts are
+complete-by-construction via the liveComplete() gate (6); cleanup done (7):
+bcTabCache deleted (§9.1), the request/response pool + circuit breaker + the
+ENTIRE BSATN decoder deleted (§9.4) — on-demand name/desc lookups use
+relayFetchOnce (scratch socket, one subscribe, hang up: the explorer's model).
+End state: exactly 13 held sockets, one subscription each for life, plus
+transient fetch-once sockets for first-sight name resolution. §9.2 (GameData)
+also done. Remaining: step 8 — Market/Shopping/Group Craft/Deals on the lazy
+whole-order-book subscription (§7.2).
+
 1. **Decide the wire format** (section 4) — measure first. Everything else is
    written against whichever we pick.
 2. **Build the socket + cache layer.** No tabs touched.
