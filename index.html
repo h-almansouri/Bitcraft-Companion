@@ -1180,6 +1180,26 @@ function _resolveTrackedByName(invs, names) {
   invs.forEach((inv, i) => { if (_invKeys(inv).some(k => nameSet.has(k))) result.add(i); });
   return result;
 }
+// ⚠️ SAVING MUST NOT DELETE WHAT IT CANNOT SEE. The selection is persisted by re-deriving keys from the
+// list currently in memory — so persisting while that list was short (the boot window, or any moment the
+// relay hadn't delivered the house containers yet) silently dropped every selection outside it, and the
+// next resolve had nothing to restore. Keys for containers absent from `invs` are carried through
+// untouched; only what's actually visible can be added or removed.
+function _mergeSavedKeys(current, invs, prevSaved) {
+  const visible = new Set((invs || []).flatMap(_invKeys));
+  const kept = (Array.isArray(prevSaved) ? prevSaved : []).filter(k => !visible.has(k));
+  return [...new Set([...current, ...kept])];
+}
+// Resolve a persisted selection against the list we have now, WITHOUT ever narrowing it: the saved keys
+// and any captured mid-invalidation are unioned, so a container missing from this particular rebuild
+// simply doesn't resolve to an index this time and reappears — still selected — on the next one.
+// Returns `cur` untouched when there is nothing to restore, preserving null = "uninitialised".
+function _reattachSel(cur, invs, pendingKeys, saved) {
+  if (saved === 'all') return new Set(invs.map((_, i) => i));
+  const keys = new Set([...(pendingKeys || []), ...(Array.isArray(saved) ? saved : [])]);
+  if (!keys.size) return cur;
+  return _resolveTrackedByName(invs, [...keys]);
+}
 function _savePlannerTrackedNames() {
   if (!invData) return;
   if (!plannerTrackedInvs) {
@@ -1189,7 +1209,7 @@ function _savePlannerTrackedNames() {
   }
   const names = [];
   (invData.inventories||[]).forEach((inv, i) => { if (plannerTrackedInvs.has(i)) names.push(_invNameKey(inv)); });
-  safeSetItem('bc_planner_tracked', JSON.stringify(names));
+  safeSetItem('bc_planner_tracked', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadPlannerTrackedNames())));
 }
 function _loadPlannerTrackedNames() {
   try { const v = localStorage.getItem('bc_planner_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
@@ -1219,6 +1239,11 @@ function _loadTasksTrackedNames() {
   try { const v = localStorage.getItem('bc_tasks_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
 }
 
+// Is the bitjita fallback actually answering? The live layer holds the boot render on bitjita for a
+// moment while the relay's discovery settles (see liveSettleHold) — that hold must NEVER outlive a dead
+// fallback, or a bitjita outage would leave the page blank while a perfectly good cache sat unused.
+// Every bitjita call funnels through apiFetch, so this is the one place that knows.
+let _bitjitaFailedAt = 0;
 async function apiFetch(path, timeoutMs = 30000) {
   // Time-boxed so a stalled request can't hang a caller forever (e.g. the Networth/Planner inventory
   // load Promise.all sitting on "Loading inventory…"). On timeout the fetch aborts and this throws.
@@ -1227,7 +1252,12 @@ async function apiFetch(path, timeoutMs = 30000) {
   try {
     const r = await fetch(API + path, { signal: ctrl.signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.json();
+    const j = await r.json();
+    _bitjitaFailedAt = 0;
+    return j;
+  } catch(e) {
+    _bitjitaFailedAt = Date.now();
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -2197,6 +2227,39 @@ async function loadSkillsInto(p, silent=false) {
     body.innerHTML = /not ready/i.test(e && e.message || '') ? loading() : errBox(e);
   }
 }
+// Skill ids 1 and 22 are excluded everywhere (not real skills). Shared by the tab render and by
+// seedSkillSession, so the seeded rows are shaped exactly like the rendered ones.
+function skillRowsFrom(experience, skillMap) {
+  return (experience || [])
+    .filter(e => e.skill_id !== 1 && e.skill_id !== 22)
+    .map(e => ({
+      skillId: e.skill_id,
+      xp: e.quantity,
+      level: xpToLevel(e.quantity),
+      pct: levelPct(e.quantity),
+      toNext: xpToNext(e.quantity),
+      intoLevel: xpIntoLevel(e.quantity),
+      name: skillMap[e.skill_id]?.name || 'Skill '+e.skill_id,
+      category: skillMap[e.skill_id]?.skillCategoryStr || 'Other'
+    }))
+    .sort((a,b) => b.xp - a.xp);
+}
+// ⚠️ THE "ACTIVE" CHIP NEEDS TWO XP OBSERVATIONS, and it was only ever getting them while you sat on the
+// Experience tab: onLiveExperience bails unless skillsByPlayer[id] exists, and ONLY skillsSectionHtml
+// filled that in. So every XP delta that arrived while you were on Crafts (or anywhere else) was thrown
+// away, and switching over created the baseline from scratch — the chip then couldn't appear until the
+// NEXT gain landed (~1.3s mid-grind, far longer otherwise). That pause is the "stutter"; the skill
+// rankings arriving ~557ms in were a coincidence, not the cause. Seeding costs one local cache read.
+async function seedSkillSession(id) {
+  id = String(id);
+  if (skillsByPlayer[id]) return;                       // already tracking — don't reset the baseline
+  const pData = await fetchSkillsRelay(id);
+  const player = pData.player || {};
+  const skills = skillRowsFrom(player.experience, player.skillMap || {});
+  if (!skills.length) return;
+  skillsByPlayer[id] = { skills, rankings: {} };
+  updateSkillSession(id, skills);
+}
 function skillsSectionHtml(pData, rankData, entityId) {
     const player = pData.player || {};
     entityId = String(entityId != null ? entityId : (player.entityId || ''));
@@ -2208,19 +2271,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
     const freshRankings = (rankData && rankData.rankings) || {};
     const rankings = Object.keys(freshRankings).length ? freshRankings : prevRankings;
 
-    const skills = experience
-      .filter(e => e.skill_id !== 1 && e.skill_id !== 22)
-      .map(e => ({
-        skillId: e.skill_id,
-        xp: e.quantity,
-        level: xpToLevel(e.quantity),
-        pct: levelPct(e.quantity),
-        toNext: xpToNext(e.quantity),
-        intoLevel: xpIntoLevel(e.quantity),
-        name: skillMap[e.skill_id]?.name || 'Skill '+e.skill_id,
-        category: skillMap[e.skill_id]?.skillCategoryStr || 'Other'
-      }))
-      .sort((a,b) => b.xp - a.xp);
+    const skills = skillRowsFrom(experience, skillMap);
 
     const totalXP = skills.reduce((s,sk)=>s+sk.xp,0);
     const maxLvl = skills.reduce((m,sk)=>Math.max(m,sk.level),0);
@@ -2359,14 +2410,11 @@ function updateLiveBtns() {
 }
 
 async function refreshPlannerInv() {
-  // Preserve tracked inventory names so selections survive a refresh (owner-aware keys)
-  const savedNames = [];
-  if (plannerTrackedInvs && invData) (invData.inventories || []).forEach((inv, i) => { if (plannerTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
-  invData = null;
+  // Selections are carried by invalidateMergedInv → rebuildInvData, which unions them with the persisted
+  // keys. This used to re-derive them by hand from whatever invData held at the time and then assign the
+  // result unconditionally, so refreshing while the list was short locked the short version in.
+  invalidateMergedInv();
   await loadPlannerInventory();
-  // null (uninitialised) rather than an empty Set — see refreshToolInv: it lets the selector re-read the
-  // saved choice instead of locking in a blank selection.
-  plannerTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories || [], savedNames) : null;
   computePlannerInvMap();
   renderPlannerInventory();
   renderPlanPanel();
@@ -2650,15 +2698,17 @@ function rebuildInvData(){
     (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
   });
   invData = merged;
-  // Re-attach selections captured before an invalidation (keys are entity ids, so they survive both
-  // reordering and renames). Only the dropdown selections live here — the Inventory tab's expand state
-  // is keyed by player+section name in invSectionCollapsed and is deliberately untouched.
-  if (_pendingInvSel){
-    const sel = _pendingInvSel; _pendingInvSel = null;
-    if (sel.planner) plannerTrackedInvs = _resolveTrackedByName(merged.inventories, sel.planner);
-    if (sel.tools)   toolTrackedInvs   = _resolveTrackedByName(merged.inventories, sel.tools);
-    if (sel.jsn)     jsnTrackedInvs    = _resolveTrackedByName(merged.inventories, sel.jsn);
-  }
+  // Re-attach the dropdown selections on EVERY rebuild, against the persisted keys unioned with anything
+  // captured mid-invalidation. It used to run only when _pendingInvSel was set, which left the selectors'
+  // own one-shot `=== null` init as the only other resolve — so whichever list happened to exist at that
+  // one moment decided the selection for good, and a house container picked under the relay was quietly
+  // dropped if that moment fell in the boot window. Now a short list just fails to resolve this pass and
+  // the selection reappears on the next. (Keys are entity ids, so they survive reordering and renames.
+  // The Inventory tab's expand state is keyed by player+section in invSectionCollapsed — untouched.)
+  const sel = _pendingInvSel; _pendingInvSel = null;
+  plannerTrackedInvs = _reattachSel(plannerTrackedInvs, merged.inventories, sel && sel.planner, _loadPlannerTrackedNames());
+  toolTrackedInvs    = _reattachSel(toolTrackedInvs,    merged.inventories, sel && sel.tools,   _loadToolTrackedNames());
+  jsnTrackedInvs     = _reattachSel(jsnTrackedInvs,     merged.inventories, sel && sel.jsn,     _loadJsnTrackedNames());
 }
 
 // ── ORDERS (market listings + collections) ──
@@ -3057,7 +3107,7 @@ let jsnInvOpen = false;          // inventory-selector panel expanded?
 let jsnTrackedInvs = null;       // Set of invData.inventories indices included (null = not yet initialised)
 let jsnRunId = 0;                // bumped each valuation; a run bails once superseded (prevents races)
 function _loadJsnTrackedNames(){ try { const v = localStorage.getItem('bc_jsn_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
-function _saveJsnTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (jsnTrackedInvs && jsnTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_jsn_tracked', JSON.stringify(names)); }
+function _saveJsnTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (jsnTrackedInvs && jsnTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_jsn_tracked', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadJsnTrackedNames()))); }
 
 // Aggregate the SELECTED merged inventories into per-item totals (itemType:itemId -> {qty, meta}).
 function jsnAggregate(){
@@ -3754,11 +3804,39 @@ function liveReady(){
 // relay is fully ready, or none at all. We never render a half-complete cache and walk it back.
 // Dropping BACK to bitjita waits out LIVE_DROP_GRACE_MS so a blip doesn't repaint everything.
 const LIVE_DROP_GRACE_MS = 10000;
-let _cacheModeSince = 0, _incompleteSince = 0;
+// ⚠️ "All 13 base snapshots landed" is NOT "the cache is whole". The DISCOVERED refs — house chests,
+// deployable contents, the house-scope lookups — are only subscribed on the round AFTER the base rows
+// reveal their ids, so flipping to cache at liveComplete() alone repainted from a cache that was still
+// missing them: measured on a refresh, the Inventory tab went 52 containers/37 housing (bitjita) → 14/0
+// (cache, mid-discovery) → back to 52/37 about four seconds later, with Equipment popping in at the
+// wrong moment because it rides the BASE subscription. So the first flip also waits for the ref set to
+// stop changing. Bounded three ways, because a render hold must never become a render block:
+//   · LIVE_SETTLE_MAX_MS  — hard ceiling, whatever discovery is doing
+//   · bitjita unreachable — a dead fallback is worse than an incomplete cache
+//   · already on cache    — a later redial can't send us back through this gate
+// 8s, not 5: a genuine cold boot (no persisted refs) needs THREE dial rounds — base, then the containers
+// and buildings those rows reveal, then the claim names those buildings reveal — and measured 3.9s to
+// settle. A ceiling near the real cost would fire mid-discovery and reintroduce exactly the partial paint
+// this gate exists to prevent. Warm boots settle in one round (~1.4s) and never come near it.
+const LIVE_SETTLE_MAX_MS = 8000, BITJITA_FAIL_FRESH_MS = 30000;
+let _cacheModeSince = 0, _incompleteSince = 0, _liveRefsSettled = false;
+function liveSettleHold(){
+  if (_cacheModeSince) return false;          // past the first flip — grace governs from here
+  if (_liveRefsSettled) return false;
+  if (bitjitaDisabled()) return false;
+  if (_bitjitaFailedAt && (Date.now() - _bitjitaFailedAt) < BITJITA_FAIL_FRESH_MS) return false;
+  if (_liveLayerStartedAt && (Date.now() - _liveLayerStartedAt) > LIVE_SETTLE_MAX_MS) return false;
+  return true;
+}
 function dataSource(){
   const whole = liveComplete();
   const now = Date.now();
-  if (whole){ _incompleteSince = 0; if (!_cacheModeSince) _cacheModeSince = now; return 'cache'; }
+  if (whole){
+    _incompleteSince = 0;
+    if (liveSettleHold()) return 'bitjita';   // complete but still discovering — hold the paint, don't blend
+    if (!_cacheModeSince) _cacheModeSince = now;
+    return 'cache';
+  }
   if (!_incompleteSince) _incompleteSince = now;
   // already trusting the cache? give the relay a grace period before tearing everything back to bitjita
   if (_cacheModeSince && (now - _incompleteSince) < LIVE_DROP_GRACE_MS) return 'cache';
@@ -3797,28 +3875,38 @@ function liveApplySnapshot(c, frame, additive){
     });
   }
   liveNotify(evs);
-  // The moment the LAST region's snapshot lands, ring the doorbells once: tabs that rendered (or
-  // spinner-stalled) before the cache was complete revalidate NOW instead of waiting for the next poll.
-  if (!_liveCompleteKicked && liveComplete()){
-    _liveCompleteKicked = true;
-    // Everything rendered before this moment came from the bitjita fallback, which is less complete than
-    // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
-    // the doorbell only fires when the GAME changes, and the cache filling isn't a game change. So drop
-    // every per-player result and re-render. Clearing the caches also defeats the paused-player
-    // short-circuit in the silent path, so paused players get corrected too.
-    craftFetchedAt = 0; ordersFetchedAt = 0;
-    taskPlayersById = {}; invalidateMergedInv();
-    // Selections are carried across by invalidateMergedInv as ENTITY-ID keys, which match whichever
-    // shape the list is rebuilt in — so unlike before, the swap doesn't need to throw them away and
-    // re-read localStorage. Tasks re-resolves because its keys are per-player indices, not ids.
-    tasksInvsInited = false;
-    refreshCacheBackedTab(true);
-    // Warm the inventory path for every tracked player even when you're looking at another tab. The
-    // FIRST fetchPlayerInvRelay per player pays place-name resolution plus the two house-scope
-    // round-trips; paying that lazily is exactly why opening Inventory (or Tools/Planner) later felt
-    // slow while booting straight onto it felt fast — the work was just hidden behind the boot spinner.
-    trackedPlayers.forEach(p => { fetchPlayerInv(p.entityId).catch(() => {}); });
-  }
+  liveHandoffKick();
+}
+// Ring the doorbells once, at the moment the cache actually BECOMES the source.
+// ⚠️ Keyed on usingCache(), NOT on liveComplete(). Those used to be the same instant; now that the first
+// flip waits for discovery to settle (liveSettleHold), firing on completeness would re-render while
+// bitjita was still the source — and then nothing would re-render when the flip finally happened, so the
+// tabs would sit on bitjita data (no equipment) until the next unrelated delta. Called from every
+// snapshot, from the moment discovery settles, and from a bounded poll for the case where the settle
+// DEADLINE releases the hold while the world happens to be quiet.
+function liveHandoffKick(){
+  if (_liveCompleteKicked || !usingCache()) return;
+  _liveCompleteKicked = true;
+  // Everything rendered before this moment came from the bitjita fallback, which is less complete than
+  // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
+  // the doorbell only fires when the GAME changes, and the cache filling isn't a game change. So drop
+  // every per-player result and re-render. Clearing the caches also defeats the paused-player
+  // short-circuit in the silent path, so paused players get corrected too.
+  craftFetchedAt = 0; ordersFetchedAt = 0;
+  taskPlayersById = {}; invalidateMergedInv();
+  // Selections are carried across by invalidateMergedInv as ENTITY-ID keys, which match whichever
+  // shape the list is rebuilt in — so unlike before, the swap doesn't need to throw them away and
+  // re-read localStorage. Tasks re-resolves because its keys are per-player indices, not ids.
+  tasksInvsInited = false;
+  refreshCacheBackedTab(true);
+  // Warm the inventory path for every tracked player even when you're looking at another tab. The
+  // FIRST fetchPlayerInvRelay per player pays place-name resolution plus the two house-scope
+  // round-trips; paying that lazily is exactly why opening Inventory (or Tools/Planner) later felt
+  // slow while booting straight onto it felt fast — the work was just hidden behind the boot spinner.
+  trackedPlayers.forEach(p => { fetchPlayerInv(p.entityId).catch(() => {}); });
+  // Start tracking XP for everyone NOW, whatever tab you're on, so the Experience tab's "Active" chip
+  // is already correct on its first paint instead of waiting for a gain after you arrive.
+  trackedPlayers.forEach(p => { seedSkillSession(p.entityId).catch(() => {}); });
 }
 let _liveCompleteKicked = false;
 function liveApplyDelta(c, frame){
@@ -3902,6 +3990,21 @@ function liveWantedRefs(){
   return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 150), claims: cap(claims, 400) };
 }
 const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|');
+// ⚠️ REF SETS MAY ONLY GROW WITHIN A ROSTER. Merging (rather than replacing) is what stops the boot
+// flash: a partly-snapshotted cache can only ever DERIVE a subset, and adopting that subset demoted a
+// complete 378-query set to 322 mid-boot, after which the cache answered from the smaller set and every
+// house container and deployable vanished from the Inventory tab until a later redial grew it back.
+// Cost of monotonicity: an id that dies (chest destroyed) lingers for the session and returns no rows.
+// That's bounded by the same caps liveWantedRefs applies, and a roster change starts over with a fresh
+// persisted entry — cheap insurance against a visible hole.
+const LIVE_REF_CAPS = { containers: 600, buildings: 900, networks: 20, locs: 150, claims: 400 };
+function liveMergeRefs(a, b){
+  const out = {};
+  Object.keys(LIVE_REF_CAPS).forEach(k => {
+    out[k] = [...new Set([...((a && a[k]) || []), ...((b && b[k]) || [])])].sort().slice(0, LIVE_REF_CAPS[k]);
+  });
+  return out;
+}
 function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
 function liveSaveRefs(pKey, refs){ try { localStorage.setItem(LIVE_CONTAINERS_KEY, JSON.stringify({ [pKey]: refs })); } catch(e){} }
 // Discovery settles fast now that all 13 sockets are dialled at once — measured, every region's snapshot
@@ -3913,8 +4016,12 @@ onLiveChange(evs => {
   if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
   clearTimeout(_liveContTimer);
   _liveContTimer = setTimeout(() => {
-    const want = liveWantedRefs();
-    if (liveRefsKey(want) === liveRefsKey(liveRefs)) return;
+    // ⚠️ Only ever derive refs from a WHOLE world. Recomputing while regions were still snapshotting
+    // yielded a subset, which liveStart then adopted — the 378→322 demotion that caused the boot flash.
+    // Until every mirror has answered we simply don't know what exists, so we don't guess.
+    if (!liveComplete()) return;
+    const want = liveMergeRefs(liveRefs, liveWantedRefs());
+    if (liveRefsKey(want) === liveRefsKey(liveRefs)){ _liveRefsSettled = true; liveHandoffKick(); return; }   // releases the boot hold
     liveRefs = want;
     liveSaveRefs(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
     // ⚠️ REDIAL, not an additive subscribe. Extending the open sockets with a second Subscribe looked
@@ -3992,14 +4099,18 @@ function liveStart(){
   // discovery redial at all.
   const fromCache = liveWantedRefs();
   const saved = liveLoadRefs(pKey);
-  // Prefer whichever set is richer: the cache is authoritative once populated, but on a cold boot it's
-  // empty and last session's persisted ids let the FIRST dial already cover everything.
-  liveRefs = (fromCache.containers.length || fromCache.buildings.length)
-    ? (saved ? { containers: fromCache.containers, buildings: fromCache.buildings, networks: fromCache.networks, locs: fromCache.locs,
-                 claims: (fromCache.claims && fromCache.claims.length) ? fromCache.claims : (saved.claims || []) } : fromCache)
-    : (saved || fromCache);
+  // UNION, never replace — see liveMergeRefs. This used to prefer `fromCache` whenever it held anything
+  // at all, which threw away a complete persisted set in favour of whatever a half-snapshotted cache
+  // could derive.
+  liveRefs = liveMergeRefs(saved, fromCache);
+  // Persist whenever it differs from what's stored, not only when discovery notices a change: the old
+  // save-on-change-only path meant a cleared (or never-written) blob stayed empty forever, so every
+  // refresh paid a cold discovery round it should have skipped.
+  if (!saved || liveRefsKey(saved) !== liveRefsKey(liveRefs)) liveSaveRefs(pKey, liveRefs);
   const key = pKey + '#' + liveRefsKey(liveRefs);
-  if (key !== liveRosterKey) _liveCompleteKicked = false;   // roster redial → kick the doorbells again once re-complete
+  // roster/ref redial → kick the doorbells again once re-complete, and re-arm the settle gate so the
+  // NEXT first-flip (a roster change re-enters the boot path) waits for discovery all over again
+  if (key !== liveRosterKey){ _liveCompleteKicked = false; _liveRefsSettled = false; }
   if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
   liveRosterKey = key; liveRosterIds = ids;
   // ⚠️ NO STAGGER. §8.1's cliff is at 26 sockets, not 13 — 13 at once was always fine, and spacing them
@@ -4008,9 +4119,23 @@ function liveStart(){
   // 311-471ms spread; staggered pushed it to 953-1884ms with a 619-1550ms spread. The FIRST reply was
   // ~335ms either way, so the stagger bought nothing and cost up to a second.
   BC_REGIONS.forEach(rg => liveDial(rg));
+  // The settle hold can also be released by its DEADLINE (or by bitjita failing), and in a quiet world no
+  // snapshot or delta would follow to notice. Bounded poll — stops the instant the handoff fires, and
+  // gives up regardless after LIVE_KICK_POLL_MAX_MS so a permanently-down relay can't leave it spinning.
+  clearInterval(_liveKickPoll);
+  const pollFrom = Date.now();
+  _liveKickPoll = setInterval(() => {
+    if (_liveCompleteKicked || !trackedPlayers.length || (Date.now() - pollFrom) > LIVE_KICK_POLL_MAX_MS){
+      clearInterval(_liveKickPoll); _liveKickPoll = null; return;
+    }
+    liveHandoffKick();
+  }, 250);
 }
+const LIVE_KICK_POLL_MAX_MS = 60000;
+let _liveKickPoll = null;
 function liveStopAll(){
   Object.keys(liveConns).forEach(rg => liveDrop(rg));
+  clearInterval(_liveKickPoll); _liveKickPoll = null;
   liveRosterKey = '';
 }
 function liveDrop(rg){
@@ -9629,19 +9754,15 @@ function toolSSRestoreCol(k){ toolSSHidden.delete(k); _saveToolSSHidden(); rende
 function toolSSRestoreAll(){ toolSSHidden.clear(); _saveToolSSHidden(); renderToolCrafting(); }
 
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
-function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(names)); }
+function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadToolTrackedNames()))); }
 function toggleToolInvLoc(idx){ if (!toolTrackedInvs) toolTrackedInvs = new Set(); if (toolTrackedInvs.has(idx)) toolTrackedInvs.delete(idx); else toolTrackedInvs.add(idx); _saveToolTrackedNames(); renderToolCrafting(); }
 function toggleAllToolInvs(all){ if (!invData) return; toolTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveToolTrackedNames(); renderToolCrafting(); }
 function toggleToolInvPanel(){ toolInvOpen = !toolInvOpen; const b = document.querySelector('#tool-inv-wrap .planner-inv-body'); const c = document.getElementById('tool-inv-chevron'); if (b) b.style.display = toolInvOpen ? '' : 'none'; if (c) c.className = 'ti ti-chevron-'+(toolInvOpen?'down':'right'); }
 async function refreshToolInv(){
-  const savedNames = [];
-  if (toolTrackedInvs && invData) (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs.has(i)) savedNames.push(_invNameKey(inv)); });
-  invData = null;
+  // See refreshPlannerInv — rebuildInvData re-attaches, unioned with the persisted keys, so neither a
+  // short list nor an empty one can narrow the selection here.
+  invalidateMergedInv();
   await loadPlannerInventory();
-  // null, NOT an empty Set, when there was nothing live to preserve: null means "uninitialised", which
-  // makes the selector re-read the saved choice from localStorage. Forcing an empty Set here is what
-  // swallowed the completion kick's reset and left the dropdown blank after booting on this tab.
-  toolTrackedInvs = (invData && savedNames.length) ? _resolveTrackedByName(invData.inventories||[], savedNames) : null;
   renderToolCrafting();
 }
 function toolInvSelectorHtml(){
