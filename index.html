@@ -3895,7 +3895,11 @@ function liveWantedRefs(){
   ['sell_order_state','buy_order_state','closed_listing_state'].forEach(t =>
     liveRows(t, r => tracked.has(String(r.owner_entity_id))).forEach(r => addClaim(r.claim_entity_id)));
   const cap = (s, n) => [...s].sort().slice(0, n);
-  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 600), claims: cap(claims, 400) };
+  // `locs` is capped far tighter than the rest because each id costs its OWN query (see perId in
+  // liveQuerySet — an OR-chain over location_state is a 14.6s full scan, so chunking is not an option).
+  // These are house-INTERIOR buildings only (claim 0, built by a tracked player); a real house runs to
+  // tens, so 150 is generous while bounding one region at 150 subscriptions instead of 600.
+  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 150), claims: cap(claims, 400) };
 }
 const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|');
 function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
@@ -3942,6 +3946,16 @@ function liveQuerySet(ids, region){
   // the ids that actually live in ITS mirror — 13 regions don't all get all 900 lookups.
   const here = list => list.filter(x => regionOfEntity(x) === region);
   const chunked = (list, col, table) => { for (let i = 0; i < list.length; i += 40) sqls.push(`SELECT * FROM ${table} WHERE ${list.slice(i, i + 40).map(v => `${col} = ${v}`).join(' OR ')}`); };
+  // ⚠️ An OR-chain DEFEATS the btree index and forces a FULL TABLE SCAN — and so does `IN (…)`. Measured
+  // on r8, 2026-08-09: 15 ids as ONE OR-chain over location_state took 14.6s to return 1.7KB (the `IN`
+  // form was worse, >30s), while the SAME 15 ids as one `entity_id = X` query EACH came back in 335ms —
+  // the network floor. 45x, for more rows. On every other table a scan is bounded and invisible
+  // (building_state 515ms, inventory_state 334ms) because the table is small, which is why chunked() is
+  // still fine for them and keeps the query count down. location_state is the exception: it holds every
+  // entity in the world, so its scan alone was 14.6s of a 14.9s cold start — past LIVE_SNAPSHOT_TIMEOUT_MS,
+  // so we hung up and redialled, forever, and each abandoned attempt flattened the mirror's ingest
+  // (transactions_per_sec 1155 → 11, recovering with a backlog burst the moment we disconnected).
+  const perId = (list, col, table) => list.forEach(v => sqls.push(`SELECT * FROM ${table} WHERE ${col} = ${v}`));
   chunked(here(liveRefs.containers), 'owner_entity_id', 'inventory_state');   // contents of house chests + vehicles
   const blds = here(liveRefs.buildings);
   chunked(blds, 'entity_id', 'building_state');            // bank/station/house buildings → descId + claim
@@ -3952,7 +3966,7 @@ function liveQuerySet(ids, region){
   // as well once the building rows have told us the claim ids.
   chunked(here(liveRefs.claims || []), 'entity_id', 'claim_state');
   chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
-  chunked(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
+  perId(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
   return {
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
@@ -4060,7 +4074,12 @@ function liveOpen(c){
     }
   }, 15000);
   ws.onopen = () => {
-    c.status = 'open'; c.backoff = 1500; clearTimeout(c.timer);
+    c.status = 'open'; clearTimeout(c.timer);
+    // ⚠️ Backoff is NOT reset here. It resets on a SNAPSHOT (below), because the failure that actually
+    // hurt was a socket that opened every time and then never finished its subscribe: resetting on
+    // connect pinned the retry at ~3s, so we re-asked the mirror for the same expensive snapshot every
+    // ~15s forever and its ingest never recovered. Resetting on success instead lets a mirror that keeps
+    // stalling decay to the 60s ceiling on its own.
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
     // this the region sits at 'open' forever and liveReady() never trips. Give up, mark it tried, and
@@ -4069,7 +4088,7 @@ function liveOpen(c){
     c.snapTimer = setTimeout(() => {
       if (c.snapshotTs || c.closed) return;
       c.status = 'stalled'; c.tried = true;
-      console.warn(`[live] r${c.region} accepted the socket but never answered its subscribe — retrying`);
+      console.warn(`[live] r${c.region} accepted the socket but never answered its subscribe in ${LIVE_SNAPSHOT_TIMEOUT_MS}ms — backing off ${Math.round(c.backoff * 2 / 1000)}s`);
       try { ws.close(); } catch(e){}
     }, LIVE_SNAPSHOT_TIMEOUT_MS);
   };
@@ -4085,7 +4104,7 @@ function liveOpen(c){
       // subscribe's rows and make every player's data vanish).
       const additive = c.snapOnThisSocket;
       c.snapOnThisSocket = true;
-      c.status = 'live'; c.snapshotTs = Date.now(); c.tried = true;
+      c.status = 'live'; c.snapshotTs = Date.now(); c.tried = true; c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
       liveApplySnapshot(c, m.InitialSubscription, additive);
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
       // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
@@ -4121,7 +4140,12 @@ function liveReschedule(c){
 // atomically replaces the region's slice. So a quiet socket is either dead (redial fixes it) or truly
 // idle (redial was free) — no diagnosis required. This never fires while data is flowing, so it isn't
 // the "redial on a timer" the design rules out; that rule is about redialling ACTIVE sockets.
-const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000, LIVE_SNAPSHOT_TIMEOUT_MS = 12000;
+// The snapshot budget is deliberately far above what a healthy cold start costs (measured 726ms for the
+// busiest region's 41 queries). It is a last-resort "this mirror is not answering at all" tripwire, NOT a
+// latency target: set near the real cost it fires on a merely-slow mirror, and the redial it triggers
+// re-asks for the same expensive snapshot — which is precisely how 12000 turned one slow query into a
+// permanent retry loop that flattened the mirror.
+const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000, LIVE_SNAPSHOT_TIMEOUT_MS = 45000;
 function liveWatchdog(){
   if (!liveOn() || document.hidden) return;
   const now = Date.now();

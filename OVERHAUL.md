@@ -766,6 +766,47 @@ No held subscription without a bounded `WHERE`. `owner_entity_id = <our players>
 is fine; `SELECT * FROM progressive_action_state` region-wide is not. This is
 what rules out Open Crafts (7.3).
 
+### 8.5 ⚠️ A bounded `WHERE` is not enough — an `OR`-chain full-scans the table
+**Root-caused 2026-08-09, after twice wrongly concluding "it's not us".**
+
+`WHERE a = 1 OR a = 2 OR …` — and `IN (…)` — **defeat the btree index** and force a
+full table scan, even when the column is the indexed primary key. Measured on r8
+against `location_state` (indexed on `entity_id`):
+
+| form | queries | time |
+|---|---|---|
+| `entity_id = A OR entity_id = B …` (15 ids) | 1 | **14,623 ms** |
+| `entity_id IN (…15 ids…)` | 1 | **>30,000 ms** |
+| one `entity_id = X` per id | 15 | **335 ms** |
+
+45×, and the per-id form returned *more* rows. It hides on small tables because a
+scan there is bounded and sits under the ~330ms network floor (`building_state`
+33-term OR = 515ms, `inventory_state` = 334ms) — so **chunked ORs stay fine for
+them** and keep the query count down. `location_state` holds every entity in the
+world: its scan alone was 14.6s of a 14.9s cold start.
+
+**The damage was the retry loop, not the query.** 14.6s exceeded
+`LIVE_SNAPSHOT_TIMEOUT_MS` (12s), so we hung up and redialled — and since backoff
+was reset in `ws.onopen` (the socket always opened; the *subscribe* never
+finished), the retry pinned at ~15s forever. Every attempt made the mirror
+recompute the scan: `transactions_per_sec` **1155 → 11**,
+`transactions_processed` freezing ~12s then flushing in bursts, recovering with a
+**backlog overshoot (~3594)** the moment we disconnected. The damage followed the
+tracked *player's* region — that's the only region with discovered house ids, so
+the only one with a multi-id `location_state` chain.
+
+Three changes: `perId()` for `location_state`; backoff resets on **snapshot**,
+not on connect; `LIVE_SNAPSHOT_TIMEOUT_MS` 12s → 45s (a "mirror is dead"
+tripwire, never a latency target — set near the real cost and it manufactures
+exactly this loop). Verified: r8 41 queries / **726 ms**, all 13 mirrors flat at
+baseline with the app connected.
+
+**Diagnostic lesson:** every subset passed in isolation, *including the full
+27-query set on one socket* — a single un-abandoned snapshot is harmless. Only
+the loop kills. Test the failure mode, not the payload. And watch
+`transactions_processed` (a counter): `transactions_per_sec` averages the
+stall-then-flush away.
+
 ---
 
 ## 9. Cleanup folded into this work
