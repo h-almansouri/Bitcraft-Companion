@@ -8181,6 +8181,9 @@ function bcForceReconnect(){
 // poll intervals. Registered once at load.
 document.addEventListener('visibilitychange', () => {
   bcRelaySync();   // hidden -> drop the enemy relay; visible on the map -> reconnect
+  // Alerts run on every tab, so heal their fallback stream BEFORE the map-only guard below — a socket
+  // dropped while backgrounded would otherwise stay dead until the next 15s tick.
+  if (!document.hidden) bcSyncAlertFeed();
   if (document.hidden || currentTab !== 'map') return;
   if (Object.keys(bcTracked).length){
     const stale = !bcPlayerSocket || bcPlayerSocket.readyState !== 1 || (bcLastWsMsg && Date.now() - bcLastWsMsg > 90000);
@@ -8192,21 +8195,91 @@ document.addEventListener('visibilitychange', () => {
   if (bcEventsLayer) bcRefreshEvents().catch(()=>{}); // keep Hexite Vault timers/positions current
   if (bcGeysersLayer) bcRefreshUncharted().catch(()=>{}); // keep Uncharted POIs current
 });
+// ═══ THIS SOCKET IS ALSO THE ALERT FALLBACK ═══
+// live.bitjita.com's channels are `<table>:<entity_id>` and are NOT limited to mobile_entity_state —
+// stamina_state, character_stats_state, experience_state and active_buff_state all stream from it, the
+// same tables the relay feed carries. Verified live: `stamina_state` pushes real current stamina ~1/sec
+// (235.71 → 234.68 → 233.65 → 232.62 → 231.59 as the player worked).
+//
+// This replaces a stamina fallback that could never fire. It polled `/api/players/<id>/stats` and read
+// values[1] as CURRENT stamina — but that field is MAX. The relay path reads the very same index as max
+// (liveStaminaMax) and takes current from stamina_state, which bitjita's REST has no equivalent for. A
+// max barely moves, so `cur < dropLine` was never true, the alert never armed, and the alerts panel
+// carried a tooltip rationalising the silence rather than anything being fixed.
+//
+// ⚠️ Both sources agree on the SEMANTICS of values[1]; they can disagree on the VALUE, because either
+// side can lag. Observed: bitjita said 467 while the relay still said 331.5 — the relay was the stale
+// one there (that region's mirror was the sick one at the time), and it caught up to 467 later. So don't
+// "trust the relay's number over bitjita's": take the freshest, whichever it came from.
+const BC_ALERT_CHANNELS = ['stamina_state','character_stats_state','experience_state','active_buff_state'];
+let bcAlertKey = '';
+// Who needs the fallback stream right now. Empty while the relay IS the source: the relay feed already
+// drives these handlers, and a second stream into them would double-fire every alert.
+function bcAlertIds(){
+  if (usingCache() || !alertsEnabled()) return [];
+  return trackedPlayers.filter(p => !isPlayerPaused(p.entityId) && palAnyOn(p.entityId)).map(p => String(p.entityId));
+}
+// Open / extend / close the socket to match that set. Cheap and idempotent — called from the alert tick,
+// from restartAlerts, and on visibilitychange, so a relay going down is picked up within one tick.
+function bcSyncAlertFeed(){
+  const want = bcAlertIds(), key = want.join(',');
+  const changed = key !== bcAlertKey;
+  bcAlertKey = key;
+  if (!want.length){
+    // Only tear down if the MAP isn't using it either — the two share one connection.
+    if (!Object.keys(bcTracked).length && bcPlayerSocket){
+      bcWsManualClose = true; clearInterval(bcWsPing);
+      try { bcPlayerSocket.close(); } catch(e){}
+      bcPlayerSocket = null;
+    }
+    return;
+  }
+  const wasOpen = bcPlayerSocket && bcPlayerSocket.readyState === 1;
+  bcEnsureSocket();                            // no-op when already open or connecting
+  if (changed && wasOpen) bcWsSubscribe();     // a fresh socket subscribes from onopen instead
+}
 function bcWsSubscribe(){
   if (!bcPlayerSocket || bcPlayerSocket.readyState !== 1) return;
-  const ids = Object.keys(bcTracked);
-  if (!ids.length) return;
-  try { bcPlayerSocket.send(JSON.stringify({ type:'subscribe', channels: ids.map(id => 'mobile_entity_state:'+id) })); } catch(e){}
+  const chans = Object.keys(bcTracked).map(id => 'mobile_entity_state:'+id);
+  bcAlertIds().forEach(id => BC_ALERT_CHANNELS.forEach(t => chans.push(t+':'+id)));
+  if (!chans.length) return;
+  try { bcPlayerSocket.send(JSON.stringify({ type:'subscribe', channels: [...new Set(chans)] })); } catch(e){}
 }
 function bcWsHandle(raw){
   let msg; try { msg = JSON.parse(raw); } catch(e){ return; }
   if (msg.type !== 'event' || !msg.data) return;
   const d = msg.data, id = String(d.entity_id || '');
+  const table = String(msg.channel || '').split(':')[0];
+  if (table && table !== 'mobile_entity_state') return bcAlertEvent(table, id, d);
   const t = bcTracked[id];
   if (!t || typeof d.location_x !== 'number' || typeof d.location_z !== 'number') return;
   // ws coords are ×1000 of the map-space coords used by /api/players
   bcPlacePlayer(id, d.location_x/1000, d.location_z/1000,
     (typeof d.destination_x === 'number' && typeof d.destination_z === 'number') ? { x:d.destination_x/1000, z:d.destination_z/1000 } : null);
+}
+// Feed the fallback rows into the SAME handlers the relay drives, so there is one alert implementation
+// and not two that can drift. There is no unsubscribe on this protocol, so a channel for a player who
+// later stops needing it keeps arriving — hence the guards here rather than relying on the subscription.
+function bcAlertEvent(table, id, d){
+  if (usingCache() || !isPlayerTracked(id)) return;   // relay reclaimed the source, or roster shrank
+  if (table === 'character_stats_state'){
+    const v = d.values || d.stats;
+    if (Array.isArray(v) && v.length > 1) liveStaminaMax[id] = { max: v[STAT_IDX.stamina], ts: Date.now() };
+    return;
+  }
+  if (table === 'stamina_state'){
+    const cur = liveNum(d.stamina);
+    if (cur == null) return;
+    // Max normally arrives on the character_stats_state channel above (or from the relay, whichever is
+    // fresher). This only raises a FLOOR: if we somehow see a current higher than the max we hold, that
+    // max is stale — a max below the observed current would make "refilled to full" fire early forever.
+    if (!liveStaminaMax[id] || cur > liveStaminaMax[id].max) liveStaminaMax[id] = { max: cur, ts: Date.now() };
+    return onLiveStamina(id, { stamina: cur });
+  }
+  if (table === 'experience_state'){
+    return onLiveExperience(id, (d.experience_stacks || []).map(s => ({ skill_id: +s.skill_id, quantity: +s.quantity })));
+  }
+  if (table === 'active_buff_state') return onLiveBuffs(id);
 }
 function bcSaveTrackedPlayers(){ safeSetItem('bc_map_tracked_players_v1', JSON.stringify(Object.entries(bcTracked).map(([id,t]) => ({ id, name:t.name, color:t.color, follow:t.follow })))); }
 function bcLoadTrackedPlayers(){ try { const v = localStorage.getItem('bc_map_tracked_players_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
@@ -8238,7 +8311,8 @@ function bcUntrackPlayer(id){
   bcRenderTrackedList();
   if (!Object.keys(bcTracked).length){
     bcStopPlayerPoll();
-    if (bcPlayerSocket){ bcWsManualClose = true; clearInterval(bcWsPing); try { bcPlayerSocket.close(); } catch(e){} bcPlayerSocket = null; }
+    // Don't hang up if the ALERT fallback is still using this socket — the map and the alerts share one.
+    if (bcPlayerSocket && !bcAlertIds().length){ bcWsManualClose = true; clearInterval(bcWsPing); try { bcPlayerSocket.close(); } catch(e){} bcPlayerSocket = null; }
   }
 }
 function bcToggleFollow(id){
@@ -10380,7 +10454,9 @@ function setPlayerStaminaDrop(id, v){ let n = parseInt(v,10); if (isNaN(n)) n = 
 function setPlayerIdleSecs(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 10) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).idleSecs = n; saveAlerts(); restartAlerts(); }
 function setPlayerCraftMute(id, v){ let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; const ps = palPlayers(); (ps[String(id)] = ps[String(id)] || {}).craftMuteSecs = n; saveAlerts(); }
 function alertsEnabled(){ loadAlerts(); if (!alertsActive() || !trackedPlayers.length) return false; return activePlayers().some(p => !isPlayerAlertsMuted(p.entityId) && palAnyOn(p.entityId)); }
-function startAlerts(){ stopAlerts(); if (!alertsEnabled()) return; alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
+// The disabled path still syncs, so turning alerts OFF drops the bitjita fallback stream instead of
+// leaving it subscribed with nothing listening. When enabled, the immediate alertsTick() does it.
+function startAlerts(){ stopAlerts(); if (!alertsEnabled()){ bcSyncAlertFeed(); return; } alertTimer = setInterval(alertsTick, ALERT_POLL_MS); alertsTick(); }
 function stopAlerts(){ if (alertTimer){ clearInterval(alertTimer); alertTimer = null; } if (_craftWakeTimer){ clearTimeout(_craftWakeTimer); _craftWakeTimer = null; } if (_buffWakeTimer){ clearTimeout(_buffWakeTimer); _buffWakeTimer = null; } }
 function restartAlerts(){ alertState = {}; startAlerts(); } // reset baselines (roster/settings changed)
 // Buff-loss check for one player. Shared by the 15s poll AND the live buffs_state trigger (onLiveBuffs),
@@ -10490,6 +10566,7 @@ async function _alertsTickInner(){
   // tore the poller down, but unmuting/resuming never rebuilt it — only a settings change or a page
   // reload did. Alerts simply stopped and stayed stopped. A 15s no-op check costs nothing and lets it
   // resume by itself the moment alerts are live again.
+  bcSyncAlertFeed();   // relay up ⇄ down → open, extend or drop the bitjita fallback stream to match
   if (!alertsEnabled()) return;
   const players = activePlayers().filter(p => !isPlayerAlertsMuted(p.entityId));  // muted players still live-track, just no pings
   if (!players.length) return;
@@ -10499,22 +10576,12 @@ async function _alertsTickInner(){
     const st = alertState[id] || (alertState[id] = {});
     try {
       if (palOn(id,'buffLost')) await checkPlayerBuffs(p);   // also fired instantly by the live buffs_state feed (onLiveBuffs) — this poll is the backstop
-      // Follows the SOURCE switch, not 'is any socket open'. Twelve live mirrors and one stalled used
-      // to count as connected, so the bitjita poll was skipped while the stamina deltas for that
-      // player's region never arrived — the alert just silently stopped.
-      if (palOn(id,'stamina') && !usingCache()){
-        const d = await apiFetch(`/api/players/${id}/stats`);
-        const v = d.stats && d.stats.values;
-        const cur = v ? v[STAT_IDX.stamina] : undefined;
-        if (typeof cur === 'number'){
-          if (st.stamMax == null) st.stamMax = cur;      // baseline (don't fire on first sight)
-          if (cur > st.stamMax) st.stamMax = cur;        // max grew (level/gear) → track upward
-          const _dp = palStaminaDrop(id);
-          const dropLine = _dp > 0 ? st.stamMax * _dp / 100 : st.stamMax;
-          if (cur < dropLine) st.stamBelow = true;        // dipped below the (customizable) threshold — arm the alert
-          else if (cur >= st.stamMax && st.stamBelow){ st.stamBelow = false; fireAlert('stamina', `${playerName(p)} — stamina full`); } // refilled to full
-        }
-      }
+      // ⚠️ NO STAMINA POLL HERE ANY MORE. It used to read `/api/players/<id>/stats` values[1] and treat
+      // it as CURRENT stamina — but that field is MAX (the relay path reads the very same index as max,
+      // and stamina_state supplies current), and bitjita's /stats is a frozen snapshot besides. A value
+      // that is both wrong and never changes can't dip, so the alert never armed and never fired. Both
+      // sources now feed onLiveStamina instead: the relay's stamina_state on cache, and bitjita's
+      // `stamina_state:<id>` channel over live.bitjita.com when it isn't (see bcAlertEvent).
       if (palOn(id,'idle')){
         const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
         const now = Date.now();
@@ -10635,7 +10702,7 @@ function renderAlerts(){
         <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="playAlertSound('chime')">Test</button></div>
       </div>
       ${_ttsSection}
-      <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full (read from the game's stats API); if it never seems to trigger, the API may only report resting/max values for that player.</div>
+      <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full, driven by a live stamina stream rather than polling — so it lands the moment it happens.</div>
       <div class="al-section-title">Default alerts &amp; sounds <span style="font-weight:400;color:var(--text3);font-size:11px">— apply to every tracked player unless overridden below</span></div>
       <div class="al-list">
         ${_alKeys.map(typeRow).join('')}
