@@ -8243,7 +8243,13 @@ function bcWsSubscribe(){
   const chans = Object.keys(bcTracked).map(id => 'mobile_entity_state:'+id);
   bcAlertIds().forEach(id => BC_ALERT_CHANNELS.forEach(t => chans.push(t+':'+id)));
   if (!chans.length) return;
-  try { bcPlayerSocket.send(JSON.stringify({ type:'subscribe', channels: [...new Set(chans)] })); } catch(e){}
+  // ⚠️ live.bitjita silently IGNORES any subscribe message with more than 100 channels — not truncated,
+  // the whole message: 100 streamed, 101 delivered nothing (measured 2026-08-13). The `subscribed` ack
+  // still echoes every channel (it echoes even fabricated table names), so the ack proves nothing.
+  // Subscribes ARE additive across messages on one socket (60+60 both streamed), so chunk instead.
+  const uniq = [...new Set(chans)];
+  for (let i = 0; i < uniq.length; i += 90)
+    try { bcPlayerSocket.send(JSON.stringify({ type:'subscribe', channels: uniq.slice(i, i + 90) })); } catch(e){}
 }
 function bcWsHandle(raw){
   let msg; try { msg = JSON.parse(raw); } catch(e){ return; }
