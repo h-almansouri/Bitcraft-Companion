@@ -3794,6 +3794,15 @@ function liveRows(table, pred){
   if (t) Object.keys(t).forEach(rg => t[rg].forEach(r => { if (!pred || pred(r)) out.push(r); }));
   return out;
 }
+// Same, but keeps WHICH MIRROR answered. An entity id encodes a region in its top byte, and for anything
+// fixed to the ground that is also where its rows live — but a DEPLOYABLE moves, and its rows move with
+// it, so the id's region and the mirror holding it drift apart the moment someone sails a boat across a
+// border. Only the observed mirror is authoritative for those. See liveQuerySet's `here`.
+function liveRowsByRegion(table, pred){
+  const out = [], t = liveCache[table];
+  if (t) Object.keys(t).forEach(rg => t[rg].forEach(r => { if (!pred || pred(r)) out.push({ row: r, region: +rg }); }));
+  return out;
+}
 function liveStatus(){
   const out = {};
   Object.keys(liveConns).forEach(rg => { const c = liveConns[rg]; out[rg] = { status: c.status, snapshotTs: c.snapshotTs }; });
@@ -3968,7 +3977,7 @@ const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state']; 
 // (§3.2). Ids persist per roster, so a warm boot subscribes everything in its first dial — zero redials
 // steady-state.
 const LIVE_CONTAINERS_KEY = 'bcLiveContainers';
-let liveRefs = { containers: [], buildings: [], networks: [], locs: [] };   // discovered ids the subscription covers
+let liveRefs = { containers: [], buildings: [], networks: [], locs: [], regionHint: {} };   // discovered ids the subscription covers
 let liveRosterIds = [];      // player ids the current subscription covers
 // Everything the app needs that ISN'T matched by a player-id filter: the buildings behind bank/house
 // containers and craft stations (they belong to other people, or carry no owner column), their
@@ -3982,11 +3991,16 @@ function liveWantedRefs(){
   const networks = new Set();     // house dimension networks
   const locs = new Set();         // buildings whose location (→ dimension) decides house membership
   const claims = new Set();       // settlement names
+  const regionHint = {};          // id -> mirror that actually holds it, where the id can't be trusted
   // house interiors: buildings this player constructed with NO claim (claim 0 = inside a dimension)
   liveRows('building_state', r => String(r.claim_entity_id) === '0' && tracked.has(String(r.constructed_by_player_entity_id)))
     .forEach(r => { const id = String(r.entity_id); containers.add(id); buildings.add(id); locs.add(id); });
-  liveRows('deployable_state_v2', r => tracked.has(String(r.owner_id)))
-    .forEach(r => containers.add(String(r.entity_id)));
+  // ⚠️ Deployables MOVE between regions, and their inventory rows move with them, so the region encoded
+  // in the entity id stops being where the data is. Verified: Velcruza's "Personal Cache (III)" has its
+  // inventory_state row in r13 while its id says r19 — we asked r19, got nothing, and every vehicle and
+  // cache silently vanished from the Inventory tab. Remember the mirror that actually answered.
+  liveRowsByRegion('deployable_state_v2', r => tracked.has(String(r.owner_id)))
+    .forEach(x => { const id = String(x.row.entity_id); containers.add(id); regionHint[id] = x.region; });
   // bank buildings — the OWNER of a bank inventory row, owned by whoever runs the settlement
   liveRows('inventory_state', r => tracked.has(String(r.player_owner_entity_id)) && !tracked.has(String(r.owner_entity_id)))
     .forEach(r => buildings.add(String(r.owner_entity_id)));
@@ -4010,9 +4024,12 @@ function liveWantedRefs(){
   // liveQuerySet — an OR-chain over location_state is a 14.6s full scan, so chunking is not an option).
   // These are house-INTERIOR buildings only (claim 0, built by a tracked player); a real house runs to
   // tens, so 150 is generous while bounding one region at 150 subscriptions instead of 600.
-  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 150), claims: cap(claims, 400) };
+  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 150), claims: cap(claims, 400), regionHint };
 }
-const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|');
+// regionHint rides in the key: a deployable moving region changes NOTHING about the id list, so without
+// this the "did the refs change?" check says no and we keep querying the mirror it left.
+const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|')
+  + '|' + Object.keys(r.regionHint || {}).sort().map(k => k + ':' + r.regionHint[k]).join(',');
 // ⚠️ REF SETS MAY ONLY GROW WITHIN A ROSTER. Merging (rather than replacing) is what stops the boot
 // flash: a partly-snapshotted cache can only ever DERIVE a subset, and adopting that subset demoted a
 // complete 378-query set to 322 mid-boot, after which the cache answered from the smaller set and every
@@ -4026,6 +4043,9 @@ function liveMergeRefs(a, b){
   Object.keys(LIVE_REF_CAPS).forEach(k => {
     out[k] = [...new Set([...((a && a[k]) || []), ...((b && b[k]) || [])])].sort().slice(0, LIVE_REF_CAPS[k]);
   });
+  // Hints are the ONE thing that must not be monotonic: `b` is the fresh observation, and when a
+  // deployable crosses a border its new mirror has to overwrite the old one, not merge with it.
+  out.regionHint = Object.assign({}, (a && a.regionHint) || {}, (b && b.regionHint) || {});
   return out;
 }
 function liveLoadRefs(pKey){ try { const d = JSON.parse(localStorage.getItem(LIVE_CONTAINERS_KEY) || '{}'); const v = d[pKey]; return (v && Array.isArray(v.containers)) ? v : null; } catch(e){ return null; } }
@@ -4074,7 +4094,13 @@ function liveQuerySet(ids, region){
   ];
   // Discovered references. An entity id encodes its region in the top byte, so each socket only carries
   // the ids that actually live in ITS mirror — 13 regions don't all get all 900 lookups.
-  const here = list => list.filter(x => regionOfEntity(x) === region);
+  // ⚠️ …except when the entity MOVED. A deployable (cart, boat, cache) carries its inventory row into
+  // whatever region it's driven to, while its id keeps saying where it was created. Trusting the id then
+  // sends the lookup to a mirror that no longer has the row, and the container disappears with no error
+  // anywhere — measured: "Personal Cache (III)" living in r13 under an id that reads r19. So the mirror
+  // we actually SAW the row in wins, and the id is only the fallback for things that can't move.
+  const hint = liveRefs.regionHint || {};
+  const here = list => list.filter(x => (hint[x] != null ? hint[x] : regionOfEntity(x)) === region);
   const chunked = (list, col, table) => { for (let i = 0; i < list.length; i += 40) sqls.push(`SELECT * FROM ${table} WHERE ${list.slice(i, i + 40).map(v => `${col} = ${v}`).join(' OR ')}`); };
   // ⚠️ An OR-chain DEFEATS the btree index and forces a FULL TABLE SCAN — and so does `IN (…)`. Measured
   // on r8, 2026-08-09: 15 ids as ONE OR-chain over location_state took 14.6s to return 1.7KB (the `IN`
