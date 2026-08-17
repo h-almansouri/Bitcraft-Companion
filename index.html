@@ -4646,32 +4646,57 @@ function fmtEtaLeft(secs){
   if (secs >= 60){ return `${Math.round(secs/60)}m`; }
   return `${Math.max(5, Math.round(secs/5)*5)}s`;
 }
-// Feed one live progress sample into the per-craft rate tracker. Smooths actions/sec with an EMA over
-// genuine work intervals only (skips idle gaps > 12s and no-progress ticks), then smooths the resulting
-// ETA too — so the displayed estimate stays steady instead of swinging on every message.
+// ── ACTIVE-CRAFT ETA ──
+// Measure a RATE over a wide enough window, then derive the ETA fresh at render time. The previous shape
+// (per-frame rate, EMA'd, then the ETA EMA'd again) fell apart with several contributors on one craft.
+// Measured on a live craft, 176 frames over ~90s:
+//   · progress arrives QUANTIZED — dp was ALWAYS exactly 32 — on an irregular 1s/2s cadence, so a
+//     per-frame rate swings 16/s to 32/s, a clean 2:1, with nobody's behaviour changing at all
+//   · HALF the frames (88/176) carried dp = 0. They skipped the rate branch but still re-ran the ETA
+//     EMA, so frames containing no information dragged the estimate around — and more contributors
+//     means more of these
+//   · dt got as low as 0.001s with only a `dt > 0` guard, so one sub-millisecond frame with real
+//     progress would have implied a rate ~1000x too high and slammed the ETA to nearly zero
+//   · the result visibly bounced UPWARD while progress advanced: 118 → 121 → 122 → 117
+// Smoothing the ETA was the core mistake: blending the previous ETA in fights the fact that it should
+// fall monotonically as work is done. One EMA, on the rate only.
+const CRAFT_RATE_WINDOW_MS = 3000;   // minimum measurement window — wide enough to average the quantisation
+const CRAFT_IDLE_GAP_MS = 12000;     // a longer gap than this is "they stopped", not "a slow tick"
 function recordCraftRate(cid, prog, total, now){
   const r = bcCraftRate[cid] || (bcCraftRate[cid] = {});
-  if (r.lastT != null && prog >= r.lastP){
-    const dt = (now - r.lastT) / 1000, dp = prog - r.lastP;
-    if (dp > 0 && dt > 0 && dt <= 12){ const ri = dp / dt; r.rate = r.rate ? r.rate*0.7 + ri*0.3 : ri; }  // EMA of the work rate
-  } else if (r.lastT != null && prog < r.lastP){ r.rate = undefined; r.etaSecs = undefined; }             // progress reset → new craft
-  r.lastT = now; r.lastP = prog;
-  if (total > 0){
-    if (prog >= total) r.etaSecs = 0;
-    else if (r.rate > 0){ const raw = (total - prog) / r.rate; r.etaSecs = (r.etaSecs > 0 && isFinite(r.etaSecs)) ? r.etaSecs*0.6 + raw*0.4 : raw; }  // EMA of the ETA
+  if (total > 0) r.total = total;
+  if (r.lastP != null && prog < r.lastP){ r.rate = undefined; r.anchorT = null; }        // row recycled → new craft
+  // Never average across a pause: that would fold the idle time into the rate and balloon the ETA.
+  if (r.lastT != null && (now - r.lastT) > CRAFT_IDLE_GAP_MS) r.anchorT = null;
+  if (r.anchorT == null){ r.anchorT = now; r.anchorP = prog; }
+  // Sample only once the window is wide enough to mean something. This is also why no minimum-dt guard
+  // is needed any more — a 1ms frame simply doesn't close a window — and why dp = 0 frames are harmless.
+  const winMs = now - r.anchorT;
+  if (winMs >= CRAFT_RATE_WINDOW_MS && prog > r.anchorP){
+    const ri = (prog - r.anchorP) / (winMs / 1000);
+    r.rate = r.rate > 0 ? r.rate*0.6 + ri*0.4 : ri;
+    r.anchorT = now; r.anchorP = prog;
   }
+  r.lastT = now; r.lastP = prog;
 }
-// ETA span for an active craft, read from the (smoothed) rate tracker. Empty until we have a rate.
-function craftEtaSpan(cid){
+// ETA span for an active craft. Computed FRESH from the current progress every time it renders, so it
+// only ever moves in the direction the work does; the smoothing lives entirely in the rate.
+function craftEtaSpan(cid, prog, total){
   const r = cid && bcCraftRate[cid];
-  if (!r || !(r.etaSecs > 0) || !isFinite(r.etaSecs)) return '';
-  return `<span style="margin-left:.45rem;color:var(--teal-light);font-weight:500">~${fmtEtaLeft(r.etaSecs)} left</span>`;
+  if (!r || !(r.rate > 0)) return '';
+  const t = total > 0 ? total : r.total, p = (prog != null) ? prog : r.lastP;
+  if (!(t > 0) || p == null) return '';
+  const left = t - p;
+  if (left <= 0) return '';
+  const secs = left / r.rate;
+  if (!isFinite(secs) || secs <= 0) return '';
+  return `<span style="margin-left:.45rem;color:var(--teal-light);font-weight:500">~${fmtEtaLeft(secs)} left</span>`;
 }
 // The inner markup of an active craft's ".craft-prog-text" — used by BOTH the static render and the live
 // patch, so a periodic re-render no longer wipes the ETA (which caused it to disappear/reappear).
 function craftProgInner(prog, total, cid){
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(prog / total * 100))) : 0;
-  return `<span style="color:var(--text2);font-weight:500">${fmtNum(prog)}</span><span> / ${fmtNum(total)} actions</span><span style="margin-left:.3rem;color:var(--amber-light);font-weight:600">${pct}%</span>${craftEtaSpan(cid)}`;
+  return `<span style="color:var(--text2);font-weight:500">${fmtNum(prog)}</span><span> / ${fmtNum(total)} actions</span><span style="margin-left:.3rem;color:var(--amber-light);font-weight:600">${pct}%</span>${craftEtaSpan(cid, prog, total)}`;
 }
 function onLiveCraftProgress(d, isDelta){
   const cid = String(d.entity_id || d.entityId || ''); if (!cid) return;
