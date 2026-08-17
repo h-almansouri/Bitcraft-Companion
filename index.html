@@ -4626,17 +4626,29 @@ function liveBridge(evs){
   feedKick();
 }
 onLiveChange(liveBridge);
-// A craft is "being worked" (→ Active chip) if its lock is still live, or the game streamed a progress
-// tick for it in the last ~15s. Otherwise it's in-progress but idle (nobody at the station).
-// "Being worked" = the game streamed an actual progress DELTA for this craft in the last ~15s. We do NOT
-// trust lockExpiration (it lingers in the future for a while after work stops, so idle crafts kept flashing
+// "Being worked" = the game streamed an actual progress DELTA for this craft recently. We do NOT trust
+// lockExpiration (it lingers in the future for a while after work stops, so idle crafts kept flashing
 // Active) nor the subscription snapshot (it carries every in-progress craft, idle included). Before the
 // live stream has delivered a delta a craft simply reads Idle, then flips to Active within a second or two
 // once real progress arrives — far better than idle crafts briefly showing Active.
+//
+// ⚠️ The grace is ADAPTIVE, not a flat 15s. Progress lands every 1-2s while someone is at the station, so
+// a fixed 15s meant the chip hung on Active for fifteen seconds after work stopped — long enough to read
+// as broken. It's derived from the craft's own observed cadence (the sample timestamps the rate tracker
+// already keeps): ~1.8x the slowest recent gap, so a normal 1-2s cadence clears in ~3.5s while a genuinely
+// slow recipe widens its own tolerance instead of flickering. Same trick as skillGrace.
+const CRAFT_WORKED_GRACE_MIN_MS = 3000, CRAFT_WORKED_GRACE_MAX_MS = 10000, CRAFT_WORKED_GRACE_DEFAULT_MS = 5000;
+function craftWorkedGrace(r){
+  const s = (r && r.samples) || [];
+  if (s.length < 2) return CRAFT_WORKED_GRACE_DEFAULT_MS;   // no cadence learned yet
+  let max = 0;
+  for (let i = 1; i < s.length; i++) max = Math.max(max, s[i].t - s[i-1].t);
+  return Math.min(CRAFT_WORKED_GRACE_MAX_MS, Math.max(CRAFT_WORKED_GRACE_MIN_MS, Math.round(max * 1.8)));
+}
 function craftIsBeingWorked(c){
   const cid = String(c.entityId || c.entity_id || '');
   const r = cid && bcCraftRate[cid];
-  return !!(r && r.workedT && (Date.now() - r.workedT) < 15000);
+  return !!(r && r.workedT && (Date.now() - r.workedT) < craftWorkedGrace(r));
 }
 // ⚠️ The chip needs something to drive its DISAPPEARANCE. onLiveCraftProgress flips it TO Active on a
 // real progress delta, but nothing flipped it back: craftIsBeingWorked is only consulted during a full
@@ -4647,7 +4659,9 @@ function craftIsBeingWorked(c){
 let craftActiveTimer = null;
 function startCraftActiveTick(){
   stopCraftActiveTick();
-  craftActiveTimer = setInterval(syncCraftActiveChips, 1000);
+  // 500ms, not 1s: the tick's own resolution otherwise adds up to a whole second on top of the grace,
+  // which is a lot when the grace itself is only ~3.5s. Same reasoning as the skills tick.
+  craftActiveTimer = setInterval(syncCraftActiveChips, 500);
 }
 function stopCraftActiveTick(){ if (craftActiveTimer){ clearInterval(craftActiveTimer); craftActiveTimer = null; } }
 function syncCraftActiveChips(){
