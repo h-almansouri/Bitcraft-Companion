@@ -4685,24 +4685,54 @@ function fmtEtaLeft(secs){
 //   · the result visibly bounced UPWARD while progress advanced: 118 → 121 → 122 → 117
 // Smoothing the ETA was the core mistake: blending the previous ETA in fights the fact that it should
 // fall monotonically as work is done. One EMA, on the rate only.
-const CRAFT_RATE_WINDOW_MS = 3000;   // minimum measurement window — wide enough to average the quantisation
-const CRAFT_IDLE_GAP_MS = 12000;     // a longer gap than this is "they stopped", not "a slow tick"
+// Plainly: how much progress happened over the last few seconds, divided by those seconds — then "how
+// much is left" over that. The window SLIDES and both its ends are real progress events, so the elapsed
+// time is exact and no partial chunk hangs off either edge. That also removes any need for a minimum-dt
+// guard (a 1ms frame can't span a window) and makes the dp = 0 frames — half of all traffic — inert.
+const CRAFT_RATE_WINDOW_MS = 4000;   // how far back we look; this IS the memory of the estimate
+const CRAFT_RATE_MIN_SPAN_MS = 2000; // never divide by a span shorter than this (see the 1ms trap below)
+const CRAFT_IDLE_GAP_MS = 10000;     // no progress for this long = idle: freeze, then re-anchor on resume
 function recordCraftRate(cid, prog, total, now){
   const r = bcCraftRate[cid] || (bcCraftRate[cid] = {});
   if (total > 0) r.total = total;
-  if (r.lastP != null && prog < r.lastP){ r.rate = undefined; r.anchorT = null; }        // row recycled → new craft
-  // Never average across a pause: that would fold the idle time into the rate and balloon the ETA.
-  if (r.lastT != null && (now - r.lastT) > CRAFT_IDLE_GAP_MS) r.anchorT = null;
-  if (r.anchorT == null){ r.anchorT = now; r.anchorP = prog; }
-  // Sample only once the window is wide enough to mean something. This is also why no minimum-dt guard
-  // is needed any more — a 1ms frame simply doesn't close a window — and why dp = 0 frames are harmless.
-  const winMs = now - r.anchorT;
-  if (winMs >= CRAFT_RATE_WINDOW_MS && prog > r.anchorP){
-    const ri = (prog - r.anchorP) / (winMs / 1000);
-    r.rate = r.rate > 0 ? r.rate*0.6 + ri*0.4 : ri;
-    r.anchorT = now; r.anchorP = prog;
+  const s = r.samples || (r.samples = []);
+  const lastSampleT = s.length ? s[s.length - 1].t : null;   // last REAL progress — nothing else is sampled
+  const prevP = r.lastP;
+  if (prevP != null && prog < prevP){
+    s.length = 0; r.rate = undefined; r.reanchor = false;     // progress went backwards → a different craft
+  } else if (lastSampleT != null && (now - lastSampleT) > CRAFT_IDLE_GAP_MS){
+    // Idle. KEEP r.rate so the ETA on screen simply freezes where it was rather than vanishing or
+    // drifting — progress isn't moving either, so the displayed number holds still. Drop the samples and
+    // mark the next measurement a REPLACEMENT rather than a blend: averaging across a pause both drags
+    // the rate down and makes the estimate crawl back to reality once someone picks the craft back up.
+    s.length = 0; r.reanchor = true;
   }
-  r.lastT = now; r.lastP = prog;
+  r.lastP = prog;
+  // ⚠️ A frame with no new progress — half of all traffic — must touch NOTHING. Not the samples, not the
+  // rate. Two ways this bit: letting it re-run the blend drifted an idle craft 21.3 → 18.1 actions/sec,
+  // and letting it PUSH a sample seeded the post-idle window with a stale no-progress anchor, so the
+  // first measurement after someone resumed read 23.5 instead of re-anchoring cleanly.
+  if (prevP != null && prog <= prevP) return;
+  s.push({ t: now, p: prog });
+  // Drop samples that have fallen out of the window, but never so many that the remaining span drops
+  // below the minimum — the window is allowed to float between MIN_SPAN and WINDOW, never under.
+  while (s.length > 2 && (now - s[0].t) > CRAFT_RATE_WINDOW_MS && (now - s[1].t) >= CRAFT_RATE_MIN_SPAN_MS) s.shift();
+  if (s.length >= 2){
+    const span = (s[s.length - 1].t - s[0].t) / 1000, gained = s[s.length - 1].p - s[0].p;
+    // ⚠️ MINIMUM SPAN, not just "span > 0". Two frames can land in the SAME MILLISECOND carrying real
+    // progress — observed on a live craft at boot: +41 actions 1ms apart, which reads as 41,000/sec and
+    // poisoned the blend for seconds afterwards ("~10s left" on a craft with 69K actions to go). The
+    // earlier anchor-based version got this for free by only closing a window once it was wide enough;
+    // the sliding window has to say it out loud.
+    if (span * 1000 >= CRAFT_RATE_MIN_SPAN_MS && gained > 0){
+      const ri = gained / span;
+      // Light blend on top of the window — just enough to take the edge off the quantisation (progress
+      // lands in fixed chunks, measured always exactly 32, on an irregular 1s/2s cadence) without the
+      // long memory that made the previous shape take ~9s to notice a second contributor.
+      r.rate = (r.reanchor || !(r.rate > 0)) ? ri : r.rate * 0.4 + ri * 0.6;
+      r.reanchor = false;
+    }
+  }
 }
 // ETA span for an active craft. Computed FRESH from the current progress every time it renders, so it
 // only ever moves in the direction the work does; the smoothing lives entirely in the rate.
