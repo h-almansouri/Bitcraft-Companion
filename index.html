@@ -1493,7 +1493,7 @@ function toggleRemovedPanel(btn) {
 // ── NAV ──
 const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft'};
 function switchTab(tab) {
-  stopPassiveCraftTimer();   // the passive countdown belongs to the Crafts tab; re-armed by renderCraftingTab
+  stopPassiveCraftTimer(); stopCraftActiveTick();   // both belong to the Crafts tab; re-armed by renderCraftingTab
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
@@ -4638,6 +4638,31 @@ function craftIsBeingWorked(c){
   const r = cid && bcCraftRate[cid];
   return !!(r && r.workedT && (Date.now() - r.workedT) < 15000);
 }
+// ⚠️ The chip needs something to drive its DISAPPEARANCE. onLiveCraftProgress flips it TO Active on a
+// real progress delta, but nothing flipped it back: craftIsBeingWorked is only consulted during a full
+// re-render, and the doorbell deliberately ignores progress ticks (they're a same-pk delete+insert, not
+// a list change) — so a craft everyone had walked away from kept claiming Active until the LIST itself
+// changed, which could be never. Same split the skills badge already uses (startSkillActiveTick): the
+// stream drives appearance, a local tick drives expiry. No network, DOM touched only on an actual flip.
+let craftActiveTimer = null;
+function startCraftActiveTick(){
+  stopCraftActiveTick();
+  craftActiveTimer = setInterval(syncCraftActiveChips, 1000);
+}
+function stopCraftActiveTick(){ if (craftActiveTimer){ clearInterval(craftActiveTimer); craftActiveTimer = null; } }
+function syncCraftActiveChips(){
+  if (document.hidden || currentTab !== 'crafting') return;
+  document.querySelectorAll('.craft-card[data-cid]').forEach(card => {
+    const st = card.querySelector('.craft-status'); if (!st) return;
+    // Active <-> Idle only. Complete and Passive are other states entirely and are not ours to rewrite.
+    const isActive = st.classList.contains('status-active');
+    if (!isActive && !st.classList.contains('status-idle')) return;
+    const worked = craftIsBeingWorked({ entityId: card.dataset.cid });
+    if (worked === isActive) return;
+    st.className = 'craft-status ' + (worked ? 'status-active' : 'status-idle');
+    st.innerHTML = worked ? '<i class="ti ti-flame"></i> Active' : '<i class="ti ti-player-pause"></i> Idle';
+  });
+}
 // Coarse, low-jitter ETA text. Drops seconds for anything ≥1min (that's where the flicker lived) and
 // quantizes the sub-minute range, since this is only ever a rough estimate.
 function fmtEtaLeft(secs){
@@ -4801,6 +4826,7 @@ async function renderCraftingTab(silent, force) {
   // Always live: progress bars patch in place from the delta stream, and the doorbell re-renders the list
   // when a craft starts, finishes or is cancelled. No poll — the Refresh button is just for impatience.
   if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
+  startCraftActiveTick();   // expires the Active chip; cheap enough to leave running for both sub-tabs
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
