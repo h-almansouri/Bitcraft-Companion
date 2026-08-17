@@ -139,6 +139,16 @@ main.planner-mode{max-width:none;padding:1rem}
 .price-sell{color:#f09595}
 .price-buy{color:var(--green-light)}
 .btn{background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px}
+/* Filter boxes are type="search", which gets a real clear button from the browser for free — no markup,
+   no JS, and nothing to re-attach after the innerHTML re-renders these fields live through. The default
+   glyph is near-black though, invisible on this theme, so invert it and give it a hit area. */
+input[type="search"]::-webkit-search-cancel-button{
+  -webkit-appearance:none;appearance:none;height:14px;width:14px;margin-left:4px;cursor:pointer;opacity:.55;
+  background:currentColor;color:var(--text3);
+  -webkit-mask:no-repeat center/14px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E");
+  mask:no-repeat center/14px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E");
+}
+input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--text)}
 .btn:hover{background:var(--bg4);border-color:var(--teal)}
 .btn.primary{background:var(--teal-dim);border-color:var(--teal);color:var(--teal-light)}
 .btn.primary:hover{background:var(--teal)}
@@ -2662,7 +2672,7 @@ async function renderInventoryTab(silent) {
           <button class="${invViewMode==='grouped'?'active':''}" onclick="setInvView('grouped')"><i class="ti ti-layout-list"></i> Grouped</button>
           <button class="${invViewMode==='flat'?'active':''}" onclick="setInvView('flat')"><i class="ti ti-layout-grid"></i> Flat</button>
         </div>
-        <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="text" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
+        <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="search" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
       </div>
       <div id="inv-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId)).join('')}</div>`;
     const inp = document.getElementById('inv-search-input');
@@ -6066,7 +6076,7 @@ function renderMarket() {
     <div style="display:flex;gap:.5rem;margin-bottom:.6rem">
       <div style="flex:1;position:relative">
         <i class="ti ti-search" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i>
-        <input type="text" id="market-q" placeholder="Filter by name..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 12px 7px 32px;font-size:13px;outline:none">
+        <input type="search" id="market-q" placeholder="Filter by name..." autocomplete="off" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 12px 7px 32px;font-size:13px;outline:none">
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:1rem;flex-wrap:wrap">
@@ -6250,7 +6260,7 @@ function renderDeals() {
         </div>
         <div style="position:relative;flex:1;min-width:120px">
           <i class="ti ti-search" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:13px;pointer-events:none"></i>
-          <input type="text" id="deals-search" value="${escHtml(dealsNameFilter)}" placeholder="Filter by item name…"
+          <input type="search" id="deals-search" value="${escHtml(dealsNameFilter)}" placeholder="Filter by item name…" autocomplete="off"
             style="width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px 6px 28px;font-size:12px;outline:none"
             oninput="dealsNameFilter=this.value.toLowerCase().trim();renderDealResults()">
         </div>
@@ -6267,20 +6277,18 @@ function renderDeals() {
           <div style="font-size:11px;color:var(--text3);margin-bottom:.35rem;display:flex;align-items:center;gap:.3rem">
             <i class="ti ti-map-pin" style="color:#f09595"></i> Buy from settlement
           </div>
-          <input type="search" id="deals-buyfrom" value="${escHtml(dealsBuyFrom)}" placeholder="Any settlement…" list="deals-buyfrom-list"
+          <input type="search" id="deals-buyfrom" value="${escHtml(dealsBuyFrom)}" placeholder="Any settlement…" list="deals-buyfrom-list" autocomplete="off"
             style="width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;outline:none"
-            oninput="dealsBuyFrom=this.value.toLowerCase().trim();renderDealResults()"
-            onsearch="dealsBuyFrom=this.value.toLowerCase().trim();renderDealResults()">
+            oninput="dealsBuyFrom=this.value.toLowerCase().trim();renderDealResults()">
           <datalist id="deals-buyfrom-list"></datalist>
         </div>
         <div>
           <div style="font-size:11px;color:var(--text3);margin-bottom:.35rem;display:flex;align-items:center;gap:.3rem">
             <i class="ti ti-map-pin" style="color:var(--green-light)"></i> Sell to settlement
           </div>
-          <input type="search" id="deals-sellto" value="${escHtml(dealsSellTo)}" placeholder="Any settlement…" list="deals-sellto-list"
+          <input type="search" id="deals-sellto" value="${escHtml(dealsSellTo)}" placeholder="Any settlement…" list="deals-sellto-list" autocomplete="off"
             style="width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;outline:none"
-            oninput="dealsSellTo=this.value.toLowerCase().trim();renderDealResults()"
-            onsearch="dealsSellTo=this.value.toLowerCase().trim();renderDealResults()">
+            oninput="dealsSellTo=this.value.toLowerCase().trim();renderDealResults()">
           <datalist id="deals-sellto-list"></datalist>
         </div>
       </div>
@@ -7112,7 +7120,7 @@ function renderShoppingTab() {
     <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem;flex-wrap:wrap">
       <div style="display:flex;align-items:center;gap:.35rem;flex:1;min-width:180px;position:relative">
         <i class="ti ti-search" style="position:absolute;left:8px;color:var(--text3);font-size:13px;pointer-events:none"></i>
-        <input type="text" id="shopping-search-inp" placeholder="Search items to add…"
+        <input type="search" id="shopping-search-inp" placeholder="Search items to add…" autocomplete="off"
           style="flex:1;padding:7px 10px 7px 28px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:6px;font-size:13px;outline:none"
           oninput="shoppingSearchType(this.value)"
           onkeydown="if(event.key==='Enter'){shoppingAddFirst();this.value='';shoppingSearchType('')}
@@ -9155,7 +9163,7 @@ function buildPlannerUI() {
         <span id="planner-item-count" style="font-size:10px;color:var(--text3)"></span>
       </div>
       <div class="planner-filters">
-        <input type="text" id="planner-search" placeholder="Search items…" oninput="plannerFilter()">
+        <input type="search" id="planner-search" placeholder="Search items…" autocomplete="off" oninput="plannerFilter()">
         <div class="pf-row">
           <select id="planner-tier" onchange="plannerFilter()" style="flex:1"><option value="">All Tiers</option>${tierOpts}</select>
           <select id="planner-skill" onchange="plannerFilter()" style="flex:1"><option value="">All Skills</option>${skillOpts}</select>
@@ -10554,6 +10562,23 @@ function toggleNotifPanel(ev){
   else panel.style.display = 'none';
 }
 function clearNotifHistory(){ notifHistory = []; saveNotifHistory(); const p = document.getElementById('notif-panel'); if (p) p.innerHTML = notifPanelHtml(); }
+// ── The clear button on a type="search" filter box ──
+// Every filter in the app does its work in an `input` handler, but clicking the browser's native clear
+// button fires a `search` event and does NOT reliably imply `input` — verified here, and the two Deals
+// settlement pickers had already been hand-wired with `onsearch` for exactly this reason. Bridge it once
+// instead of remembering per field: the boxes stay plain markup, and re-rendering them (which several
+// tabs do constantly) can't detach anything, because nothing is attached to them.
+// `search` does not bubble, hence the capture listener — verified it still reaches document that way.
+// The de-dupe compares the VALUE the last `input` handler saw against the value now, rather than timing
+// the two events: if the browser did fire its own `input` for this clear, the handlers already saw the
+// empty string and there is nothing to do. A time window looked equivalent and wasn't — typing and
+// clearing inside it silently swallowed the clear, which a 100ms guard did in testing.
+const _lastInputVal = new WeakMap();
+document.addEventListener('input', e => { _lastInputVal.set(e.target, e.target.value); }, true);
+document.addEventListener('search', e => {
+  const el = e.target;
+  setTimeout(() => { if (_lastInputVal.get(el) !== el.value) el.dispatchEvent(new Event('input', { bubbles: true })); }, 0);
+}, true);
 // Close the panel when clicking outside it
 document.addEventListener('click', (e) => {
   if (!notifPanelOpen) return;
