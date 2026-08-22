@@ -1,9 +1,12 @@
 # Relay Overhaul — Architecture Plan
 
 Working document. Sections are numbered so we can refer to them when editing
-("change 4.2"). Nothing here is built yet.
+("change 4.2").
 
-Status: **draft — under discussion**
+Status: **BUILT AND LIVE** — §10 steps 1–7 shipped (13 held sockets, one Subscribe
+each, all tabs render from the client cache). Step 8 (market/order-book tabs on a
+lazy subscription) is still deferred. §8.5 records the OR-chain full-scan
+incident; the constraint sections are load-bearing, not historical.
 
 ---
 
