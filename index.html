@@ -2450,6 +2450,7 @@ function startPassiveCraftTimer() {
     document.querySelectorAll('[data-pts]').forEach(el => {
       const ts = +el.dataset.pts;
       if (ts > 0 && ts <= now) { anyDone = true; return; }   // will move to Ready on the re-render below
+      if (!(ts > 0)) return;   // data-pts="0" = static "Processing"/"Queued" label set at render — don't overwrite it
       const left = ts - now;
       el.textContent = left > 0 ? fmtTimeLeft(left) : (el.dataset.processing ? 'Processing' : 'Finishing…');
       el.style.color = left < 300 ? 'var(--green-light)' : 'var(--amber-light)';
@@ -4884,7 +4885,15 @@ async function renderCraftingTab(silent, force) {
 }
 
 // Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
+// ⚠️ Only a PROCESSING craft has a knowable completion. A QUEUED craft (station slots all busy)
+// carries its QUEUE-ENTRY time in `timestamp` — the server re-stamps it and schedules the real
+// completion timer only when a slot frees (BitCraftPublic: passive_craft_state.rs
+// process_oldest_queued → passive_craft_timer). queueTime + duration made the craft-done alert
+// fire early by exactly the queue wait. Return 0 for queued — every consumer treats 0 as
+// "no known completion", and the craft enters the watch/countdown when it flips to processing
+// (≤1s later via the predecessor's own completion wake, or the next ~15s alerts poll).
 function passiveCompletionTs(c) {
+  if (String(c.status || '').toLowerCase() === 'queued') return 0;
   let start = 0;
   if (c.timestamp) { const p = new Date(c.timestamp); if (!isNaN(p)) start = Math.floor(p.getTime()/1000); }
   if (!start) {
@@ -4906,6 +4915,8 @@ function renderPassiveCraftsHtml(passive, itemMap) {
   // (start + recipe duration) has passed. The completion time is deterministic, so we flip it to
   // "Ready to Claim" the instant the timer runs out instead of waiting for the next server poll to
   // change its status — the timer (startPassiveCraftTimer) re-renders us the moment one crosses zero.
+  // (QUEUED crafts have no known completion — passiveCompletionTs returns 0 for them — so they sit
+  // in In Progress as "Queued" until the server starts them.)
   const now0 = Math.floor(Date.now() / 1000);
   const isComplete = c => {
     if (c.completed || c.isCompleted || c.status === 'complete' || c.status === 'completed' || c.status === 'done') return true;
@@ -4937,15 +4948,19 @@ function renderPassiveCraftsHtml(passive, itemMap) {
       loc.total++;
       const ci = craftName(c);
       const gkey = ci.name;
-      if (!loc.groups[gkey]) loc.groups[gkey] = { name: ci.name, baseName: ci.baseName, tier: ci.tier, count: 0, buildings: {}, completions: [] };
+      if (!loc.groups[gkey]) loc.groups[gkey] = { name: ci.name, baseName: ci.baseName, tier: ci.tier, count: 0, queued: 0, buildings: {}, completions: [] };
       const g = loc.groups[gkey];
       g.count++;
       const bn = c.buildingName || 'Unknown Building';
       g.buildings[bn] = (g.buildings[bn]||0) + 1;
-      // Only record a completion time we actually KNOW (recipe duration is known). Unknown-duration
-      // crafts push 0 → they render as "Processing" with data-pts="0", so the timer never treats them
-      // as done (passiveCompletionTs would otherwise fall back to the start time, i.e. the past).
-      if (mode === 'processing') g.completions.push(passiveCraftDuration(c.recipeId) != null ? passiveCompletionTs(c) : 0);
+      // Only record a completion time we actually KNOW (recipe duration known AND the craft is
+      // actually processing — passiveCompletionTs returns 0 for queued crafts, whose start is the
+      // predecessor's unknown finish). 0-entries render as "Processing"/"Queued" with data-pts="0",
+      // so the timer never treats them as done.
+      if (mode === 'processing') {
+        g.completions.push(passiveCraftDuration(c.recipeId) != null ? passiveCompletionTs(c) : 0);
+        if (String(c.status || '').toLowerCase() === 'queued') g.queued++;
+      }
     });
     return byLoc;
   };
@@ -4966,7 +4981,7 @@ function renderPassiveCraftsHtml(passive, itemMap) {
         const now = Math.floor(Date.now()/1000);
         const secsLeft = soonest ? Math.max(0, soonest - now) : 0;
         const known = soonest > 0;
-        const timeText = !known ? 'Processing' : (secsLeft <= 0 ? 'Processing' : fmtTimeLeft(secsLeft));
+        const timeText = !known ? (g.queued && g.queued === g.count ? 'Queued' : 'Processing') : (secsLeft <= 0 ? 'Processing' : fmtTimeLeft(secsLeft));
         const color = secsLeft < 300 ? 'var(--green-light)' : 'var(--amber-light)';
         rightEl = `<div style="display:flex;align-items:center;gap:.5rem;flex-shrink:0">
           <span style="display:inline-flex;align-items:center;gap:.3rem;font-size:12px;font-weight:500;color:${color}">
@@ -10758,7 +10773,11 @@ async function _alertsTickInner(){
             st.craftDoneMuteUntil = nowMs + palCraftMute(id) * 1000;   // per-player quiet window (default 60s)
           }
         }
-        // Rebuild the watch set from crafts still cooking (completion in the future).
+        // Rebuild the watch set from crafts still cooking (completion in the future). QUEUED crafts
+        // are excluded by construction (passiveCompletionTs → 0): their timestamp is queue-entry, not
+        // start, so queueTime+duration fired the alert early by the queue wait. They join the watch
+        // when the server flips them to processing — which the predecessor's own completion wake
+        // re-polls for within ~1s (same station), or the regular ~15s tick at worst.
         const cur = {};
         (cd.passive||[]).forEach(c => {
           const done = passiveCompletionTs(c);
