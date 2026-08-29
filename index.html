@@ -3742,6 +3742,8 @@ const LIVE_COLS = {
   buff_type_desc: ['id','name','category'],
   dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
   location_state: ['entity_id','chunk_index','x','z','dimension'],
+  // order = server struct field order (BitCraftPublic components.rs MobileEntityState)
+  mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','_pad1','_pad2'],
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -4134,11 +4136,17 @@ function liveQuerySet(ids, region){
   chunked(here(liveRefs.claims || []), 'entity_id', 'claim_state');
   chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
   perId(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
+  // Movement feed for the idle alert's activity veto (see liveActivity): one row per tracked player,
+  // a handful of deltas per move segment, silence while stationary — measured 4 deltas/50s in normal
+  // play, snapshot = 1 row. perId (indexed), NEVER chunked — the location-family scan trap above.
+  // NOT here()-filtered: players roam regions and the row lives in whichever mirror they're standing
+  // in, so every region subscribes the id — 12 of the 13 return nothing, for free.
+  perId(ids, 'entity_id', 'mobile_entity_state');
   return {
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
       'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
-      'dimension_description_state', 'location_state'],
+      'dimension_description_state', 'location_state', 'mobile_entity_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -4594,6 +4602,10 @@ function liveBridge(evs){
         .forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, ev.isDelta));
     } else if (ev.table === 'stamina_state'){
       ev.rows.forEach(r => onLiveStamina(r.entity_id, { stamina: r.stamina }));
+    } else if (ev.table === 'mobile_entity_state'){
+      // A DELTA here = this player just MOVED (new move segment) — proven activity even when no XP is
+      // flowing (hauling, sailing, walking between towns). Snapshots are just the current position.
+      if (ev.isDelta) ev.rows.forEach(r => { if (r.entity_id) liveActivity[String(r.entity_id)] = Date.now(); });
     } else if (ev.table === 'experience_state'){
       // A DELTA here = this player just earned XP — proven activity for the idle alert. (Snapshots are
       // just current values on (re)subscribe, not activity — don't stamp those.)
@@ -10757,8 +10769,13 @@ async function _alertsTickInner(){
         const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
         const secs = palIdleSecs(id);
         const key = pl.signedIn ? ((pl.experience||[]).reduce((s,e)=>s+(e.quantity||0),0) + '|' + pl.locationX + '|' + pl.locationZ) : null;
-        if (idleDecision(st, key, !!pl.signedIn, liveActivity[id] || 0, Date.now(), secs))
-          fireAlert('idle', `${playerName(p)} has been idle for ${secs}s`);
+        const liveTs = liveActivity[id] || 0;
+        if (idleDecision(st, key, !!pl.signedIn, liveTs, Date.now(), secs)){
+          // Diagnostic suffix: how long the LIVE streams (XP / movement / stamina drain) have been quiet.
+          // A false fire would show a small number here — that's the evidence to bring to the code.
+          const liveAge = liveTs ? Math.round((Date.now() - liveTs)/1000) + 's' : 'no data';
+          fireAlert('idle', `${playerName(p)} has been idle for ${secs}s (live feed quiet: ${liveAge})`);
+        }
       }
       if (palOn(id,'craftDone')){
         const cd = await fetchPlayerCrafts(id);
@@ -10924,8 +10941,10 @@ function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].s
 // ══════════════════════════════════════════════════════════════════════════
 let liveStamina = {};        // entityId -> { current, max }
 // entityId -> ms timestamp of the last PROVEN activity seen on the live streams: an experience_state
-// DELTA (XP earned — stamped in liveBridge and by the live.bitjita fallback's per-row events) or a
-// stamina DRAIN (stamped in onLiveStamina; regen ticks don't count — stamina refills while AFK).
+// DELTA (XP earned — stamped in liveBridge and by the live.bitjita fallback's per-row events), a
+// mobile_entity_state DELTA (movement — covers hauling/sailing/walking with no XP; subscribed per
+// player in liveQuerySet), or a stamina DRAIN (stamped in onLiveStamina; regen ticks don't count —
+// stamina refills while AFK).
 // The idle alert uses this as a second opinion: bitjita's player row can serve a frozen xp|x|z for
 // minutes (CF stale-serves under origin trouble, region transfers freezing the row) while the player
 // is demonstrably busy — firing "idle" mid-play. Live activity newer than the arm time vetoes the fire.
