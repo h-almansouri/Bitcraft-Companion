@@ -10798,7 +10798,9 @@ async function _alertsTickInner(){
 // PROVEN activity from the live streams (XP delta / stamina drain — see liveActivity). The live veto
 // exists because bitjita's row can serve a frozen fingerprint for minutes while the player is busy
 // (CF stale-serves under origin trouble, region transfers freezing the row) — key-only detection fired
-// false "idle" alerts mid-play. A liveTs newer than the arm time re-arms instead of firing.
+// false "idle" alerts mid-play. MEASURED 2026-08-29: sampling the endpoint every 10s for 10 minutes
+// during active play caught a 99-second frozen-key window (0 fetch errors, live XP deltas streaming
+// throughout) — over the 60s default threshold. A liveTs newer than the arm time re-arms instead of firing.
 function idleDecision(st, key, signedIn, liveTs, now, secs){
   if (!signedIn){ st.actKey = null; st.actTs = now; st.idleFired = false; return false; }
   if (key !== st.actKey){ st.actKey = key; st.actTs = now; st.idleFired = false; return false; }
