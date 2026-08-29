@@ -4595,6 +4595,9 @@ function liveBridge(evs){
     } else if (ev.table === 'stamina_state'){
       ev.rows.forEach(r => onLiveStamina(r.entity_id, { stamina: r.stamina }));
     } else if (ev.table === 'experience_state'){
+      // A DELTA here = this player just earned XP — proven activity for the idle alert. (Snapshots are
+      // just current values on (re)subscribe, not activity — don't stamp those.)
+      if (ev.isDelta) ev.rows.forEach(r => { if (r.entity_id) liveActivity[String(r.entity_id)] = Date.now(); });
       // v1 JSON renders the stacks as [skill_id, quantity] PAIRS, not objects — normalise for the handler
       ev.rows.forEach(r => onLiveExperience(r.entity_id,
         (r.experience_stacks || []).map(s => Array.isArray(s) ? { skill_id: +s[0], quantity: +s[1] } : s)));
@@ -8427,6 +8430,7 @@ function bcAlertEvent(table, id, d){
     return onLiveStamina(id, { stamina: cur });
   }
   if (table === 'experience_state'){
+    liveActivity[id] = Date.now();   // live.bitjita events fire per actual row change = XP just earned
     return onLiveExperience(id, (d.experience_stacks || []).map(s => ({ skill_id: +s.skill_id, quantity: +s.quantity })));
   }
   if (table === 'active_buff_state') return onLiveBuffs(id);
@@ -10751,12 +10755,10 @@ async function _alertsTickInner(){
       // `stamina_state:<id>` channel over live.bitjita.com when it isn't (see bcAlertEvent).
       if (palOn(id,'idle')){
         const d = await apiFetch(`/api/players/${id}`); const pl = d.player || {};
-        const now = Date.now();
         const secs = palIdleSecs(id);
         const key = pl.signedIn ? ((pl.experience||[]).reduce((s,e)=>s+(e.quantity||0),0) + '|' + pl.locationX + '|' + pl.locationZ) : null;
-        if (!pl.signedIn){ st.actKey = null; st.actTs = now; st.idleFired = false; }
-        else if (key !== st.actKey){ st.actKey = key; st.actTs = now; st.idleFired = false; }
-        else if (st.actTs && !st.idleFired && (now - st.actTs) >= secs*1000){ st.idleFired = true; fireAlert('idle', `${playerName(p)} has been idle for ${secs}s`); }
+        if (idleDecision(st, key, !!pl.signedIn, liveActivity[id] || 0, Date.now(), secs))
+          fireAlert('idle', `${playerName(p)} has been idle for ${secs}s`);
       }
       if (palOn(id,'craftDone')){
         const cd = await fetchPlayerCrafts(id);
@@ -10789,6 +10791,20 @@ async function _alertsTickInner(){
     } catch(e){ /* skip this player this cycle */ }
   }
   scheduleCraftDoneWake(players);   // fire the instant the soonest passive craft completes (not just on the poll)
+}
+// Idle decision for one poll of one player. Pure state-machine over st.{actKey,actTs,idleFired} so it's
+// testable in isolation; returns true exactly when the "player idle" alert should fire NOW.
+// Inputs: key = bitjita activity fingerprint "xpSum|locX|locZ" (null when signed out); liveTs = last
+// PROVEN activity from the live streams (XP delta / stamina drain — see liveActivity). The live veto
+// exists because bitjita's row can serve a frozen fingerprint for minutes while the player is busy
+// (CF stale-serves under origin trouble, region transfers freezing the row) — key-only detection fired
+// false "idle" alerts mid-play. A liveTs newer than the arm time re-arms instead of firing.
+function idleDecision(st, key, signedIn, liveTs, now, secs){
+  if (!signedIn){ st.actKey = null; st.actTs = now; st.idleFired = false; return false; }
+  if (key !== st.actKey){ st.actKey = key; st.actTs = now; st.idleFired = false; return false; }
+  if (liveTs > st.actTs){ st.actTs = liveTs; st.idleFired = false; return false; }
+  if (st.actTs && !st.idleFired && (now - st.actTs) >= secs*1000){ st.idleFired = true; return true; }
+  return false;
 }
 // Passive crafts don't stream, but each carries an exact completion timestamp. Schedule a precise wake at
 // the soonest upcoming completion so the "craft done" alert fires within ~1s of it finishing, instead of
@@ -10905,6 +10921,13 @@ function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].s
 // as crafts and orders, so this migration added ZERO new connections.
 // ══════════════════════════════════════════════════════════════════════════
 let liveStamina = {};        // entityId -> { current, max }
+// entityId -> ms timestamp of the last PROVEN activity seen on the live streams: an experience_state
+// DELTA (XP earned — stamped in liveBridge and by the live.bitjita fallback's per-row events) or a
+// stamina DRAIN (stamped in onLiveStamina; regen ticks don't count — stamina refills while AFK).
+// The idle alert uses this as a second opinion: bitjita's player row can serve a frozen xp|x|z for
+// minutes (CF stale-serves under origin trouble, region transfers freezing the row) while the player
+// is demonstrably busy — firing "idle" mid-play. Live activity newer than the arm time vetoes the fire.
+let liveActivity = {};
 // "Connected" now means the relay feed is actually up, which is what alertsTick uses to decide whether
 // it still needs to poll stamina over REST.
 function liveNum(x){ if (x == null || x === '') return null; const n = +x; return isNaN(n) ? null : n; }
@@ -10935,6 +10958,10 @@ function onLiveStamina(id, data){
   const cur = liveNum(data.stamina ?? data.current ?? data.value);
   if (cur == null) return;
   const max = liveStaminaMax[id] ? liveStaminaMax[id].max : null;   // supplied by character_stats_state on the same feed
+  // A stamina DECREASE = the player did something (sprint/climb/action). Regen rows tick ~1/s while
+  // AFK, so only drains count as activity for the idle alert. 0.25 guards against float jitter.
+  const prevCur = liveStamina[id] ? liveStamina[id].current : null;
+  if (prevCur != null && cur < prevCur - 0.25) liveActivity[String(id)] = Date.now();
   liveStamina[id] = { current: cur, max };
   loadAlerts();
   if (!(palOn(id,'stamina') && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
