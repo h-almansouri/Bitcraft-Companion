@@ -490,6 +490,13 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .oc-home{cursor:pointer;font-size:15px;color:var(--text3)}
 .oc-home:hover{color:var(--text)}
 .oc-home.on{color:var(--amber-light)}
+.oc-map{cursor:pointer;font-size:15px;color:var(--text3)}
+.oc-map:hover{color:var(--teal-light)}
+/* "Show on map" focus highlight: pulses a few times, then holds a steady ring; lives as long as its popup */
+.bc-focus-wrap{background:none;border:none}
+.bc-focus-ring{position:absolute;left:0;top:0;width:44px;height:44px;border:3px solid var(--teal-light,#5eead4);border-radius:50%;box-sizing:border-box;opacity:.9;animation:bcFocusPulse 1.3s ease-out 4}
+.bc-focus-dot{position:absolute;left:16px;top:16px;width:12px;height:12px;border-radius:50%;background:var(--teal-light,#5eead4);box-shadow:0 0 0 2px rgba(0,0,0,.55)}
+@keyframes bcFocusPulse{0%{transform:scale(.4);opacity:1}100%{transform:scale(1.5);opacity:0}}
 .oc-home-tag{font-size:9px;font-weight:700;letter-spacing:.04em;color:var(--amber-light);background:rgba(186,117,23,.16);padding:1px 5px;border-radius:3px}
 
 /* ── TASKS ── */
@@ -5206,6 +5213,11 @@ function ocRenderBrowse(){
 }
 function ocShowMore(){ ocShowCount += OC_PAGE; ocRenderBrowse(); }
 function ocRerenderCard(id){ id=String(id); const g=ocGroupsById[id]; const host=document.getElementById('oc-claim-'+id); if (g && host) host.innerHTML = ocClaimCardHtml(g); }
+// "Show on map" on a claim card → jump to the Map tab and highlight the claim (see bcFocusClaim).
+function ocShowOnMap(id){
+  const g = ocGroupsById[String(id)]; if (!g) return;
+  bcFocusClaim({ id: g.id, name: g.name, x: g.x, z: g.z, crafts: (g.crafts||[]).length });
+}
 // Fetch the whole public craft board once (cached). All filtering is client-side (Option A).
 async function ocFetchGlobal(force){
   if (openCraftAll.loading) return;
@@ -5444,6 +5456,7 @@ function ocClaimCardHtml(g){
       </div>
       <div class="craft-location-meta">
         ${totalActive?`<span class="oc-active-pill oc-active-pill-lg"><i class="ti ti-bolt" style="font-size:11px"></i> ${totalActive} active</span>`:''}
+        <i class="ti ti-map-search oc-map" title="Show on map" onclick="event.stopPropagation();ocShowOnMap('${claimId}')"></i>
         <i class="ti ti-home oc-home${isHome?' on':''}" title="${isHome?'Home claim (click to clear)':'Set as home — sort claims by distance'}" onclick='event.stopPropagation();ocToggleHome(${JSON.stringify(JSON.stringify({entityId:claimId,name:g.name,x:g.x,z:g.z}))})'></i>
         <i class="ti ti-pin${pinned?'-filled':''} oc-pin${pinned?' on':''}" title="${pinned?'Unpin claim':'Pin claim'}" onclick='event.stopPropagation();ocTogglePin(${JSON.stringify(JSON.stringify({id:claimId,name:g.name,regionId:g.regionId}))})'></i>
         <i class="ti ti-chevron-${collapsed?'down':'up'}"></i>
@@ -7685,6 +7698,7 @@ function manualRefreshShopping() { fetchAllShoppingPrices(); }
 // bitcraftmap project (BSD-2-Clause). Map data: bitcraftmap · bitjita.
 let bcMap = null;            // Leaflet map instance (created once)
 let bcMapInited = false;
+let bcMapInitPromise = null;   // bcInitMap() in flight — cross-tab jumps (bcFocusClaim) await the claim markers
 const BC_APOTHEM = 2 / Math.sqrt(3);
 const BC_MAP_W = 38400, BC_MAP_H = 38400;
 // Persist the map view (center + zoom) so a refresh returns to the same spot instead of zooming out.
@@ -7842,7 +7856,7 @@ function renderMap(){
       </div>
       <div class="map-attrib">Map data: <a href="https://github.com/bitcraftmap/bitcraftmap" target="_blank">bitcraftmap</a> (BSD-2) · <a href="https://bitjita.com" target="_blank">bitjita</a></div>`;
     bcMapInited = true;
-    bcInitMap();
+    bcMapInitPromise = bcInitMap();
   } else if (bcMap){
     setTimeout(() => bcMap.invalidateSize(), 60);
   }
@@ -8288,6 +8302,48 @@ async function bcFetchPlayerPos(id){
     const p = d.player || d;
     return { username: p && p.username, x: (p && p.locationX), z: (p && p.locationZ) };
   } catch(e){ return null; }
+}
+// ----- Focus a claim (Open Crafts "Show on map") -----
+// A dedicated highlight marker rather than the claim's own marker: claim markers are viewport-culled and
+// live inside per-tier layers the user may have toggled off, and ~2% of claims with open crafts aren't in
+// claims.geojson at all (new claims / export lag) — measured 10 of 546 on 2026-09-04. The crafts data
+// carries claimLocationX/Z in the SAME units as the geojson (verified identical for the same claims), so
+// the fallback position is exact. Lifecycle: the highlight lives as long as its popup — closing it (×,
+// clicking elsewhere on the map, opening another popup, or the "Stop highlighting" link) removes the ring.
+let bcFocusMarker = null;
+function bcClearFocus(){
+  if (!bcFocusMarker) return;
+  const m = bcFocusMarker; bcFocusMarker = null;
+  try { m.remove(); } catch(e){}
+}
+async function bcFocusClaim(c){   // c = { id, name, x, z, crafts }
+  switchTab('map');
+  if (typeof L === 'undefined') return;
+  try { await bcMapInitPromise; } catch(e){}
+  if (!bcMap) return;
+  await new Promise(r => setTimeout(r, 120));   // let the tab's invalidateSize land before centering
+  const id = String(c.id || '');
+  const hit = bcCullClaims.find(o => o.m && o.m.feature && String((o.m.feature.properties||{}).entityId) === id);
+  const p = hit ? (hit.m.feature.properties || {}) : {};
+  const ll = hit ? hit.ll : ((c.x != null && c.z != null) ? L.latLng(+c.z, +c.x) : null);
+  if (!ll) return;
+  bcClearFocus();
+  const icon = L.divIcon({ className:'bc-focus-wrap', html:'<div class="bc-focus-ring"></div><div class="bc-focus-dot"></div>', iconSize:[44,44], iconAnchor:[22,22], popupAnchor:[0,-20] });
+  const m = L.marker(ll, { icon, zIndexOffset: 1500 }).addTo(bcMap);
+  const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ');
+  const crafts = c.crafts != null ? ` · ${c.crafts} open craft${c.crafts !== 1 ? 's' : ''}` : '';
+  m.bindPopup(`<b>${escHtml(c.name || p.name || 'Claim')}</b> ${p.tier != null ? `<span style="color:var(--text3)">T${p.tier}</span>` : ''}<br>
+    <span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}${crafts}</span>${tags ? `<br>${escHtml(tags)}` : ''}<br>
+    <a href="https://bitjita.com/claims/${escHtml(id)}" target="_blank">View on bitjita ↗</a>
+    <div style="display:flex;gap:.7rem;margin-top:.4rem;font-size:11px">
+      <a href="#" onclick="event.preventDefault();switchTab('opencrafts')">← Back to open crafts</a>
+      <a href="#" onclick="event.preventDefault();bcClearFocus()" style="color:var(--text3)">Stop highlighting</a>
+    </div>`);
+  m.on('popupclose', () => { if (bcFocusMarker === m) bcClearFocus(); });   // popup gone → highlight gone
+  bcFocusMarker = m;
+  try { bcMap.invalidateSize(); } catch(e){}
+  bcMap.setView(ll, 2);
+  m.openPopup();
 }
 function bcPlacePlayer(id, x, z, dest){
   const t = bcTracked[id]; if (!t || x == null || z == null) return;
