@@ -247,6 +247,14 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--tcbg,var(--bg3));border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;padding:9px 6px}
 .tool-have{font-size:15px;font-weight:700;color:var(--text)}
 .task-need{font-size:11px;color:var(--text3);font-weight:500}   /* Tasks grid: the task's quantity when it differs by tier */
+/* Slayer (untiered) materials: compact chips, hideable */
+.task-chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px}
+.tool-cell.task-chip{position:relative;justify-content:flex-start;gap:6px;padding:.22rem .5rem .22rem .45rem;min-height:0}
+.task-chip-name{font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.task-chip-have{font-size:13px;flex-shrink:0}
+.task-chip-x{font-size:11px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity .1s;flex-shrink:0}
+.tool-cell.task-chip:hover .task-chip-x{opacity:.65}
+.task-chip-x:hover{opacity:1!important;color:var(--red-light)}
 .tool-cell.tool-ok .tool-have{color:var(--green-light)}
 .tool-cell.tool-low .tool-have{color:var(--amber-light)}
 .tool-cell.tool-zero{opacity:.45}
@@ -5897,14 +5905,15 @@ async function renderTasksUI(){
     const head = subtitle(`<i class="ti ti-route" style="color:var(--text3)"></i> ${escHtml(tr.name)}${tr.skillName ? ` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--text3)">· ${escHtml(tr.skillName)}</span>` : ''}`, '1.4rem');
     const jsq = s => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");   // family key inside an onclick string
     if (tr.list){
-      // Flat two-column table: material · have. Colour threshold = the smallest ask among its tasks.
-      const rows = tr.list.map(it => { const h = have(it.meta), minNeed = it.needs[0] || 1, cls = h === 0 ? 'tool-zero' : (h >= minNeed ? 'tool-ok' : 'tool-low');
+      // Compact wrapped chips (icon · name · have), several per line, each hideable via its × — hidden
+      // ones share the trader's column set so the chips row and "restore all" cover them too.
+      const hcol = taskColsHidden[tr.id] || new Set();
+      const cells = tr.list.filter(it => !hcol.has(it.meta.name)).map(it => { const h = have(it.meta), minNeed = it.needs[0] || 1, cls = h === 0 ? 'tool-zero' : (h >= minNeed ? 'tool-ok' : 'tool-low');
         const tip = `${escHtml(it.meta.name)} — tasks ask for ${it.needs.map(fmtCount).join(' / ')}`;
-        return `<div class="tool-grid-row" style="grid-template-columns:1fr 120px;--tc:var(--border2);--tcbg:var(--bg3)">
-          <div class="tool-cell" style="justify-content:flex-start;padding:.4rem .6rem;gap:7px" title="${tip}">${gameIconImg(it.meta.icon, 20)}<span style="font-size:13px;color:var(--text)">${escHtml(it.meta.name)}</span></div>
-          <div class="tool-cell ${cls}" title="${tip}"><span class="tool-have">${fmtCount(h)}</span></div>
-        </div>`; }).join('');
-      return head + `<div class="tool-grid" style="margin-top:0"><div class="tool-grid-row tool-grid-head" style="grid-template-columns:1fr 120px"><div class="tool-hcell" style="justify-content:flex-start;padding-left:.6rem">Material</div><div class="tool-hcell">Have</div></div>${rows}</div>`;
+        return `<div class="tool-cell task-chip ${cls}" title="${tip}">${gameIconImg(it.meta.icon, 16)}<span class="task-chip-name">${escHtml(it.meta.name)}</span><span class="tool-have task-chip-have">${fmtCount(h)}</span><i class="ti ti-x task-chip-x" title="Hide ${escHtml(it.meta.name)}" onclick="taskColHide('${tr.id}','${jsq(it.meta.name)}')"></i></div>`; }).join('');
+      const chips = [...hcol].sort().map(k => `<span class="ss-hchip" onclick="taskColRestore('${tr.id}','${jsq(k)}')">${escHtml(k)} <i class="ti ti-plus" style="font-size:11px"></i></span>`);
+      const hiddenRow = chips.length ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden: ${chips.join('')} <span class="ss-hall" onclick="taskRestoreAll('${tr.id}')">restore all</span></div>` : '';
+      return head + `<div class="task-chips">${cells}</div>` + hiddenRow;
     }
     const g = tr.grid, hid = taskRowsHidden[tr.id] || new Set(), hcol = taskColsHidden[tr.id] || new Set();
     const fams = g.families.filter(f => !hcol.has(f.key));
