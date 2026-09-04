@@ -246,6 +246,9 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .tool-tier-badge{font-size:15px;font-weight:800;color:var(--tc,var(--text))}
 .tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--tcbg,var(--bg3));border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;padding:9px 6px}
 .tool-have{font-size:15px;font-weight:700;color:var(--text)}
+.task-need{font-size:11px;color:var(--text3);font-weight:500}   /* Tasks grid: the task's quantity when it differs by tier */
+.task-list-row{display:flex;gap:6px;align-items:stretch}
+.task-list-items{display:flex;flex-wrap:wrap;gap:6px;flex:1}
 .tool-cell.tool-ok .tool-have{color:var(--green-light)}
 .tool-cell.tool-low .tool-have{color:var(--amber-light)}
 .tool-cell.tool-zero{opacity:.45}
@@ -980,7 +983,6 @@ let trackedPlayers = [];           // all players being tracked; player tabs ren
 let playerCollapsed = new Set();   // entityIds whose player section is collapsed (persisted)
 let playerPaused = new Set();      // entityIds excluded from live auto-refresh — "stop monitoring" (persisted)
 let playerAlertsMuted = new Set();  // entityIds excluded from sound/notification alerts (persisted). Independent of pause — a muted player still live-tracks (XP, etc.); you just don't get pinged for them.
-let taskTraderCollapsed = new Set(); // "<entityId>|<traderName>" keys collapsed in the Tasks tab (persisted)
 let skillsByPlayer = {};           // entityId -> {skills, rankings} — cached so the journey panel can read them
 let skillSession = {};             // entityId -> {skillId -> {startXp,startTs,curXp,curTs,active}} live XP tracking
 let skillCalcPrefs = {};           // "entityId:skillId" -> {target,mode,xpPerAction,secPerAction} (persisted)
@@ -995,7 +997,6 @@ let invSectionCollapsed = {}; // sectionKey -> bool
 let invLocCollapsed   = {};  // per-location-block key -> bool (collapse one inventory's items)
 let invLocHidden      = {};  // search mode: per-location-block key -> bool (whole result block hidden via its chip)
 let craftTabActive = 'active';
-let countdownInterval = null;
 let lastTaskData = null;   // cached task data for live refresh re-renders
 let passiveCraftTimer = null;
 let marketOrderFilter = 'all';
@@ -1177,8 +1178,7 @@ function savePlannerTreeCollapsed(){ safeSetItem('bc_planner_tree_collapsed', JS
 let bsShowMissingOnly = false;  // building-steps filter: hide steps already done/have (persisted)
 try { bsShowMissingOnly = localStorage.getItem('bc_bs_missing_only') === '1'; } catch(e){}
 function toggleBsMissingOnly(){ bsShowMissingOnly = !bsShowMissingOnly; try { safeSetItem('bc_bs_missing_only', bsShowMissingOnly?'1':'0'); } catch(e){} renderBuildingSteps(); }
-let tasksTrackedInvs  = new Set(); // Set of inv indices tracked for task material counts (null = all)
-let tasksInvsInited   = false;     // whether tasksTrackedInvs has been restored from localStorage
+let tasksTrackedInvs = null;    // Set of merged-invData indices tracked for Tasks (null = not init)
 let plannerTrackedInvs = null; // Set of inventory indices being tracked (null = not init)
 let plannerInvMap = {};        // itemId -> total qty from tracked inventories
 let plannerInvOpen = false;    // whether inventory section is expanded
@@ -1241,30 +1241,7 @@ function _savePlannerTrackedNames() {
 function _loadPlannerTrackedNames() {
   try { const v = localStorage.getItem('bc_planner_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
 }
-// Tracked task inventories are keyed per player as `${entityId}#${invIndex}` so the same-named
-// inventory on different players doesn't collide. Persisted by player+name. 'all' = track everything.
-function _taskInvNameKey(entityId, inv) { return entityId + '||' + _invNameKey(inv); }
-function _saveTasksTrackedNames() {
-  if (tasksTrackedInvs === null) { safeSetItem('bc_tasks_tracked', '"all"'); return; }
-  const names = [];
-  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => { if (tasksTrackedInvs.has(p.entityId + '#' + idx)) names.push(_taskInvNameKey(p.entityId, inv)); }); });
-  safeSetItem('bc_tasks_tracked', JSON.stringify(names));
-}
-function _resolveTrackedTasks(names) {
-  const nameSet = new Set(names), result = new Set();
-  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => {
-    if (_invKeys(inv).some(k => nameSet.has(p.entityId + '||' + k))) result.add(p.entityId + '#' + idx);
-  }); });
-  return result;
-}
-function allTaskInvKeys() {
-  const keys = [];
-  trackedPlayers.forEach(p => { const tp = taskPlayersById[p.entityId]; if (!tp) return; (tp.inv.inventories||[]).forEach((inv, idx) => keys.push(p.entityId + '#' + idx)); });
-  return keys;
-}
-function _loadTasksTrackedNames() {
-  try { const v = localStorage.getItem('bc_tasks_tracked'); return v ? JSON.parse(v) : null; } catch(e) { return null; }
-}
+function _loadTaskTrackedNames(){ try { const v = localStorage.getItem('bc_tasks_tracked2'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 
 // Is the bitjita fallback actually answering? The live layer holds the boot render on bitjita for a
 // moment while the relay's discovery settles (see liveSettleHold) — that hold must NEVER outlive a dead
@@ -1644,7 +1621,7 @@ function removeTrackedPlayer(id) {
   if (!trackedPlayers.length) {
     invData = null; plannerTrackedInvs = null; plannerInvMap = {};
     toolTrackedInvs = null;
-    tasksTrackedInvs = new Set(); tasksInvsInited = false;
+    tasksTrackedInvs = null;
     stopAllLive(); stopPassiveCraftTimer();
   }
   renderPlayerArea();
@@ -1752,17 +1729,6 @@ function isPlayerPaused(id){ return playerPaused.has(String(id)); }
 function isPlayerAlertsMuted(id){ return playerAlertsMuted.has(String(id)); }
 function savePlayerAlertsMuted(){ safeSetItem('bc_players_alerts_muted', JSON.stringify([...playerAlertsMuted])); }
 function savePlayerCollapsed(){ safeSetItem('bc_players_collapsed', JSON.stringify([...playerCollapsed])); }
-function saveTaskTraderCollapsed(){ safeSetItem('bc_task_traders_collapsed', JSON.stringify([...taskTraderCollapsed])); }
-// Collapse/expand a trader's task block (element-relative: same trader can appear under multiple players).
-function toggleTaskTrader(hdrEl){
-  const block = hdrEl.closest('.task-npc-block'); if (!block) return;
-  const key = block.dataset.tkey;
-  if (taskTraderCollapsed.has(key)) taskTraderCollapsed.delete(key); else taskTraderCollapsed.add(key);
-  saveTaskTraderCollapsed();
-  const open = !taskTraderCollapsed.has(key);
-  const chev = block.querySelector('.tnpc-chev'); if (chev) chev.className = 'ti ti-chevron-'+(open?'down':'right')+' tnpc-chev';
-  const body = block.querySelector('.task-npc-body'); if (body) body.style.display = open ? '' : 'none';
-}
 function savePlayerPaused(){ safeSetItem('bc_players_paused', JSON.stringify([...playerPaused])); }
 // Players that should be auto-refreshed by live-refresh (skips paused ones).
 function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.entityId)); }
@@ -2759,6 +2725,7 @@ function rebuildInvData(){
   plannerTrackedInvs = _reattachSel(plannerTrackedInvs, merged.inventories, sel && sel.planner, _loadPlannerTrackedNames());
   toolTrackedInvs    = _reattachSel(toolTrackedInvs,    merged.inventories, sel && sel.tools,   _loadToolTrackedNames());
   jsnTrackedInvs     = _reattachSel(jsnTrackedInvs,     merged.inventories, sel && sel.jsn,     _loadJsnTrackedNames());
+  tasksTrackedInvs   = _reattachSel(tasksTrackedInvs,   merged.inventories, sel && sel.tasks,   _loadTaskTrackedNames());
 }
 
 // ── ORDERS (market listings + collections) ──
@@ -3977,11 +3944,10 @@ function liveHandoffKick(){
   // every per-player result and re-render. Clearing the caches also defeats the paused-player
   // short-circuit in the silent path, so paused players get corrected too.
   craftFetchedAt = 0; ordersFetchedAt = 0;
-  taskPlayersById = {}; invalidateMergedInv();
+  invalidateMergedInv();
   // Selections are carried across by invalidateMergedInv as ENTITY-ID keys, which match whichever
   // shape the list is rebuilt in — so unlike before, the swap doesn't need to throw them away and
-  // re-read localStorage. Tasks re-resolves because its keys are per-player indices, not ids.
-  tasksInvsInited = false;
+  // re-read localStorage.
   refreshCacheBackedTab(true);
   // Warm the inventory path for every tracked player even when you're looking at another tab. The
   // FIRST fetchPlayerInvRelay per player pays place-name resolution plus the two house-scope
@@ -5738,24 +5704,27 @@ async function fetchPlayerInv(id) {
   return { ...d, inventories: [...(d.inventories || []), ...housingInvs] };
 }
 
-let taskPlayersById = {}; // entityId -> { player, travTasks, itemMetaMap, expires, inv }
-// Multi-player: fetch each tracked player's traveler-tasks + inventory. On a silent (live) refresh,
-// paused players keep their cached data. The `id` arg is ignored (kept for existing callers).
-// ── Traveler tasks from the relay ──
-// Assembled from four tables instead of one bitjita call:
-//   traveler_task_state      per player: { entity_id, player_entity_id, traveler_id, task_id, completed }
-//   traveler_task_desc       the task catalogue (321 rows) — description, requirements, rewards
-//   npc_desc                 traveler_id → trader name (7 rows)
-//   traveler_task_loop_timer when the rotation next turns over
-// The two desc tables are static reference data, so they're fetched once and cached for a week.
-const TASK_REF_KEY = 'bcTaskRefs', TASK_REF_TTL = 7*24*60*60*1000;
+// ── Traveler tasks — material planning grid ──
+// The game rolls each trader's offers at random from a fixed catalogue (server: a trader's pool is every
+// traveler_task_desc row whose skill is in the NPC's task_skill_check; a task is eligible from its
+// min_level up), so the useful view isn't "what am I being asked for right now" but "what CAN each
+// trader ask for, and how much of it do I hold". One Tool-crafting-style grid per trader: rows = tier
+// (a task's level band: min_level 1→T1, 20→T2 … 100→T10), columns = material family (the item name
+// minus its tier word — "Rough/Simple/… Timber" is one column; fish and scales change species per tier
+// so their TAG is the family), cells = pooled inventory count vs the task's quantity. Ramparte (Slayer)
+// asks for untiered monster drops by level band and renders as a list instead. Current offers, the
+// rotation timer and the per-task cards are gone by design (2026-09-04): offers are random, so the
+// catalogue-wide view is what helps. Hex Coin "tasks" aren't materials and are dropped.
+// Static reference data from two relay tables, fetched once and persisted for a week:
+//   traveler_task_desc { id, level_requirement{skill_id,min_level,max_level}, required_items, rewarded_items }
+//   npc_desc           { npc_type, name, task_skill_check }
+const TASK_REF_KEY = 'bcTaskRefs2', TASK_REF_TTL = 7*24*60*60*1000;   // v2: npcs carry task_skill_check
 let _taskRefs = null;
-// A task item stack: { item_id i32, quantity i32, item_type Sum(1 byte), durability Sum(some i32|none) }
 // A task item stack on the v1 JSON wire: [item_id, qty, [type], [durability]] (positional product).
 function taskStackFromJson(s){
-  if (!Array.isArray(s)) return { item_id: +s.item_id || 0, quantity: +s.quantity || 0, item_type: (Array.isArray(s.item_type) ? s.item_type[0] : +s.item_type) === 1 ? 'cargo' : 'item', durability: 0 };
+  if (!Array.isArray(s)) return { item_id: +s.item_id || 0, quantity: +s.quantity || 0, item_type: (Array.isArray(s.item_type) ? s.item_type[0] : +s.item_type) === 1 ? 'cargo' : 'item' };
   const t = Array.isArray(s[2]) ? s[2][0] : (+s[2] || 0);
-  return { item_id: +s[0], quantity: +s[1], item_type: t === 1 ? 'cargo' : 'item', durability: 0 };
+  return { item_id: +s[0], quantity: +s[1], item_type: t === 1 ? 'cargo' : 'item' };
 }
 async function relayTaskRefs(){
   if (_taskRefs) return _taskRefs;
@@ -5767,14 +5736,13 @@ async function relayTaskRefs(){
     try {
       const byT = await relayFetchOnce(rg, ['SELECT * FROM traveler_task_desc', 'SELECT * FROM npc_desc'], 12000);
       const tasks = {}, npcs = {};
-      (byT.npc_desc || []).forEach(n => npcs[n.npc_type] = n.name);
+      (byT.npc_desc || []).forEach(n => npcs[n.npc_type] = { name: n.name, skills: (n.task_skill_check || []).map(s => Array.isArray(s) ? +s[0] : +s).filter(s => s > 0) });
       (byT.traveler_task_desc || []).forEach(t => {
         const lr = t.level_requirement || {};
         tasks[t.id] = {
           levelRequirement: Array.isArray(lr) ? { skill_id: +lr[0], min_level: +lr[1], max_level: +lr[2] } : { skill_id: +lr.skill_id || 0, min_level: +lr.min_level || 0, max_level: +lr.max_level || 0 },
           requiredItems: (t.required_items || []).map(taskStackFromJson),
           rewardedItems: (t.rewarded_items || []).map(taskStackFromJson),
-          rewardedExperience: (x => Array.isArray(x) ? { skill_id: +x[0], quantity: +x[1] } : { skill_id: +x.skill_id || 0, quantity: +x.quantity || 0 })(t.rewarded_experience || {}),
           description: t.description || ''
         };
       });
@@ -5785,97 +5753,157 @@ async function relayTaskRefs(){
       }
     } catch(e){ /* mirror unreachable — try the next */ }
   }
-  return null;   // no mirror answered — caller falls back to bitjita
+  return null;   // no mirror answered — the tab says so; there is no bitjita source for the catalogue
 }
-// Task rows + the rotation timer are held subscriptions — this is a cache read; only the static desc
-// catalogue (7d-persisted) can hit the wire, once.
-async function fetchTasksRelay(playerId){
-  if (!usingCache()) throw new Error('live cache not ready');
-  const [refs, skills] = await Promise.all([relayTaskRefs(), relaySkillDescs()]);
-  if (!refs) throw new Error('task refs unavailable');
-  // rotation timer: scheduled_at is a Sum([tag, payload]) around a timestamp — dig the micros out
-  let expires = null;
-  liveRows('traveler_task_loop_timer', () => true).some(r => {
-    let v = r.scheduled_at;
-    if (Array.isArray(v)) v = v[1];
-    if (Array.isArray(v)) v = v[0];
-    if (v && typeof v === 'object') v = v.__timestamp_micros_since_unix_epoch__;
-    const n = Number(v);
-    if (isFinite(n) && n > 0){ expires = Math.floor(n / 1e6); return true; }
-    return false;
-  });
-  const tasks = [];
-  liveRows('traveler_task_state', r => String(r.player_entity_id) === String(playerId)).forEach(x => {
-    const d = refs.tasks[x.task_id] || {};
-    tasks.push({
-      entityId: String(x.entity_id), taskId: x.task_id, travelerId: x.traveler_id, completed: !!x.completed, regionId: x.__region,
-      description: d.description || '', levelRequirement: d.levelRequirement || null,
-      requiredItems: d.requiredItems || [], rewardedItems: d.rewardedItems || [],
-      rewardedExperience: d.rewardedExperience || null,
-      // The renderer guesses the trader from the description's first word when it has no name. We can do
-      // better: npc_desc maps traveler_id straight to the real name.
-      npcName: refs.npcs[x.traveler_id] || null,
-      skillName: (d.levelRequirement && skills && skills[d.levelRequirement.skill_id]) ? skills[d.levelRequirement.skill_id].name : ''
+// Item metadata for a task stack: craftingData (name/tier/tag/icon; cargo lives above GAME_CARGO_ID_BASE
+// there, while the task row carries the RAW id) with the itemdefs as fallback.
+function taskItemMeta(s, defs){
+  const byId = (craftingData && craftingData.itemsById) || {};
+  const c = byId[s.item_type === 'cargo' ? s.item_id + GAME_CARGO_ID_BASE : s.item_id];
+  if (c && c.name) return { name: c.name, tier: c.tier, tag: c.tag || '', icon: c.iconAssetName };
+  const d = defs ? (s.item_type === 'cargo' ? defs.cargos : defs.items)[s.item_id] : null;
+  return d ? { name: d.name || d.itemName || ('Item ' + s.item_id), tier: d.tier, tag: d.tag || '', icon: d.iconAssetName } : { name: 'Item ' + s.item_id, tier: -1, tag: '', icon: null };
+}
+// Tier words to strip off an item name to get its family. Built lazily: TOOL_ADJ & co. are declared
+// further down the file, so a top-level spread here would hit the TDZ at load.
+let _taskStrip = null;
+function taskStripWords(){
+  if (!_taskStrip) _taskStrip = new Set([...TOOL_ADJ, ...CONSUMABLE_ADJ, ...TOOL_METAL,
+    'Plain','Savory','Zesty','Succulent','Ambrosial','Flavorful','Delicious','Scrumptious','Delectable',   // cooked food tiers
+    'Briny','Muddy','Greenhorn','Azure','Rocky','Vibrant','Mossy','Murky','Abyssal','Divine'].map(s => s.toLowerCase()));   // fish tiers
+  return _taskStrip;
+}
+function taskFamilyKey(meta){
+  if (/fish|scale/i.test(meta.tag || '')) return meta.tag;   // species changes every tier — the tag is the family
+  const w = (meta.name || '').split(' ');
+  return (w.length > 1 && taskStripWords().has(w[0].toLowerCase())) ? w.slice(1).join(' ') : (meta.name || '');
+}
+const taskBandTier = min => min <= 1 ? 1 : Math.max(1, Math.min(10, Math.round(min / 10)));
+// Per-trader models: { id, name, skillName, grid:{tiers, families:[{key,constNeed}], cells[tier][family]={meta,need}} }
+// or, for untiered (Slayer) pools, { list:[{level, items:[{meta,need}]}] }.
+function taskTraderModels(refs, defs, skills){
+  const out = [];
+  Object.entries(refs.npcs || {}).forEach(([npcId, npc]) => {
+    if (!npc || !(npc.skills || []).length) return;
+    const pool = Object.values(refs.tasks).filter(t => npc.skills.includes(t.levelRequirement.skill_id));
+    if (!pool.length) return;
+    const skillName = skills && skills[npc.skills[0]] ? skills[npc.skills[0]].name : '';
+    const tasks = pool.map(t => ({ min: t.levelRequirement.min_level, items: t.requiredItems.map(s => ({ s, meta: taskItemMeta(s, defs) })).filter(x => x.meta.name !== 'Hex Coin') })).filter(t => t.items.length);
+    const untiered = tasks.every(t => t.items.every(x => !(x.meta.tier > 0)));
+    if (untiered){
+      const byLevel = {};
+      tasks.forEach(t => { const b = byLevel[t.min] = byLevel[t.min] || {}; t.items.forEach(x => { const k = x.meta.name; b[k] = { meta: x.meta, need: Math.max(b[k] ? b[k].need : 0, x.s.quantity) }; }); });
+      out.push({ id: npcId, name: npc.name, skillName, list: Object.keys(byLevel).map(Number).sort((a,b)=>a-b).map(l => ({ level: l, items: Object.values(byLevel[l]) })) });
+      return;
+    }
+    const cells = {}, fams = new Set();
+    tasks.forEach(t => {
+      const tier = taskBandTier(t.min), perFam = {};   // duplicate stacks of one item within a task add up
+      t.items.forEach(x => { const f = taskFamilyKey(x.meta); fams.add(f); perFam[f] = { meta: x.meta, need: (perFam[f] ? perFam[f].need : 0) + x.s.quantity }; });
+      const row = cells[tier] = cells[tier] || {};
+      Object.entries(perFam).forEach(([f, v]) => { if (!row[f] || v.need > row[f].need) row[f] = v; });   // several tasks on one material: show the larger ask
     });
+    const tiers = Object.keys(cells).map(Number).sort((a,b)=>a-b);
+    const families = [...fams].sort((a,b)=>a.localeCompare(b)).map(f => {
+      const needs = tiers.map(t => cells[t][f] ? cells[t][f].need : null).filter(n => n != null);
+      return { key: f, constNeed: (needs.length && needs.every(n => n === needs[0])) ? needs[0] : null };   // same at every tier → "×N" in the header
+    });
+    out.push({ id: npcId, name: npc.name, skillName, grid: { tiers, families, cells } });
   });
-  if (!tasks.length) throw new Error('no traveler_task_state');
-  // AWAIT the item defs — the cache read above is instant now, so unlike the old sweeping version this
-  // path can win the race against /itemdefs and would return nameless "Item 3100010" rows.
-  const defs = await loadGameItemDefs();
-  return { tasks, expirationTimestamp: expires, items: defs.items, cargo: defs.cargos };
+  out.sort((a,b) => ((a.list?1:0) - (b.list?1:0)) || a.name.localeCompare(b.name));   // grids first, the Slayer list last
+  return out;
 }
-async function loadTasks(id, silent=false) {
-  const el = document.getElementById('tasks-content');
-  if (!el) return;
-  if (!trackedPlayers.length) { taskPlayersById = {}; renderTasksUI(); return; }
-  if (!silent) el.innerHTML = loading();
-  // Inventory comes from the ONE store (a third independently-fetched copy is exactly how the tabs
-  // ended up disagreeing); `inv` below is a reference to it, not a separate fetch.
+// Hideable tier rows, one set per trader (same UX as the Tool tab), persisted as {npcId:[tiers]}.
+let taskRowsHidden = (() => { try { const v = JSON.parse(localStorage.getItem('bc_task_rows_hidden') || '{}'); const o = {}; Object.keys(v || {}).forEach(k => o[k] = new Set((v[k] || []).map(Number))); return o; } catch(e){ return {}; } })();
+function _saveTaskRowsHidden(){ const o = {}; Object.keys(taskRowsHidden).forEach(k => { if (taskRowsHidden[k].size) o[k] = [...taskRowsHidden[k]]; }); safeSetItem('bc_task_rows_hidden', JSON.stringify(o)); }
+function taskRowHide(npc, t){ (taskRowsHidden[npc] = taskRowsHidden[npc] || new Set()).add(t); _saveTaskRowsHidden(); renderTasksUI(); }
+function taskRowRestore(npc, t){ if (taskRowsHidden[npc]) taskRowsHidden[npc].delete(t); _saveTaskRowsHidden(); renderTasksUI(); }
+function taskRowRestoreAll(npc){ delete taskRowsHidden[npc]; _saveTaskRowsHidden(); renderTasksUI(); }
+// ── Inventory selector — the Tool tab's: keyed by merged-invData index, persisted by container id ──
+function _saveTaskTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (tasksTrackedInvs && tasksTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tasks_tracked2', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadTaskTrackedNames()))); }
+function toggleTaskInvLoc(idx){ if (!tasksTrackedInvs) tasksTrackedInvs = new Set(); if (tasksTrackedInvs.has(idx)) tasksTrackedInvs.delete(idx); else tasksTrackedInvs.add(idx); _saveTaskTrackedNames(); renderTasksUI(); }
+function toggleAllTaskInvs(all){ if (!invData) return; tasksTrackedInvs = all ? new Set((invData.inventories||[]).map((_,i)=>i)) : new Set(); _saveTaskTrackedNames(); renderTasksUI(); }
+function toggleTaskInvPanel(){ taskInvOpen = !taskInvOpen; const b = document.querySelector('#task-inv-wrap .planner-inv-body'); const c = document.getElementById('task-inv-chevron'); if (b) b.style.display = taskInvOpen ? '' : 'none'; if (c) c.className = 'ti ti-chevron-'+(taskInvOpen?'down':'right'); }
+async function refreshTaskInv(){ invalidateMergedInv(); await loadPlannerInventory(); renderTasksUI(); }
+function taskInvSelectorHtml(){
+  const invs = invData ? (invData.inventories||[]) : [];
+  const total = invs.length, tracked = tasksTrackedInvs ? tasksTrackedInvs.size : 0;
+  return `<div id="task-inv-wrap" class="task-inv-selector planner-inv-section">
+    <div class="planner-inv-hdr" onclick="toggleTaskInvPanel()">
+      <i id="task-inv-chevron" class="ti ti-chevron-${taskInvOpen?'down':'right'}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+      <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventory <span style="font-size:11px;font-weight:400;color:var(--text3)">(material counts, pooled)</span></div>
+      <span class="planner-inv-hdr-sub">${tracked}/${total} tracked</span>
+    </div>
+    <div class="planner-inv-body" style="display:${taskInvOpen?'':'none'}">
+      <div class="planner-inv-cats">${invData ? renderTrackedInvChips(tasksTrackedInvs||new Set(), 'toggleTaskInvLoc') : '<div style="font-size:12px;color:var(--text3)"><span class="dot-spin"></span> Loading…</div>'}</div>
+      <div class="planner-inv-footer">
+        <span>${tracked}/${total} tracked</span>
+        <span class="planner-inv-toggle" onclick="toggleAllTaskInvs(true)">All</span>
+        <span style="color:var(--text3)">·</span>
+        <span class="planner-inv-toggle" onclick="toggleAllTaskInvs(false)">None</span>
+        <span style="flex:1"></span>
+        <button class="btn ctrl-btn" onclick="refreshTaskInv()"><i class="ti ti-refresh"></i> Refresh</button>
+      </div>
+    </div>
+  </div>`;
+}
+// Entry point for the tab switch, the manual Refresh and the live inventory doorbell (silent). The `id`
+// arg is ignored (kept for existing callers) — everything is pooled across tracked players.
+async function loadTasks(id, silent=false){
+  const el = document.getElementById('tasks-content'); if (!el) return;
+  if (!trackedPlayers.length){ renderTasksUI(); return; }
+  if (!silent && !invData) el.innerHTML = loading();
   await loadInventories(silent);
-  await Promise.all(trackedPlayers.map(async p => {
-    if (silent && isPlayerPaused(p.entityId) && taskPlayersById[p.entityId]) return; // keep cached for paused
-    const inv = invByPlayer[p.entityId] || { inventories: [], items: {}, cargos: {} };
-    try {
-      const taskData = await fetchTasksRelay(p.entityId)
-        .catch(e => { if (bitjitaDisabled()) throw e; return apiFetch(`/api/players/${p.entityId}/traveler-tasks`); });
-      taskPlayersById[p.entityId] = { player: p, travTasks: taskData.tasks || [], itemMetaMap: {...(taskData.items||{}), ...(taskData.cargo||{})}, expires: taskData.expirationTimestamp, inv };
-    } catch(e) { if (!taskPlayersById[p.entityId]) taskPlayersById[p.entityId] = { player: p, travTasks: [], itemMetaMap: {}, expires: null, inv }; }
-  }));
-  Object.keys(taskPlayersById).forEach(eid => { if (!isPlayerTracked(eid)) delete taskPlayersById[eid]; }); // prune removed
-  // Restore tracked-inventory selection once (now that inventories are loaded for resolution)
-  if (!tasksInvsInited) {
-    tasksInvsInited = true;
-    const saved = _loadTasksTrackedNames();
-    if (saved === 'all') tasksTrackedInvs = null;
-    else if (Array.isArray(saved)) tasksTrackedInvs = _resolveTrackedTasks(saved);
+  renderTasksUI();
+}
+async function renderTasksUI(){
+  const el = document.getElementById('tasks-content'); if (!el) return;
+  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  try { await loadCraftingData(); } catch(e){}
+  if (!invData){
+    el.innerHTML = taskInvSelectorHtml() + '<div class="empty" style="padding:1.5rem"><span class="dot-spin"></span><span>Loading inventory…</span></div>';
+    loadPlannerInventory().then(() => renderTasksUI());
+    return;
   }
-  renderTasksUI();
-}
-
-
-function toggleTaskTrackedInv(key) {
-  if (tasksTrackedInvs === null) {
-    // null means "all" — convert to an explicit set of every inventory key minus this one
-    tasksTrackedInvs = new Set(allTaskInvKeys());
-    tasksTrackedInvs.delete(key);
-  } else {
-    if (tasksTrackedInvs.has(key)) tasksTrackedInvs.delete(key);
-    else tasksTrackedInvs.add(key);
+  const invs = invData.inventories || [];
+  if (tasksTrackedInvs === null){
+    const saved = _loadTaskTrackedNames();
+    if (saved === 'all') tasksTrackedInvs = new Set(invs.map((_,i)=>i));
+    else if (saved !== null) tasksTrackedInvs = _resolveTrackedByName(invs, saved);
+    else tasksTrackedInvs = new Set();
   }
-  _saveTasksTrackedNames();
-  renderTasksUI();
-}
-function toggleAllTaskInvs(state) {
-  tasksTrackedInvs = state ? null : new Set();
-  _saveTasksTrackedNames();
-  renderTasksUI();
-}
-function toggleTaskInvPanel() {
-  taskInvOpen = !taskInvOpen;
-  const body = document.querySelector('.task-inv-selector .planner-inv-body');
-  if (body) body.style.display = taskInvOpen ? '' : 'none';
-  const chevron = document.getElementById('task-inv-chevron');
-  if (chevron) chevron.className = `ti ti-chevron-${taskInvOpen ? 'down' : 'right'}`;
+  const [refs, defs, skills] = await Promise.all([relayTaskRefs(), loadGameItemDefs().catch(() => null), relaySkillDescs().catch(() => null)]);
+  const toolbar = `<div class="tasks-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem"><span style="flex:1"></span><button class="btn ctrl-btn" onclick="loadTasks(null)"><i class="ti ti-refresh"></i> Refresh</button></div>`;
+  if (!refs){ el.innerHTML = toolbar + taskInvSelectorHtml() + '<div class="empty" style="padding:1.5rem"><i class="ti ti-wifi-off"></i><span>Task catalogue unavailable — the relay isn\'t answering. Try Refresh in a moment.</span></div>'; updateLiveBtns(); return; }
+  const pool = poolInvByIndices(tasksTrackedInvs);
+  const have = meta => pool[(meta.name || '').toLowerCase()] || 0;
+  const subtitle = (txt, mt) => `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin:${mt||'0'} 0 .45rem">${txt}</div>`;
+  const cellHtml = (meta, need, constNeed) => {
+    const h = have(meta), cls = h === 0 ? 'tool-zero' : (h >= need ? 'tool-ok' : 'tool-low');
+    return `<div class="tool-cell ${cls}" title="${escHtml(meta.name)} — task asks for ${fmtCount(need)}">${gameIconImg(meta.icon, 22)}<span class="tool-have">${fmtCount(h)}</span>${constNeed ? '' : `<span class="task-need">/${fmtCount(need)}</span>`}</div>`;
+  };
+  const blocks = taskTraderModels(refs, defs, skills).map(tr => {
+    const head = subtitle(`<i class="ti ti-route" style="color:var(--text3)"></i> ${escHtml(tr.name)}${tr.skillName ? ` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--text3)">· ${escHtml(tr.skillName)}</span>` : ''}`, '1.4rem');
+    if (tr.list){
+      const rows = tr.list.map(r => `<div class="task-list-row">
+        <div class="tool-tier-cell" style="--tc:var(--border2);--tcbg:var(--bg3);min-width:56px;padding:.35rem .2rem"><span class="tool-tier-badge" style="font-size:12px">Lv ${r.level}+</span></div>
+        <div class="task-list-items">${r.items.map(it => { const h = have(it.meta), cls = h === 0 ? 'tool-zero' : (h >= it.need ? 'tool-ok' : 'tool-low');
+          return `<div class="tool-cell ${cls}" style="padding:.3rem .55rem;gap:5px" title="${escHtml(it.meta.name)} — task asks for ${fmtCount(it.need)}">${gameIconImg(it.meta.icon, 18)}<span style="font-size:12px;color:var(--text)">${escHtml(it.meta.name)}</span><span class="tool-have" style="font-size:13px">${fmtCount(h)}</span><span class="task-need">/${fmtCount(it.need)}</span></div>`; }).join('')}</div>
+      </div>`).join('');
+      return head + `<div class="tool-grid" style="margin-top:0">${rows}</div>`;
+    }
+    const g = tr.grid, hid = taskRowsHidden[tr.id] || new Set();
+    const header = `<div class="tool-grid-row tool-grid-head"><div class="tool-hcell">Tier</div>${g.families.map(f => `<div class="tool-hcell" title="${escHtml(f.key)}">${escHtml(f.key)}${f.constNeed ? ` <span class="tool-per">×${fmtCount(f.constNeed)}</span>` : ''}</div>`).join('')}</div>`;
+    const rows = g.tiers.filter(t => !hid.has(t)).map(t => {
+      const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
+      const cells = g.families.map(f => { const c = g.cells[t][f.key]; return c ? cellHtml(c.meta, c.need, f.constNeed) : '<div class="tool-cell tool-zero" title="No task for this at this tier">—</div>'; }).join('');
+      return `<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}"><div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span><i class="ti ti-x tool-row-x" title="Hide the T${t} row" onclick="taskRowHide('${tr.id}',${t})"></i></div>${cells}</div>`;
+    }).join('');
+    const hiddenRow = hid.size ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden tiers: ${[...hid].sort((a,b)=>a-b).map(t=>`<span class="ss-hchip" onclick="taskRowRestore('${tr.id}',${t})">T${t} <i class="ti ti-plus" style="font-size:11px"></i></span>`).join('')} <span class="ss-hall" onclick="taskRowRestoreAll('${tr.id}')">restore all</span></div>` : '';
+    return head + `<div class="tool-grid" style="margin-top:0;--cols:${g.families.length}">${header}${rows}</div>` + hiddenRow;
+  }).join('');
+  el.innerHTML = toolbar + taskInvSelectorHtml() + blocks;
+  updateLiveBtns();
 }
 
 function skillIcon(skill) {
@@ -5934,214 +5962,6 @@ function craftIcon(name) {
   if (s.includes('scroll') || s.includes('book') || s.includes('tome') || s.includes('manual')) return 'ti-book';
   if (s.includes('gem') || s.includes('crystal') || s.includes('jewel')) return 'ti-diamond';
   return 'ti-hammer';
-}
-
-function renderTasksUI() {
-  const el = document.getElementById('tasks-content');
-  if (!el) return;
-  if (countdownInterval) clearInterval(countdownInterval);
-  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
-
-  const players = trackedPlayers.map(p => taskPlayersById[p.entityId]).filter(Boolean);
-  // Merged item metadata (item ids are global, so merging across players is safe) for name lookups.
-  const itemMetaMap = {};
-  players.forEach(tp => Object.assign(itemMetaMap, tp.itemMetaMap || {}));
-  // Pooled inventory counts across the SELECTED inventories of all tracked players.
-  const inventoryMap = {};
-  players.forEach(tp => (tp.inv.inventories||[]).forEach((inv, idx) => {
-    const key = tp.player.entityId + '#' + idx;
-    if (tasksTrackedInvs !== null && !tasksTrackedInvs.has(key)) return;
-    (inv.pockets||[]).forEach(slot => { const s = slotContents(slot); if (!s) return; const k = s.itemType + ':' + s.itemId; inventoryMap[k] = (inventoryMap[k]||0) + s.quantity; });
-  }));
-  const expires = players.map(p => p.expires).find(Boolean) || null;
-
-  // ── Inventory selector UI — grouped by player, then personal/house/bank ──
-  function renderTaskInvSelector() {
-    let total = 0, tracked = 0;
-    players.forEach(tp => (tp.inv.inventories||[]).forEach((inv, idx) => { total++; if (tasksTrackedInvs === null || tasksTrackedInvs.has(tp.player.entityId + '#' + idx)) tracked++; }));
-    if (!total) return '';
-    const isOn = key => tasksTrackedInvs === null || tasksTrackedInvs.has(key);
-    const chip = (tp, inv, idx) => {
-      const key = tp.player.entityId + '#' + idx;
-      const label = inv.inventoryName || inv.buildingName || 'Unknown';
-      const claim = (!inv._isHousing && inv.claimName) ? inv.claimName : '';
-      const on = isOn(key);
-      return `<span class="planner-inv-loc${on?' active':''}" onclick="toggleTaskTrackedInv('${key}')"><i class="ti ti-${on?'checkbox':'square'}" style="font-size:13px"></i> ${escHtml(label)}${claim?`<span class="inv-loc-claim">${escHtml(claim)}</span>`:''}</span>`;
-    };
-    const renderCat = (title, icon, entries) => !entries.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${entries.join('')}</div></div>`;
-    const playerGroups = players.map(tp => {
-      const invs = tp.inv.inventories || [];
-      if (!invs.length) return '';
-      const cats = { personal:[], house:[], bank:[] };
-      invs.forEach((inv, idx) => { const c = inv._isHousing ? 'house' : (inv.claimName ? 'bank' : 'personal'); cats[c].push(chip(tp, inv, idx)); });
-      return `<div style="margin-bottom:.55rem">
-        <div style="font-size:12px;font-weight:600;color:var(--teal-light);margin-bottom:.25rem"><i class="ti ti-user" style="font-size:12px"></i> ${escHtml(playerName(tp.player))}</div>
-        ${renderCat('Personal','ti-user',cats.personal)}${renderCat('House','ti-home',cats.house)}${renderCat('Town Banks','ti-building-bank',cats.bank)}
-      </div>`;
-    }).join('');
-    return `<div class="task-inv-selector planner-inv-section">
-      <div class="planner-inv-hdr" onclick="toggleTaskInvPanel()">
-        <i id="task-inv-chevron" class="ti ti-chevron-${taskInvOpen ? 'down' : 'right'}" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
-        <div class="planner-inv-hdr-title"><i class="ti ti-backpack" style="color:var(--text3);font-size:14px"></i> Inventory <span style="font-size:11px;font-weight:400;color:var(--text3)">(material counts, pooled)</span></div>
-        <span class="planner-inv-hdr-sub">${tracked}/${total} tracked</span>
-      </div>
-      <div class="planner-inv-body" style="display:${taskInvOpen ? '' : 'none'}">
-        <div class="planner-inv-cats">${playerGroups}</div>
-        <div class="planner-inv-footer">
-          <span>${tracked}/${total} tracked</span>
-          <span class="planner-inv-toggle" onclick="toggleAllTaskInvs(true)">All</span>
-          <span style="color:var(--text3)">·</span>
-          <span class="planner-inv-toggle" onclick="toggleAllTaskInvs(false)">None</span>
-        </div>
-      </div>
-    </div>`;
-  }
-  function getCountdown() {
-    if (!expires) return '—';
-    const now = Math.floor(Date.now()/1000);
-    const diff = expires - now;
-    if (diff <= 0) return 'Expired';
-    const h = Math.floor(diff/3600), m = Math.floor((diff%3600)/60), s = diff%60;
-    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-  }
-
-  // ── Task completion helpers ──
-
-  // Normalize item_type to a consistent lookup key (handle string "cargo"/"item" vs numeric 0/1)
-  function invKey(type, id) {
-    const t = (type === 'cargo' || type === 'CARGO' || type === '1') ? 1
-            : (type === 'item'  || type === 'ITEM'  || type === '0') ? 0
-            : type;
-    return t + ':' + id;
-  }
-  // Get how many of a required item the player has (with quantity_fulfilled fallback)
-  function haveCount(ri) {
-    if (ri.quantity_fulfilled  !== undefined) return ri.quantity_fulfilled  || 0;
-    if (ri.fulfilledQuantity   !== undefined) return ri.fulfilledQuantity   || 0;
-    return inventoryMap[invKey(ri.item_type, ri.item_id)]
-        || inventoryMap[ri.item_type + ':' + ri.item_id]
-        || 0;
-  }
-  // Check API-level completion (any of several possible field names)
-  function isApiDone(t) {
-    const status = String(t.status || t.taskStatus || t.state || t.claimState || '').toLowerCase();
-    if (['completed','done','turned_in','accepted','claimed','finished','submitted','rewarded'].includes(status)) return true;
-    if (t.isCompleted || t.completed || t.turnedIn || t.isDone) return true;
-    if (t.completedAt != null || t.acceptedAt != null) return true;
-    return false;
-  }
-  function taskItemCard(ri) {
-    const meta   = itemMetaMap[ri.item_id] || itemMetaMap[String(ri.item_id)];
-    const name   = itemLabel(meta, ri.item_id, ri.item_type);
-    const needed = ri.quantity || 1;
-    const have   = haveCount(ri);
-    const met     = have >= needed;
-    const partial = !met && have > 0;
-    const statusColor = met ? 'var(--green-light)' : partial ? 'var(--amber-light)' : 'var(--text3)';
-    const statusIcon  = met ? 'ti-circle-check'    : partial ? 'ti-circle-half-2'   : 'ti-circle';
-    // Accent each row with its tier colour (the name already carries the "T# - " prefix via itemLabel).
-    const tco = (meta && meta.tier > 0) ? TIER_COLORS[Math.min(meta.tier, TIER_COLORS.length-1)] : null;
-    return `<div style="display:flex;align-items:center;gap:.4rem;padding:.28rem 0 .28rem .45rem;border-bottom:1px solid var(--border);border-left:3px solid ${tco?tco.c:'var(--border)'}">
-      <i class="ti ${statusIcon}" style="color:${statusColor};font-size:13px;flex-shrink:0"></i>
-      ${gameIconImg(meta?.iconAssetName, 18)}
-      <span style="font-size:12px;color:${tco?tco.c:'var(--text)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(name)}">${escHtml(name)}</span>
-      <span style="font-size:12px;font-weight:600;color:${statusColor};flex-shrink:0;white-space:nowrap;background:rgba(0,0,0,.22);padding:1px 6px;border-radius:4px">${fmtNum(have)}/${fmtNum(needed)}</span>
-    </div>`;
-  }
-
-  function extractTraderName(t) {
-    if (t.npcName) return t.npcName;
-    if (t.traderName) return t.traderName;
-    const desc = t.taskName || t.description || '';
-    const first = desc.trim().split(/\s+/)[0];
-    return first ? cap(first.toLowerCase()) : 'Traveler';
-  }
-
-  function npcBlocksHtml(travTasks, entityId) {
-  const byTrader = {};
-  travTasks.forEach(t => {
-    const key = extractTraderName(t);
-    if (!byTrader[key]) byTrader[key] = [];
-    byTrader[key].push(t);
-  });
-
-  return Object.entries(byTrader).map(([traderName, tasks]) => {
-    const skillName = tasks[0]?.skillName || tasks[0]?.category || '';
-
-    // Only trust the API — having enough items does NOT mean the task is handed in
-    const taskStatuses = tasks.map((t) => isApiDone(t));
-    const allComplete = taskStatuses.every(Boolean);
-    const doneCount = taskStatuses.filter(Boolean).length;
-
-    const taskCols = `<div style="display:flex;gap:.6rem;padding:.65rem .9rem;flex-wrap:wrap;border-top:1px solid var(--border)">
-      ${tasks.map((t, ti) => {
-        const items        = t.requiredItems || [];
-        const taskComplete = taskStatuses[ti];
-        // Use short task name only — t.description is flavor text ("Alesi needs food...")
-        const taskTitle    = t.taskName || t.title || t.shortDescription || t.shortName || '';
-        const bg     = taskComplete ? 'rgba(99,153,34,.07)' : 'var(--bg3)';
-        const border = taskComplete ? '1px solid rgba(99,153,34,.25)' : '1px solid var(--border)';
-        return `<div style="flex:1;min-width:160px;background:${bg};border:${border};border-radius:6px;padding:.45rem .55rem">
-          ${taskComplete
-            ? `${taskTitle ? `<div style="font-size:12px;color:var(--text2);margin-bottom:.3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%" title="${escHtml(taskTitle)}">${escHtml(taskTitle)}</div>` : ''}
-               <div style="font-size:10px;font-weight:600;color:var(--green-light);display:flex;align-items:center;gap:3px"><i class="ti ti-circle-check"></i> Complete</div>`
-            : (items.length ? items.map(ri => taskItemCard(ri)).join('') : '<div style="font-size:11px;color:var(--text3);padding:.1rem 0">No items required</div>')
-          }
-        </div>`;
-      }).join('')}
-    </div>`;
-
-    const tkey = entityId + '|' + traderName;
-    const collapsed = taskTraderCollapsed.has(tkey);
-    return `<div class="task-npc-block" data-tkey="${escHtml(tkey)}">
-      <div class="task-npc-header" onclick="toggleTaskTrader(this)">
-        <div style="display:flex;align-items:center;gap:.6rem">
-          <i class="ti ti-chevron-${collapsed?'right':'down'} tnpc-chev"></i>
-          <div>
-            <div class="task-npc-name">${escHtml(traderName)}</div>
-            <div class="task-npc-skill">${tasks.length} task${tasks.length!==1?'s':''} · ${escHtml(skillName)}</div>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:.5rem">
-          ${allComplete
-            ? '<span style="font-size:11px;font-weight:600;color:var(--green-light);background:rgba(99,153,34,.15);padding:3px 9px;border-radius:10px;display:flex;align-items:center;gap:4px"><i class="ti ti-circle-check"></i> All done</span>'
-            : doneCount > 0 ? `<span style="font-size:11px;color:var(--amber-light);background:rgba(186,117,23,.12);padding:3px 9px;border-radius:10px">${doneCount}/${tasks.length} done</span>` : ''}
-        </div>
-      </div>
-      <div class="task-npc-body" style="display:${collapsed?'none':''}">
-        ${allComplete ? `<div style="display:flex;align-items:center;gap:.5rem;padding:.55rem 1rem;background:rgba(99,153,34,.08);border-top:1px solid rgba(99,153,34,.2);font-size:12px;font-weight:500;color:var(--green-light)"><i class="ti ti-circle-check"></i> All ${tasks.length} task${tasks.length!==1?'s':''} complete — ready to turn in</div>` : ''}
-        ${taskCols}
-      </div>
-    </div>`;
-  }).join('');
-  }
-
-  // Each tracked player gets a collapsible section with their grouped traveler tasks.
-  const sections = trackedPlayers.map(p => {
-    const tp = taskPlayersById[p.entityId];
-    const inner = tp
-      ? (npcBlocksHtml(tp.travTasks, p.entityId) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No traveler tasks</span></div>')
-      : loading();
-    return playerSection(p, inner, 'psec-tasks-' + p.entityId);
-  }).join('');
-
-  el.innerHTML = `
-    <div class="tasks-toolbar">
-      ${expires
-        ? `<div class="task-rotation" style="margin-bottom:0;flex:1"><i class="ti ti-clock"></i> Next rotation in <span class="task-countdown" id="task-countdown">${getCountdown()}</span></div>`
-        : '<div style="flex:1"></div>'}
-      <button class="btn ctrl-btn" onclick="loadTasks(null)"><i class="ti ti-refresh"></i> Refresh</button>
-    </div>
-    ${renderTaskInvSelector()}
-    ${sections}`;
-
-  if (expires) {
-    countdownInterval = setInterval(() => {
-      const e = document.getElementById('task-countdown');
-      if (e) e.textContent = getCountdown();
-    }, 1000);
-  }
-  updateLiveBtns();
 }
 
 // ── MARKET ──
@@ -9857,7 +9677,7 @@ function invalidateMergedInv(){
   if (invData){
     const invs = invData.inventories || [];
     const keys = s => s ? invs.filter((_, i) => s.has(i)).map(_invNameKey) : null;
-    _pendingInvSel = { planner: keys(plannerTrackedInvs), tools: keys(toolTrackedInvs), jsn: keys(jsnTrackedInvs) };
+    _pendingInvSel = { planner: keys(plannerTrackedInvs), tools: keys(toolTrackedInvs), jsn: keys(jsnTrackedInvs), tasks: keys(tasksTrackedInvs) };
   }
   invData = null;
   invByPlayer = {};   // the derived view is rebuilt FROM this, so clearing only invData would just re-derive the same stale rows
@@ -11950,7 +11770,6 @@ async function renderGroupCraft(){
   try { const c = JSON.parse(localStorage.getItem('bc_players_collapsed') || '[]'); if (Array.isArray(c)) playerCollapsed = new Set(c.map(String)); } catch(e) {}
   try { const pz = JSON.parse(localStorage.getItem('bc_players_paused') || '[]'); if (Array.isArray(pz)) playerPaused = new Set(pz.map(String)); } catch(e) {}
   try { const am = JSON.parse(localStorage.getItem('bc_players_alerts_muted') || '[]'); if (Array.isArray(am)) playerAlertsMuted = new Set(am.map(String)); } catch(e) {}
-  try { const tc = JSON.parse(localStorage.getItem('bc_task_traders_collapsed') || '[]'); if (Array.isArray(tc)) taskTraderCollapsed = new Set(tc); } catch(e) {}
   try { const sc = JSON.parse(localStorage.getItem('bc_skill_calc') || '{}'); if (sc && typeof sc === 'object') skillCalcPrefs = sc; } catch(e) {}
   try { const oc = JSON.parse(localStorage.getItem('bc_opencraft_claims') || '[]'); if (Array.isArray(oc)) openCraftClaims = oc; } catch(e) {}
   try { const occ = JSON.parse(localStorage.getItem('bc_opencraft_custom') || '[]'); if (Array.isArray(occ)) ocCustomClaims = occ; } catch(e) {}
