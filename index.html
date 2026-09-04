@@ -49,6 +49,13 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .search-result-item{padding:7px 10px;font-size:12px;cursor:pointer;color:var(--text);display:flex;flex-direction:column;gap:1px}
 .search-result-item:hover{background:var(--bg4)}
 .search-result-item small{color:var(--text3);font-size:10px}
+/* Player lookup: topbar search + page header */
+.tb-search{width:230px}
+.tb-search input{padding:5px 10px 5px 28px;font-size:12px}
+.lk-head{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:.8rem;padding-bottom:.6rem;border-bottom:1px solid var(--border)}
+.lk-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.lk-name{font-size:18px;font-weight:700;color:var(--text)}
+.lk-meta{font-size:12px;color:var(--text3)}
 .shopping-chip{display:inline-flex;align-items:center;gap:.25rem;font-size:11px;background:var(--bg4);border:1px solid var(--border2);border-radius:12px;padding:2px 5px 2px 9px;color:var(--text);white-space:nowrap}
 .shopping-chip i{cursor:pointer;color:var(--text3);font-size:13px}
 .shopping-chip i:hover{color:var(--text)}
@@ -918,7 +925,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     </div>
   </div>
 
-  <div class="nav-section">
+  <div class="nav-section" id="main-nav">
     <div class="nav-label">Player</div>
     <div class="nav-item active" data-tab="skills" onclick="switchTab('skills')"><i class="ti ti-chart-bar"></i> Experience</div>
     <div class="nav-item" data-tab="inventory" onclick="switchTab('inventory')"><i class="ti ti-backpack"></i> Inventory</div>
@@ -938,6 +945,15 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     <div class="nav-item" data-tab="deals" onclick="switchTab('deals')"><i class="ti ti-trending-up"></i> Deals</div>
     <div class="nav-item" data-tab="jsn" onclick="switchTab('jsn')"><i class="ti ti-wallet"></i> Networth</div>
   </div>
+  <!-- Player lookup: swapped in for the main nav while /player/<id> is open -->
+  <div class="nav-section" id="lookup-nav" style="display:none">
+    <div class="nav-label">Player lookup</div>
+    <div class="nav-item" data-lsub="skills" onclick="lookupSub('skills')"><i class="ti ti-chart-bar"></i> Experience</div>
+    <div class="nav-item" data-lsub="inventory" onclick="lookupSub('inventory')"><i class="ti ti-backpack"></i> Inventory</div>
+    <div class="nav-item" data-lsub="crafting" onclick="lookupSub('crafting')"><i class="ti ti-hammer"></i> Crafts</div>
+    <div class="nav-item" data-lsub="orders" onclick="lookupSub('orders')"><i class="ti ti-receipt-2"></i> Orders</div>
+    <div class="nav-item" onclick="lookupExit()" style="margin-top:.6rem;color:var(--text3)"><i class="ti ti-arrow-left"></i> Back to app</div>
+  </div>
 </aside>
 
 <!-- MAIN -->
@@ -945,6 +961,11 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
   <div class="topbar">
     <div class="topbar-title" id="topbar-title">Experience</div>
     <div style="display:flex;align-items:center;gap:.75rem">
+      <div class="search-wrap tb-search" id="lookup-search-wrap" title="Look up any player without tracking them">
+        <i class="ti ti-user-search si"></i>
+        <input type="text" id="lookup-input" placeholder="Look up a player…" autocomplete="off">
+        <div class="search-results" id="lookup-results" style="display:none"></div>
+      </div>
       <div class="topbar-right" id="topbar-right"></div>
       <div style="position:relative">
         <button id="notif-bell-btn" class="notif-bell" onclick="toggleNotifPanel(event)" title="Notification history"><i class="ti ti-bell"></i><span id="notif-badge" class="notif-badge" style="display:none">0</span></button>
@@ -963,6 +984,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     <div id="tab-deals" style="display:none"><div id="deals-content"></div></div>
     <div id="tab-shopping" style="display:none"><div id="shopping-content"></div></div>
     <div id="tab-opencrafts" style="display:none"><div id="opencrafts-content"></div></div>
+    <div id="tab-lookup" style="display:none"><div id="lookup-content"></div></div>
     <div id="tab-map" style="display:none"><div id="map-content"></div></div>
     <div id="tab-planner" style="display:none"><div id="planner-content"></div></div>
     <div id="tab-tools" style="display:none"><div id="tool-content"></div></div>
@@ -1501,7 +1523,7 @@ function toggleRemovedPanel(btn) {
 }
 
 // ── NAV ──
-const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft'};
+const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft',lookup:'Player Lookup'};
 // ── Client-side routing ── the URL mirrors the active tab (/experience, /inventory, /crafts, …) through the
 // History API. The page never reloads on navigation, so the live layer (per-session sockets + cache) is
 // untouched: boot reads the path (a path wins over the remembered tab; "/" falls back to it), back/forward
@@ -1509,11 +1531,155 @@ const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'P
 // index.html (see proxy.js). Unknown paths land on the remembered tab and the URL is corrected.
 const TAB_ROUTES = { skills:'/experience', inventory:'/inventory', crafting:'/crafts', tasks:'/tasks', orders:'/orders', jsn:'/networth', opencrafts:'/open-crafts', market:'/market', deals:'/deals', shopping:'/shopping', map:'/map', planner:'/planner', tools:'/tools', groupcraft:'/group-craft' };
 const ROUTE_TABS = Object.fromEntries(Object.entries(TAB_ROUTES).map(([t, p]) => [p, t]));
-function routeTab(pathname){ const p = (pathname || '/').replace(/\/+$/, '') || '/'; return ROUTE_TABS[p] || null; }   // null = "/" or not a tab route
-function routeApply(){ const t = routeTab(location.pathname); if (t && document.getElementById('tab-' + t)) currentTab = t; }
-window.addEventListener('popstate', () => { const t = routeTab(location.pathname); if (t && t !== currentTab) switchTab(t); });   // the path is already right — switchTab won't push
+// A route is either a tab ({tab}) or a player lookup ({player, sub}) — /player/<id>[/experience|inventory|crafts|orders].
+function parseRoute(pathname){
+  const p = (pathname || '/').replace(/\/+$/, '') || '/';
+  const m = p.match(/^\/player\/(\d{5,})(?:\/(experience|inventory|crafts|orders))?$/);
+  if (m) return { player: m[1], sub: LOOKUP_SUBS_BY_PATH[m[2] || 'experience'] };
+  return ROUTE_TABS[p] ? { tab: ROUTE_TABS[p] } : {};
+}
+function routeTab(pathname){ return parseRoute(pathname).tab || null; }   // null = "/", a lookup, or unknown
+let _bootLookup = null;   // a /player route the page was opened on — rendered once boot has restored the roster
+function routeApply(){ const r = parseRoute(location.pathname); if (r.tab && document.getElementById('tab-' + r.tab)) currentTab = r.tab; if (r.player) _bootLookup = r; }
+window.addEventListener('popstate', () => {   // the path is already right — neither call pushes
+  const r = parseRoute(location.pathname);
+  if (r.player) openLookup(r.player, r.sub, { fromHistory: true });
+  else if (r.tab && (r.tab !== currentTab || lookupState.active)) switchTab(r.tab);
+});
+// ── Player lookup (/player/<id>[/experience|inventory|crafts|orders]) ──
+// A page for ONE player who need not be tracked: snapshot fetches, a Refresh button, nothing persisted
+// and no live-layer involvement — tracking is a subscription set (13-region redial, held queries, alerts),
+// far too heavy for a peek. Players outside the roster are fetched from bitjita as a single source (the
+// relay cache only holds roster rows, and a relay lookup would mean 13 scratch sockets on top of the 13
+// held ones — the measured connection cliff). A tracked player goes through the normal cache-backed
+// fetchers, so the same page works for anyone. The four views render with the SAME section renderers
+// the main tabs use, into the lookup's own container; the sidebar swaps to the lookup's nav meanwhile.
+let lookupState = { active:false, id:null, sub:'skills', info:null, data:{}, busy:{}, invQ:'' };
+const LOOKUP_SUBS = { skills:'experience', inventory:'inventory', crafting:'crafts', orders:'orders' };
+const LOOKUP_SUBS_BY_PATH = Object.fromEntries(Object.entries(LOOKUP_SUBS).map(([k, v]) => [v, k]));
+function lookupPath(id, sub){ return '/player/' + id + (sub && sub !== 'skills' ? '/' + LOOKUP_SUBS[sub] : ''); }
+function lookupSetMode(on){
+  lookupState.active = !!on;
+  const mn = document.getElementById('main-nav'), ln = document.getElementById('lookup-nav');
+  if (mn) mn.style.display = on ? 'none' : '';
+  if (ln) ln.style.display = on ? '' : 'none';
+}
+function openLookup(id, sub, opts){
+  id = String(id || '').trim(); if (!/^\d+$/.test(id)) return;
+  sub = LOOKUP_SUBS[sub] ? sub : 'skills';
+  if (lookupState.id !== id) lookupState = { active:true, id, sub, info:null, data:{}, busy:{}, invQ:'' };
+  lookupState.sub = sub;
+  const path = lookupPath(id, sub);
+  if (location.pathname !== path) history[(opts && (opts.replace || opts.fromHistory)) ? 'replaceState' : 'pushState']({ lookup:id, sub }, '', path);
+  switchTab('lookup');
+  lookupRender();
+  if (!lookupState.info) lookupLoadInfo();
+  lookupLoadSub(sub);
+}
+function lookupSub(sub){ if (lookupState.id) openLookup(lookupState.id, sub); }
+function lookupExit(){ let t = null; try { t = localStorage.getItem('bc_tab'); } catch(e){} switchTab(t && TAB_ROUTES[t] ? t : 'skills'); }
+async function lookupLoadInfo(){
+  const id = lookupState.id;
+  try { const d = await apiFetch('/api/players/' + id); if (lookupState.id !== id) return; lookupState.info = d.player || d || {}; }
+  catch(e){ if (lookupState.id !== id) return; lookupState.info = { error: (e && e.message) || 'lookup failed' }; }
+  lookupRenderHeader();
+}
+async function lookupLoadSub(sub, force){
+  const id = lookupState.id;
+  if (!force && lookupState.data[sub]){ lookupRender(); return; }
+  if (lookupState.busy[sub]) return;
+  lookupState.busy[sub] = true; lookupRender();
+  const tracked = isPlayerTracked(id);
+  try {
+    let d;
+    if (sub === 'skills'){
+      // Tracked players read the live cache (same vintage + session bookkeeping as the Skills tab);
+      // everyone else comes from bitjita. Rankings are bitjita-only either way.
+      const pP = tracked && usingCache() ? fetchSkillsRelay(id).catch(() => apiFetch('/api/players/' + id)) : apiFetch('/api/players/' + id);
+      const [p, r] = await Promise.all([pP, apiFetch('/api/players/' + id + '/skill-rankings').catch(() => ({}))]);
+      d = { pData: p, ranks: r };
+    }
+    else if (sub === 'inventory') d = tracked ? await fetchPlayerInv(id) : await fetchPlayerInvBitjita(id);
+    else if (sub === 'crafting')  d = tracked ? await fetchPlayerCrafts(id) : await fetchPlayerCraftsBitjita(id);
+    else if (sub === 'orders')    d = tracked ? await fetchPlayerMarket(id) : await fetchPlayerMarketBitjita(id);
+    if (lookupState.id !== id) return;
+    lookupState.data[sub] = d;
+  } catch(e){ if (lookupState.id === id) lookupState.data[sub] = { _error: (e && e.message) || 'failed to load' }; }
+  finally { if (lookupState.id === id){ lookupState.busy[sub] = false; lookupRender(); } }
+}
+function lookupRenderHeader(){
+  const el = document.getElementById('lookup-head'); if (!el) return;
+  const s = lookupState, info = s.info || {};
+  const name = info.username || info.userName || (s.info ? ('Player ' + s.id) : '…');
+  const tt = document.getElementById('topbar-title'); if (tt) tt.textContent = 'Player Lookup' + (info.username || info.userName ? ' — ' + (info.username || info.userName) : '');
+  const tracked = isPlayerTracked(s.id);
+  const rg = info.regionId != null ? info.regionId : null;
+  const online = info.signedIn === true;
+  let last = ''; try { if (info.lastLoginTimestamp) last = new Date(info.lastLoginTimestamp).toLocaleString(); } catch(e){}
+  let region = ''; try { const nm = rg != null && typeof liveRegionName === 'function' ? liveRegionName(rg) : null; region = rg == null ? '' : (nm ? nm + ' (R' + rg + ')' : 'R' + rg); } catch(e){ region = rg != null ? 'R' + rg : ''; }
+  el.innerHTML = '<div class="lk-head">' +
+    '<span class="lk-dot" style="background:' + (online ? 'var(--green-light)' : 'var(--text3)') + '" title="' + (online ? 'Online' : 'Offline') + '"></span>' +
+    '<span class="lk-name">' + escHtml(name) + '</span>' +
+    '<span class="lk-meta">' + escHtml(String(s.id)) + (region ? ' · ' + escHtml(region) : '') + (last ? ' · last login ' + escHtml(last) : '') + (info.error ? ' · <span style="color:var(--red-light)">' + escHtml(info.error) + '</span>' : '') + '</span>' +
+    '<span style="flex:1"></span>' +
+    (tracked ? '<span class="badge badge-tier" style="font-size:11px"><i class="ti ti-check"></i> Tracked</span>' : '<button class="btn ctrl-btn" onclick="lookupTrack()"><i class="ti ti-user-plus"></i> Track</button>') +
+    '<button class="btn ctrl-btn" onclick="lookupRefresh()"><i class="ti ti-refresh"></i> Refresh</button>' +
+    '<a class="btn ctrl-btn" href="https://bitjita.com/players/' + escHtml(String(s.id)) + '" target="_blank" title="Open on bitjita"><i class="ti ti-external-link"></i></a>' +
+    '</div>';
+}
+function lookupRender(){
+  const host = document.getElementById('lookup-content'); if (!host) return;
+  if (!document.getElementById('lookup-head')) host.innerHTML = '<div id="lookup-head"></div><div id="lookup-body"></div>';
+  lookupRenderHeader();
+  document.querySelectorAll('#lookup-nav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.lsub === lookupState.sub));
+  const body = document.getElementById('lookup-body');
+  const sub = lookupState.sub, d = lookupState.data[sub], id = lookupState.id;
+  if (!d){ body.innerHTML = lookupState.busy[sub] ? loading() : ''; return; }
+  if (d._error){ body.innerHTML = errBox(new Error(d._error)); return; }
+  if (sub === 'skills'){ body.innerHTML = skillsSectionHtml(d.pData, d.ranks, id); return; }
+  if (sub === 'inventory'){
+    body.innerHTML = '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap"><span style="flex:1"></span>' +
+      '<div class="inv-toggle" style="margin:0"><button class="' + (invViewMode === 'grouped' ? 'active' : '') + '" onclick="invViewMode=\'grouped\';lookupRender()"><i class="ti ti-layout-list"></i> Grouped</button><button class="' + (invViewMode === 'flat' ? 'active' : '') + '" onclick="invViewMode=\'flat\';lookupRender()"><i class="ti ti-layout-grid"></i> Flat</button></div>' +
+      '<div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="search" id="lookup-inv-search" value="' + escHtml(lookupState.invQ || '') + '" placeholder="Search items…" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px" oninput="lookupState.invQ=this.value;lookupRenderInvBody()"></div></div>' +
+      '<div id="lookup-inv-body"></div>';
+    lookupRenderInvBody(); return;
+  }
+  if (sub === 'crafting'){
+    body.innerHTML = '<div class="craft-tabs" style="display:inline-flex;margin-bottom:.6rem"><div class="craft-tab ' + (craftTabActive !== 'passive' ? 'active' : '') + '" onclick="craftTabActive=\'active\';lookupRender()"><i class="ti ti-flame"></i> Active</div><div class="craft-tab ' + (craftTabActive === 'passive' ? 'active' : '') + '" onclick="craftTabActive=\'passive\';lookupRender()"><i class="ti ti-clock"></i> Passive</div></div>' +
+      (craftingContentHtml(d) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>');
+    if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
+    return;
+  }
+  if (sub === 'orders'){ body.innerHTML = ordersContentHtml(d, id); return; }
+}
+function lookupRenderInvBody(){ const b = document.getElementById('lookup-inv-body'); if (!b || !lookupState.data.inventory) return; b.innerHTML = inventoryContentHtml(lookupState.data.inventory, lookupState.invQ || '', 'lk' + lookupState.id); }
+function lookupRefresh(){ const s = lookupState; if (!s.id) return; s.info = null; delete s.data[s.sub]; lookupLoadInfo(); lookupLoadSub(s.sub, true); }
+function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); lookupRenderHeader(); }
+// Topbar search → lookup (never tracks). Same endpoint as the sidebar search, its own dropdown.
+let _lookupSearchTimer = null, _lookupSearchBound = false;
+function initLookupSearch(){
+  const inp = document.getElementById('lookup-input'); if (!inp || _lookupSearchBound) return; _lookupSearchBound = true;
+  inp.addEventListener('input', () => { clearTimeout(_lookupSearchTimer); const q = inp.value.trim(); if (q.length < 2){ lookupHideResults(); return; } _lookupSearchTimer = setTimeout(() => lookupSearch(q), 400); });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter'){ const first = document.querySelector('#lookup-results .search-result-item[data-id]'); if (first) first.click(); else lookupSearch(inp.value.trim()); }
+    if (e.key === 'Escape') lookupHideResults();
+  });
+  document.addEventListener('click', e => { if (!e.target.closest('#lookup-search-wrap')) lookupHideResults(); });
+}
+function lookupHideResults(){ const el = document.getElementById('lookup-results'); if (el) el.style.display = 'none'; }
+async function lookupSearch(q){
+  const el = document.getElementById('lookup-results'); if (!el || !q) return;
+  el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">Searching…</div>'; el.style.display = 'block';
+  try {
+    const d = await apiFetch('/api/players?q=' + encodeURIComponent(q));
+    const players = (d.players || []).slice(0, 8);
+    if (!players.length){ el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">No players found</div>'; return; }
+    el.innerHTML = players.map(p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(p.username || p.userName || 'Unknown') + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>'; }).join('');
+  } catch(e){ el.innerHTML = '<div class="search-result-item" style="color:var(--red-light)">Search failed</div>'; }
+}
 function switchTab(tab, opts) {
   stopPassiveCraftTimer(); stopCraftActiveTick();   // both belong to the Crafts tab; re-armed by renderCraftingTab
+  lookupSetMode(tab === 'lookup');   // the lookup swaps the sidebar nav for its own; any other tab restores it
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
@@ -1521,7 +1687,7 @@ function switchTab(tab, opts) {
   document.getElementById('topbar-title').textContent = TAB_TITLES[tab] || tab;
   document.querySelector('main').classList.toggle('planner-mode', tab === 'planner');
   currentTab = tab;
-  safeSetItem('bc_tab', tab);
+  if (tab !== 'lookup') safeSetItem('bc_tab', tab);   // a lookup is never the remembered tab
   // URL mirrors the tab. The boot render REPLACES the entry it landed on (no phantom history step); a
   // back/forward navigation already carries the right path, so nothing is pushed for it.
   const routePath = TAB_ROUTES[tab];
@@ -5702,6 +5868,12 @@ async function fetchPlayerInvRelay(id){
 // only a fallback for when the relay is unreachable.
 async function fetchPlayerInv(id) {
   try { return await fetchPlayerInvRelay(id); } catch(e){ if (bitjitaDisabled()) throw e; /* relay down → fall back to bitjita */ }
+  return fetchPlayerInvBitjita(id);
+}
+// bitjita's per-player inventory + housing. Also the Player Lookup's source for players outside the roster:
+// the relay path reads the live cache, which only holds rows for tracked players (it returns EMPTY for
+// anyone else rather than throwing, so the lookup must come here directly).
+async function fetchPlayerInvBitjita(id) {
   const [d, housingList] = await Promise.all([
     apiFetch(`/api/players/${id}/inventories`),
     apiFetch(`/api/players/${id}/housing`).catch(() => [])
@@ -11801,6 +11973,7 @@ async function renderGroupCraft(){
   // Load saved shopping lists so in-memory state mirrors storage before the Shopping tab is opened.
   try { loadShoppingLists(); } catch(e) {}
   initSearch();
+  initLookupSearch();
   // Restore tracked players (migrating the old single-player key if present)
   try {
     let arr = JSON.parse(localStorage.getItem('bc_players') || 'null');
@@ -11833,7 +12006,7 @@ async function renderGroupCraft(){
   }
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
-  switchTab(currentTab, { replace: true });
+  if (_bootLookup) openLookup(_bootLookup.player, _bootLookup.sub, { replace: true }); else switchTab(currentTab, { replace: true });
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
   loadNotifHistory(); renderNotifBell();   // restore the notification-history bell
   startSkillActiveTick();        // expire the "active" skill tag between XP events (no REST poll needed)
