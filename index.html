@@ -353,6 +353,7 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .inv-locb-name{font-size:12.5px;font-weight:600;color:var(--text)}
 .inv-locb-sub{font-size:11px;color:var(--text3)}
 .inv-locb-count{font-size:11px;color:var(--teal-light);flex-shrink:0}
+.inv-locb-cap{font-size:11.5px;font-weight:600;color:var(--text2);padding:0 .1rem .35rem}   /* normal browsing, 2+ containers open: name only, not collapsible */
 /* Flat / grid view */
 .inv-items-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.5rem}
 .inv-item-card{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;display:flex;align-items:center;gap:.6rem}
@@ -989,7 +990,7 @@ let currentTab = 'skills';
 let xpThresholds = [];
 let invViewMode = 'grouped'; // grouped | flat
 let invSearch = '';
-let invSelectedChip   = {};  // sectionKey -> locIndex (-1 = none)
+let invSelectedChip   = {};  // sectionKey -> Set of expanded location ids (_invLocId) — any number open at once
 let invSectionCollapsed = {}; // sectionKey -> bool
 let invLocCollapsed   = {};  // per-location-block key -> bool (collapse one inventory's items)
 let craftTabActive = 'active';
@@ -2501,8 +2502,10 @@ function toggleInvLocBlock(k) {
   if (body) body.style.display = invLocCollapsed[k] ? 'none' : '';
   if (chev) chev.style.transform = invLocCollapsed[k] ? 'rotate(-90deg)' : '';
 }
-function selectInvChip(key, idx) {
-  invSelectedChip[key] = (invSelectedChip[key] === idx) ? -1 : idx;
+function selectInvChip(key, lk) {
+  // Multi-expand: each chip toggles its own container independently (was a single index = accordion).
+  const s = invSelectedChip[key] instanceof Set ? invSelectedChip[key] : (invSelectedChip[key] = new Set());
+  if (s.has(lk)) s.delete(lk); else s.add(lk);
   fillPlayerInvCached(key.split('|')[0]); // re-render just that player's section
 }
 
@@ -2639,17 +2642,22 @@ function inventoryContentHtml(data, q, pfx) {
     if (!locs.length) return '';
     const secKey = pfx + '|' + base;
     const collapsed = !!invSectionCollapsed[secKey];
-    const selIdx = invSelectedChip[secKey] ?? -1;
+    const sel = invSelectedChip[secKey] instanceof Set ? invSelectedChip[secKey] : new Set();
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map((loc, i) => { const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = (i===selIdx)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}',${i})"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
-    const expandedLocs = q ? sorted : (selIdx>=0 ? [sorted[selIdx]] : []);
-    // Each expanded location renders as its own labelled, separately-bordered, collapsible block so items
-    // from different inventories (e.g. two houses) never blend together — especially during a search.
+    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = sel.has(lk)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    // Searching expands every container with a hit; otherwise every chip the user has toggled open (any number).
+    const expandedLocs = q ? sorted : sorted.filter(loc => sel.has(_invLocId(secKey, loc)));
+    const multi = expandedLocs.length > 1;
+    // SEARCH: each hit container renders as its own labelled, collapsible block (inv-locb-hdr) so results
+    // from different inventories never blend, and one can be collapsed to see which container the rest
+    // sit in. NORMAL browsing: no bar — the active chip already names the container; when several are
+    // open at once a slim non-interactive caption keeps their grids apart.
     const locBlock = (loc) => {
       const sub = !loc.claimName ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
       const lk = _invLocId(secKey, loc);
-      const col = !!invLocCollapsed[lk];
       const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
+      if (!q) return `<div class="inv-chip-content">${multi ? `<div class="inv-locb-cap">${escHtml(loc.name)}${sub?` <span class="inv-locb-sub">${escHtml(sub)}</span>`:''}</div>` : ''}${renderItemGrid(mSlots)}</div>`;
+      const col = !!invLocCollapsed[lk];
       return `<div class="inv-chip-content">
         <div class="inv-locb-hdr" onclick="toggleInvLocBlock('${lk}')">
           <i class="ti ti-chevron-down" id="inv-locc-${lk}" style="font-size:12px;color:var(--text3);flex-shrink:0;transition:transform .2s;${col?'transform:rotate(-90deg)':''}"></i>
