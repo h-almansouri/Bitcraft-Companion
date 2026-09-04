@@ -2501,8 +2501,14 @@ function toggleInvLocBlock(k) {
   const chev = document.getElementById('inv-locc-' + k);
   if (body) body.style.display = invLocCollapsed[k] ? 'none' : '';
   if (chev) chev.style.transform = invLocCollapsed[k] ? 'rotate(-90deg)' : '';
+  const chip = document.getElementById('inv-chip-' + k);   // search-mode chip mirrors its block
+  if (chip) chip.classList.toggle('active', !invLocCollapsed[k]);
 }
 function selectInvChip(key, lk) {
+  // While searching, every hit container is already expanded and the chips mirror those result blocks:
+  // a chip click collapses/expands its block (same as the bar's chevron) and must NOT touch the
+  // normal-mode selection — it used to, invisibly, so the container popped open once the search cleared.
+  if ((invSearch || '').trim()) { toggleInvLocBlock(lk); return; }
   // Multi-expand: each chip toggles its own container independently (was a single index = accordion).
   const s = invSelectedChip[key] instanceof Set ? invSelectedChip[key] : (invSelectedChip[key] = new Set());
   if (s.has(lk)) s.delete(lk); else s.add(lk);
@@ -2644,7 +2650,7 @@ function inventoryContentHtml(data, q, pfx) {
     const collapsed = !!invSectionCollapsed[secKey];
     const sel = invSelectedChip[secKey] instanceof Set ? invSelectedChip[secKey] : new Set();
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = sel.has(lk)||(!!q); return `<div class="inv-loc-chip${active?' active':''}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocCollapsed[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     // Searching expands every container with a hit; otherwise every chip the user has toggled open (any number).
     const expandedLocs = q ? sorted : sorted.filter(loc => sel.has(_invLocId(secKey, loc)));
     const multi = expandedLocs.length > 1;
