@@ -247,8 +247,6 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .tool-cell{display:flex;align-items:center;justify-content:center;gap:7px;background:var(--tcbg,var(--bg3));border:1px solid var(--border);border-left:3px solid var(--tc,var(--border));border-radius:8px;padding:9px 6px}
 .tool-have{font-size:15px;font-weight:700;color:var(--text)}
 .task-need{font-size:11px;color:var(--text3);font-weight:500}   /* Tasks grid: the task's quantity when it differs by tier */
-.task-list-row{display:flex;gap:6px;align-items:stretch}
-.task-list-items{display:flex;flex-wrap:wrap;gap:6px;flex:1}
 .tool-cell.tool-ok .tool-have{color:var(--green-light)}
 .tool-cell.tool-low .tool-have{color:var(--amber-light)}
 .tool-cell.tool-zero{opacity:.45}
@@ -5791,17 +5789,24 @@ function taskTraderModels(refs, defs, skills){
     const tasks = pool.map(t => ({ min: t.levelRequirement.min_level, items: t.requiredItems.map(s => ({ s, meta: taskItemMeta(s, defs) })).filter(x => x.meta.name !== 'Hex Coin') })).filter(t => t.items.length);
     const untiered = tasks.every(t => t.items.every(x => !(x.meta.tier > 0)));
     if (untiered){
-      const byLevel = {};
-      tasks.forEach(t => { const b = byLevel[t.min] = byLevel[t.min] || {}; t.items.forEach(x => { const k = x.meta.name; b[k] = { meta: x.meta, need: Math.max(b[k] ? b[k].need : 0, x.s.quantity) }; }); });
-      out.push({ id: npcId, name: npc.name, skillName, list: Object.keys(byLevel).map(Number).sort((a,b)=>a-b).map(l => ({ level: l, items: Object.values(byLevel[l]) })) });
+      // One row per distinct material — a flat "how much do I have" list, no level bands. The asks across
+      // its tasks ride along for the tooltip and the colour threshold (smallest ask = "enough for a task").
+      const byName = {};
+      tasks.forEach(t => t.items.forEach(x => { const b = byName[x.meta.name] = byName[x.meta.name] || { meta: x.meta, needs: new Set() }; b.needs.add(x.s.quantity); }));
+      out.push({ id: npcId, name: npc.name, skillName, list: Object.values(byName).map(b => ({ meta: b.meta, needs: [...b.needs].sort((a,b)=>a-b) })).sort((a,b) => a.meta.name.localeCompare(b.meta.name)) });
       return;
     }
     const cells = {}, fams = new Set();
     tasks.forEach(t => {
-      const tier = taskBandTier(t.min), perFam = {};   // duplicate stacks of one item within a task add up
+      const perFam = {};   // duplicate stacks of one item within a task add up
       t.items.forEach(x => { const f = taskFamilyKey(x.meta); fams.add(f); perFam[f] = { meta: x.meta, need: (perFam[f] ? perFam[f].need : 0) + x.s.quantity }; });
-      const row = cells[tier] = cells[tier] || {};
-      Object.entries(perFam).forEach(([f, v]) => { if (!row[f] || v.need > row[f].need) row[f] = v; });   // several tasks on one material: show the larger ask
+      Object.entries(perFam).forEach(([f, v]) => {
+        // Row = the ITEM's own tier, not the task's level band: the same T1 Salt is asked for at every
+        // band and belongs in ONE cell (T1) holding all tracked Salt — not ten copies down the column.
+        const tier = v.meta.tier > 0 ? v.meta.tier : taskBandTier(t.min);
+        const row = cells[tier] = cells[tier] || {};
+        if (!row[f] || v.need > row[f].need) row[f] = v;   // several tasks on one material: show the larger ask
+      });
     });
     const tiers = Object.keys(cells).map(Number).sort((a,b)=>a-b);
     const families = [...fams].sort((a,b)=>a.localeCompare(b)).map(f => {
@@ -5819,6 +5824,12 @@ function _saveTaskRowsHidden(){ const o = {}; Object.keys(taskRowsHidden).forEac
 function taskRowHide(npc, t){ (taskRowsHidden[npc] = taskRowsHidden[npc] || new Set()).add(t); _saveTaskRowsHidden(); renderTasksUI(); }
 function taskRowRestore(npc, t){ if (taskRowsHidden[npc]) taskRowsHidden[npc].delete(t); _saveTaskRowsHidden(); renderTasksUI(); }
 function taskRowRestoreAll(npc){ delete taskRowsHidden[npc]; _saveTaskRowsHidden(); renderTasksUI(); }
+// Hideable material COLUMNS, one set per trader (× on header hover, like the Scrap grid), persisted as {npcId:[family keys]}.
+let taskColsHidden = (() => { try { const v = JSON.parse(localStorage.getItem('bc_task_cols_hidden') || '{}'); const o = {}; Object.keys(v || {}).forEach(k => o[k] = new Set(v[k] || [])); return o; } catch(e){ return {}; } })();
+function _saveTaskColsHidden(){ const o = {}; Object.keys(taskColsHidden).forEach(k => { if (taskColsHidden[k].size) o[k] = [...taskColsHidden[k]]; }); safeSetItem('bc_task_cols_hidden', JSON.stringify(o)); }
+function taskColHide(npc, key){ (taskColsHidden[npc] = taskColsHidden[npc] || new Set()).add(key); _saveTaskColsHidden(); renderTasksUI(); }
+function taskColRestore(npc, key){ if (taskColsHidden[npc]) taskColsHidden[npc].delete(key); _saveTaskColsHidden(); renderTasksUI(); }
+function taskRestoreAll(npc){ delete taskRowsHidden[npc]; delete taskColsHidden[npc]; _saveTaskRowsHidden(); _saveTaskColsHidden(); renderTasksUI(); }
 // ── Inventory selector — the Tool tab's: keyed by merged-invData index, persisted by container id ──
 function _saveTaskTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (tasksTrackedInvs && tasksTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tasks_tracked2', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadTaskTrackedNames()))); }
 function toggleTaskInvLoc(idx){ if (!tasksTrackedInvs) tasksTrackedInvs = new Set(); if (tasksTrackedInvs.has(idx)) tasksTrackedInvs.delete(idx); else tasksTrackedInvs.add(idx); _saveTaskTrackedNames(); renderTasksUI(); }
@@ -5884,23 +5895,31 @@ async function renderTasksUI(){
   };
   const blocks = taskTraderModels(refs, defs, skills).map(tr => {
     const head = subtitle(`<i class="ti ti-route" style="color:var(--text3)"></i> ${escHtml(tr.name)}${tr.skillName ? ` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--text3)">· ${escHtml(tr.skillName)}</span>` : ''}`, '1.4rem');
+    const jsq = s => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");   // family key inside an onclick string
     if (tr.list){
-      const rows = tr.list.map(r => `<div class="task-list-row">
-        <div class="tool-tier-cell" style="--tc:var(--border2);--tcbg:var(--bg3);min-width:56px;padding:.35rem .2rem"><span class="tool-tier-badge" style="font-size:12px">Lv ${r.level}+</span></div>
-        <div class="task-list-items">${r.items.map(it => { const h = have(it.meta), cls = h === 0 ? 'tool-zero' : (h >= it.need ? 'tool-ok' : 'tool-low');
-          return `<div class="tool-cell ${cls}" style="padding:.3rem .55rem;gap:5px" title="${escHtml(it.meta.name)} — task asks for ${fmtCount(it.need)}">${gameIconImg(it.meta.icon, 18)}<span style="font-size:12px;color:var(--text)">${escHtml(it.meta.name)}</span><span class="tool-have" style="font-size:13px">${fmtCount(h)}</span><span class="task-need">/${fmtCount(it.need)}</span></div>`; }).join('')}</div>
-      </div>`).join('');
-      return head + `<div class="tool-grid" style="margin-top:0">${rows}</div>`;
+      // Flat two-column table: material · have. Colour threshold = the smallest ask among its tasks.
+      const rows = tr.list.map(it => { const h = have(it.meta), minNeed = it.needs[0] || 1, cls = h === 0 ? 'tool-zero' : (h >= minNeed ? 'tool-ok' : 'tool-low');
+        const tip = `${escHtml(it.meta.name)} — tasks ask for ${it.needs.map(fmtCount).join(' / ')}`;
+        return `<div class="tool-grid-row" style="grid-template-columns:1fr 120px;--tc:var(--border2);--tcbg:var(--bg3)">
+          <div class="tool-cell" style="justify-content:flex-start;padding:.4rem .6rem;gap:7px" title="${tip}">${gameIconImg(it.meta.icon, 20)}<span style="font-size:13px;color:var(--text)">${escHtml(it.meta.name)}</span></div>
+          <div class="tool-cell ${cls}" title="${tip}"><span class="tool-have">${fmtCount(h)}</span></div>
+        </div>`; }).join('');
+      return head + `<div class="tool-grid" style="margin-top:0"><div class="tool-grid-row tool-grid-head" style="grid-template-columns:1fr 120px"><div class="tool-hcell" style="justify-content:flex-start;padding-left:.6rem">Material</div><div class="tool-hcell">Have</div></div>${rows}</div>`;
     }
-    const g = tr.grid, hid = taskRowsHidden[tr.id] || new Set();
-    const header = `<div class="tool-grid-row tool-grid-head"><div class="tool-hcell">Tier</div>${g.families.map(f => `<div class="tool-hcell" title="${escHtml(f.key)}">${escHtml(f.key)}${f.constNeed ? ` <span class="tool-per">×${fmtCount(f.constNeed)}</span>` : ''}</div>`).join('')}</div>`;
+    const g = tr.grid, hid = taskRowsHidden[tr.id] || new Set(), hcol = taskColsHidden[tr.id] || new Set();
+    const fams = g.families.filter(f => !hcol.has(f.key));
+    const header = `<div class="tool-grid-row tool-grid-head"><div class="tool-hcell">Tier</div>${fams.map(f => `<div class="tool-hcell ss-hcell" title="${escHtml(f.key)} — click × to hide"><span>${escHtml(f.key)}${f.constNeed ? ` <span class="tool-per">×${fmtCount(f.constNeed)}</span>` : ''}</span><i class="ti ti-x ss-col-x" title="Hide ${escHtml(f.key)}" onclick="taskColHide('${tr.id}','${jsq(f.key)}')"></i></div>`).join('')}</div>`;
     const rows = g.tiers.filter(t => !hid.has(t)).map(t => {
       const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
-      const cells = g.families.map(f => { const c = g.cells[t][f.key]; return c ? cellHtml(c.meta, c.need, f.constNeed) : '<div class="tool-cell tool-zero" title="No task for this at this tier">—</div>'; }).join('');
+      const cells = fams.map(f => { const c = g.cells[t][f.key]; return c ? cellHtml(c.meta, c.need, f.constNeed) : '<div class="tool-cell tool-zero" title="No task for this at this tier">—</div>'; }).join('');
       return `<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}"><div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span><i class="ti ti-x tool-row-x" title="Hide the T${t} row" onclick="taskRowHide('${tr.id}',${t})"></i></div>${cells}</div>`;
     }).join('');
-    const hiddenRow = hid.size ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden tiers: ${[...hid].sort((a,b)=>a-b).map(t=>`<span class="ss-hchip" onclick="taskRowRestore('${tr.id}',${t})">T${t} <i class="ti ti-plus" style="font-size:11px"></i></span>`).join('')} <span class="ss-hall" onclick="taskRowRestoreAll('${tr.id}')">restore all</span></div>` : '';
-    return head + `<div class="tool-grid" style="margin-top:0;--cols:${g.families.length}">${header}${rows}</div>` + hiddenRow;
+    const chips = [
+      ...[...hid].sort((a,b)=>a-b).map(t => `<span class="ss-hchip" onclick="taskRowRestore('${tr.id}',${t})">T${t} <i class="ti ti-plus" style="font-size:11px"></i></span>`),
+      ...[...hcol].sort().map(k => `<span class="ss-hchip" onclick="taskColRestore('${tr.id}','${jsq(k)}')">${escHtml(k)} <i class="ti ti-plus" style="font-size:11px"></i></span>`)
+    ];
+    const hiddenRow = chips.length ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden: ${chips.join('')} <span class="ss-hall" onclick="taskRestoreAll('${tr.id}')">restore all</span></div>` : '';
+    return head + `<div class="tool-grid" style="margin-top:0;--cols:${fams.length}">${header}${rows}</div>` + hiddenRow;
   }).join('');
   el.innerHTML = toolbar + taskInvSelectorHtml() + blocks;
   updateLiveBtns();
