@@ -230,6 +230,11 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .ss-hchip{display:inline-flex;align-items:center;gap:.2rem;background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:2px 8px;color:var(--text2);cursor:pointer}
 .ss-hchip:hover{border-color:var(--teal);color:var(--text)}
 .ss-hall{color:var(--teal-light);cursor:pointer;margin-left:.2rem}
+/* hideable tier ROWS (Tool tab): × appears on row hover, sits on the tier badge cell */
+.tool-tier-cell{position:relative}
+.tool-row-x{position:absolute;top:0;right:2px;font-size:11px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity .1s}
+.tool-grid-row:hover .tool-row-x{opacity:.65}
+.tool-row-x:hover{opacity:1!important;color:var(--red-light)}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
 .tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
@@ -10016,6 +10021,147 @@ function toolSSHideCol(k){ toolSSHidden.add(k); _saveToolSSHidden(); renderToolC
 function toolSSRestoreCol(k){ toolSSHidden.delete(k); _saveToolSSHidden(); renderToolCrafting(); }
 function toolSSRestoreAll(){ toolSSHidden.clear(); _saveToolSSHidden(); renderToolCrafting(); }
 
+// Hideable tier ROWS — one independent set per grid (user-specified: hiding T7 on the materials
+// grid must NOT hide it on the scrap grid). Same ×-on-hover / restore-chips UX as the ss columns.
+function _loadTierSet(k){ try { const v = JSON.parse(localStorage.getItem(k)||'[]'); return new Set(Array.isArray(v)?v.map(Number):[]); } catch(e){ return new Set(); } }
+let toolRowsHidden = { mat: _loadTierSet('bc_tool_rows_hidden_mat'), ss: _loadTierSet('bc_tool_rows_hidden_ss') };
+function _saveTierSet(which){ safeSetItem(which==='mat'?'bc_tool_rows_hidden_mat':'bc_tool_rows_hidden_ss', JSON.stringify([...toolRowsHidden[which]])); }
+function toolRowHide(which, t){ toolRowsHidden[which].add(t); _saveTierSet(which); renderToolCrafting(); }
+function toolRowRestore(which, t){ toolRowsHidden[which].delete(t); _saveTierSet(which); renderToolCrafting(); }
+function toolRowRestoreAll(which){ toolRowsHidden[which].clear(); _saveTierSet(which); renderToolCrafting(); }
+
+// ── Tool cost calculator ──
+// Per-tier craft counts typed by the user; each tier-t craft consumes 4 ingot + 2 plank + 2 leather
+// + 2 rope of that tier. Recipe item ids come from gcToolMats (exact ids from the actual recipes,
+// tool-input excluded, mats verified family-independent) with a display-name fallback. The
+// previous-tier TOOL input is deliberately NOT costed — in the upgrade-pyramid flow those are the
+// user's own lower-tier crafts, so the pyramid's true cost is the sum of per-tier material costs;
+// a ⚠ flags tiers whose count exceeds the tier below (inputs they'd have to source elsewhere).
+// Each cell shows two prices for the FULL quantity (e.g. 1,000 crafts → 4,000 ingots):
+//   buy-now — walking the live sell book cheapest-first until the quantity fills. lowest×N flatters
+//   large buys badly (the cheapest listing never has 4,000 ingots); a thin book prices what's listed
+//   and marks the cell with * instead of pretending.
+//   (7d)   — vwap7d via gcPrefetchPrices, the same bulk endpoint + cache Group Craft prices these
+//   exact mats with (measured <1% from plain avg7d on these high-volume commodities — see there).
+let toolCalcCounts = (() => { try { const v = JSON.parse(localStorage.getItem('bc_tool_calc_counts')||'[]'); return Array.from({length:10},(_,i)=>+v[i]||0); } catch(e){ return Array(10).fill(0); } })();
+let toolCalcBooks = {};   // itemId -> { sells:[{p,q}] price-ascending, depth, ts } — refreshed by "Price it" (fetchWithCache TTL applies)
+let toolCalcBusy = false, toolCalcMsg = '';
+function toolCalcSetCount(t, v){
+  toolCalcCounts[t-1] = Math.max(0, Math.floor(+v || 0));
+  safeSetItem('bc_tool_calc_counts', JSON.stringify(toolCalcCounts));
+  toolCalcRenderOut();
+}
+function toolCalcMats(t){   // -> [{itemId, qty(per craft), col(0..3 = Ingot/Plank/Leather/Rope)}]
+  let mats = [];
+  try { mats = gcToolMats('Axe', t) || []; } catch(e){}
+  if (!mats.length && craftingData){   // catalog unavailable → exact display-name lookup
+    const byName = {}; (craftingData.items||[]).forEach(i => { const k=(i.name||'').toLowerCase(); if (!(k in byName)) byName[k] = i.id; });
+    mats = TOOL_COLS.map(c => ({ itemId: byName[c.name(t).toLowerCase()], qty: c.per })).filter(m => m.itemId != null);
+  }
+  const colOf = id => { const nm = ((craftingData && craftingData.itemsById || {})[id]||{}).name||''; return /ingot/i.test(nm)?0:/plank/i.test(nm)?1:/leather/i.test(nm)?2:/rope/i.test(nm)?3:-1; };
+  return mats.map(m => ({ ...m, col: colOf(m.itemId) })).filter(m => m.col >= 0);
+}
+async function toolCalcPriceIt(){
+  if (toolCalcBusy) return;
+  const tiers = []; for (let t=1;t<=10;t++) if (toolCalcCounts[t-1] > 0) tiers.push(t);
+  if (!tiers.length){ toolCalcMsg = 'Enter craft counts first.'; toolCalcRenderOut(); return; }
+  try { await loadCraftingData(); } catch(e){}
+  const ids = [...new Set(tiers.flatMap(t => toolCalcMats(t).map(m => m.itemId)))];
+  if (!ids.length){ toolCalcMsg = 'Recipe data not loaded yet — try again in a moment.'; toolCalcRenderOut(); return; }
+  toolCalcBusy = true; let done = 0, idx = 0;
+  toolCalcMsg = `Fetching order books… 0/${ids.length}`; toolCalcRenderOut(true);
+  const price = o => +(o.price || o.priceThreshold || 0);
+  async function worker(){
+    while (idx < ids.length){
+      const id = ids[idx++];
+      try {
+        const det = await fetchWithCache('item', id, 15000);
+        const sells = (det.sellOrders||[]).map(o => ({ p: price(o), q: +o.quantity||0 })).filter(o => o.p>0 && o.q>0).sort((a,b)=>a.p-b.p);
+        toolCalcBooks[id] = { sells, depth: sells.reduce((s,o)=>s+o.q,0), ts: Date.now() };
+      } catch(e){ if (!toolCalcBooks[id]) toolCalcBooks[id] = { sells: [], depth: 0, ts: Date.now() }; }
+      done++; toolCalcMsg = `Fetching order books… ${done}/${ids.length}`; toolCalcRenderOut(true);
+    }
+  }
+  await Promise.all([ gcPrefetchPrices(ids).catch(()=>{}), ...Array.from({length: Math.min(6, ids.length)}, worker) ]);
+  toolCalcBusy = false; toolCalcMsg = ''; toolCalcRenderOut();
+}
+function toolCalcWalk(id, qty){   // cost of buying qty off the cached sell book, cheapest first
+  const b = toolCalcBooks[id]; if (!b) return null;
+  let cost = 0, rem = qty;
+  for (const o of b.sells){ const take = Math.min(rem, o.q); cost += take*o.p; rem -= take; if (!rem) break; }
+  return { cost, short: rem, depth: b.depth };
+}
+function toolCalcHtml(){
+  const inputs = Array.from({length:10},(_,i)=>{
+    const t=i+1, tco=TIER_COLORS[t]||TIER_COLORS[TIER_COLORS.length-1];
+    return `<label style="display:inline-flex;align-items:center;gap:.25rem">
+      <span class="tool-tier-badge" style="background:${tco.bg};border:1px solid ${tco.c};border-radius:6px;padding:0 5px;font-size:11px">T${t}</span>
+      <input type="number" min="0" step="1" value="${toolCalcCounts[i]||''}" placeholder="0" class="sj-input" style="width:62px" onchange="toolCalcSetCount(${t}, this.value)">
+    </label>`;
+  }).join('');
+  return `<div style="display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin:0 0 .55rem">${inputs}
+      <button class="btn ctrl-btn" onclick="toolCalcPriceIt()"><i class="ti ti-cash"></i> Price it</button>
+      <span id="tool-calc-prog" style="font-size:11px;color:var(--text3)">${escHtml(toolCalcMsg)}</span></div>
+    <div id="tool-calc-out"></div>`;
+}
+function toolCalcRenderOut(progressOnly){
+  const prog = document.getElementById('tool-calc-prog'); if (prog) prog.textContent = toolCalcMsg;
+  if (progressOnly) return;
+  const el = document.getElementById('tool-calc-out'); if (!el) return;
+  const tiers = []; for (let t=1;t<=10;t++) if (toolCalcCounts[t-1] > 0) tiers.push(t);
+  if (!tiers.length){ el.innerHTML = `<div style="font-size:12px;color:var(--text3)">Enter how many tools you're crafting at each tier — e.g. 1000 T1 upgraded into 1000 T2, of which 300 go on to T3 → type 1000 / 1000 / 300. Then <b>Price it</b>.</div>`; return; }
+  const itemsById = (craftingData && craftingData.itemsById) || {};
+  const header = `<div class="tool-grid-row tool-grid-head">
+    <div class="tool-hcell">Tier</div>
+    ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
+    <div class="tool-hcell">Total</div>
+  </div>`;
+  const rows = [];
+  let grandBuy = 0, grandAvg = 0, grandShort = false, grandAvgMiss = false, anyBook = false, oldestTs = null;
+  const money = (buy, avg, tip, short, avgMiss) => `<div class="tool-cell" title="${escHtml(tip)}" style="flex-direction:column;gap:1px;padding:.3rem .2rem">
+      <span class="tool-have">${buy == null ? '—' : fmtNum(buy) + (short ? '<span style="color:var(--amber-light)">*</span>' : '')}</span>
+      <span style="font-size:10px;color:var(--text3)">(${avgMiss ? '—' : fmtNum(avg)})</span>
+    </div>`;
+  for (const t of tiers){
+    const N = toolCalcCounts[t-1];
+    const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
+    const cellsByCol = [null,null,null,null];
+    let rowBuy = 0, rowAvg = 0, rowBooked = false, rowShort = false, rowAvgMiss = false;
+    toolCalcMats(t).forEach(m => {
+      const qty = m.qty * N;
+      const w = toolCalcWalk(m.itemId, qty);
+      const unitAvg = gcPriceCache[m.itemId];
+      const nm = (itemsById[m.itemId]||{}).name || ('Item '+m.itemId);
+      let tip = `${fmtCount(qty)}× ${nm}`;
+      if (w){ tip += ` — buy now ${fmtCount(w.cost)}` + (w.short ? ` (only ${fmtCount(qty - w.short)} of ${fmtCount(qty)} listed)` : ''); anyBook = true; rowBooked = true; rowBuy += w.cost; if (w.short) rowShort = true; if (toolCalcBooks[m.itemId] && (oldestTs == null || toolCalcBooks[m.itemId].ts < oldestTs)) oldestTs = toolCalcBooks[m.itemId].ts; }
+      else tip += ' — no order book yet (click Price it)';
+      if (unitAvg != null){ tip += ` · 7d ${fmtCount(unitAvg*qty)} @ ${(+unitAvg).toFixed(2)}/ea`; rowAvg += unitAvg*qty; }
+      else rowAvgMiss = true;
+      cellsByCol[m.col] = money(w ? w.cost : null, unitAvg != null ? unitAvg*qty : 0, tip, w && w.short, unitAvg == null);
+    });
+    const prevN = t > 1 ? toolCalcCounts[t-2] : null;
+    const warn = t > 1 && N > prevN;
+    const warnTip = warn ? `Crafting ${fmtCount(N)} T${t} tools consumes ${fmtCount(N)}× T${t-1} tools — only ${fmtCount(prevN)} being crafted below; the other ${fmtCount(N-prevN)} must come from elsewhere (not costed here)` : `${fmtCount(N)} crafts`;
+    grandBuy += rowBuy; grandAvg += rowAvg; if (rowShort) grandShort = true; if (rowAvgMiss) grandAvgMiss = true;
+    rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
+      <div class="tool-tier-cell" title="${escHtml(warnTip)}"><span class="tool-tier-badge">T${t}</span>${warn?'<i class="ti ti-alert-triangle" style="color:var(--amber-light);font-size:12px;margin-left:3px"></i>':''}</div>
+      ${cellsByCol.map(c => c || '<div class="tool-cell tool-zero">—</div>').join('')}
+      ${money(rowBooked ? rowBuy : null, rowAvg, `T${t}: ${fmtCount(N)} crafts — all four materials`, rowShort, rowAvgMiss)}
+    </div>`);
+  }
+  const grandRow = tiers.length > 1 ? `<div class="tool-grid-row" style="--tc:var(--border2);--tcbg:var(--bg3)">
+      <div class="tool-tier-cell"><span class="tool-tier-badge">Σ</span></div>
+      <div class="tool-cell tool-zero" style="grid-column:span 4;justify-content:flex-end;font-size:11px;color:var(--text3);padding-right:.6rem">everything below your inputs</div>
+      ${money(anyBook ? grandBuy : null, grandAvg, 'Grand total across all tiers', grandShort, grandAvgMiss)}
+    </div>` : '';
+  const notes = [];
+  if (grandShort) notes.push('<span style="color:var(--amber-light)">*</span> sell book too thin — priced only what\'s listed');
+  if (anyBook && oldestTs) notes.push(`books fetched ${Math.max(0, Math.round((Date.now()-oldestTs)/60000))}m ago`);
+  if (!anyBook) notes.push('click <b>Price it</b> to fetch live sell books + 7d prices');
+  el.innerHTML = `<div class="tool-grid" style="margin-top:0;--cols:${TOOL_COLS.length + 1}">${header}${rows.join('')}${grandRow}</div>`
+    + (notes.length ? `<div style="font-size:11px;color:var(--text3);margin-top:.35rem">${notes.join(' · ')}</div>` : '');
+}
+
 function _loadToolTrackedNames(){ try { const v = localStorage.getItem('bc_tool_tracked'); return v ? JSON.parse(v) : null; } catch(e){ return null; } }
 function _saveToolTrackedNames(){ if (!invData) return; const names=[]; (invData.inventories||[]).forEach((inv,i)=>{ if (toolTrackedInvs && toolTrackedInvs.has(i)) names.push(_invNameKey(inv)); }); safeSetItem('bc_tool_tracked', JSON.stringify(_mergeSavedKeys(names, invData.inventories||[], _loadToolTrackedNames()))); }
 function toggleToolInvLoc(idx){ if (!toolTrackedInvs) toolTrackedInvs = new Set(); if (toolTrackedInvs.has(idx)) toolTrackedInvs.delete(idx); else toolTrackedInvs.add(idx); _saveToolTrackedNames(); renderToolCrafting(); }
@@ -10078,8 +10224,14 @@ async function renderToolCrafting(){
     ${TOOL_COLS.map(c=>`<div class="tool-hcell">${c.label} <span class="tool-per">×${c.per}</span></div>`).join('')}
     <div class="tool-hcell">Tools</div>
   </div>`;
+  // A tier row hidden on THIS grid stays visible on the scrap grid (independent sets — see toolRowsHidden).
+  const tierCell = (t, which) => `<div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span><i class="ti ti-x tool-row-x" title="Hide the T${t} row" onclick="toolRowHide('${which}',${t})"></i></div>`;
+  const rowHiddenChips = which => toolRowsHidden[which].size
+    ? `<div class="ss-hidden-row"><i class="ti ti-eye-off" style="font-size:12px"></i> Hidden tiers: ${[...toolRowsHidden[which]].sort((a,b)=>a-b).map(t=>`<span class="ss-hchip" onclick="toolRowRestore('${which}',${t})">T${t} <i class="ti ti-plus" style="font-size:11px"></i></span>`).join('')} <span class="ss-hall" onclick="toolRowRestoreAll('${which}')">restore all</span></div>`
+    : '';
   const rows = [];
   for (let t=1; t<=10; t++){
+    if (toolRowsHidden.mat.has(t)) continue;
     const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
     const cells = TOOL_COLS.map(c => {
       const nm = c.name(t), h = have(nm);
@@ -10088,7 +10240,7 @@ async function renderToolCrafting(){
     }).join('');
     const tools = Math.min(...TOOL_COLS.map(c => Math.floor(have(c.name(t)) / c.per)));
     rows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
-      <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
+      ${tierCell(t, 'mat')}
       ${cells}
       <div class="tool-cell tool-tools ${tools>0?'tool-ok':'tool-zero'}"><span class="tool-have">${tools}</span></div>
     </div>`);
@@ -10102,6 +10254,7 @@ async function renderToolCrafting(){
   </div>`;
   const ssRows = [];
   for (let t=1; t<=10; t++){
+    if (toolRowsHidden.ss.has(t)) continue;
     const tco = TIER_COLORS[t] || TIER_COLORS[TIER_COLORS.length-1];
     const cells = ssCols.map((c, i) => {
       const nm = c.name(t), h = have(nm);
@@ -10110,7 +10263,7 @@ async function renderToolCrafting(){
       return `<div class="tool-cell ${cls}" style="${sep}" title="${escHtml(nm)}">${gameIconImg(nameIcon[nm.toLowerCase()], 22)}<span class="tool-have">${fmtCount(h)}</span></div>`;
     }).join('');
     ssRows.push(`<div class="tool-grid-row" style="--tc:${tco.c};--tcbg:${tco.bg}">
-      <div class="tool-tier-cell"><span class="tool-tier-badge">T${t}</span></div>
+      ${tierCell(t, 'ss')}
       ${cells}
     </div>`);
   }
@@ -10121,10 +10274,15 @@ async function renderToolCrafting(){
   el.innerHTML = toolInvSelectorHtml()
     + subtitle('<i class="ti ti-tools" style="color:var(--text3)"></i> Tool materials', '1rem')
     + `<div class="tool-grid" style="margin-top:0;--cols:${TOOL_COLS.length + 1}">${header}${rows.join('')}</div>`
+    + rowHiddenChips('mat')
     + subtitle('<i class="ti ti-recycle" style="color:var(--text3)"></i> Scrap · Seed · Solvent', '1.4rem')
     + `<div class="tool-grid ss" style="margin-top:0;--cols:${ssCols.length}">${ssHeader}${ssRows.join('')}</div>`
     + hiddenRow
-    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Scrap · Seed · Solvent</b> shows how many of each you're holding at that tier — hover a column header and click the <b>×</b> to hide it.</div>`;
+    + rowHiddenChips('ss')
+    + subtitle('<i class="ti ti-calculator" style="color:var(--text3)"></i> Tool cost calculator', '1.4rem')
+    + toolCalcHtml()
+    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Scrap · Seed · Solvent</b> shows how many of each you're holding at that tier — hover a column header and click the <b>×</b> to hide it; hover a row and click the <b>×</b> on its tier badge to hide the row (each table keeps its own hidden set). <b>Calculator</b>: type how many tools you're crafting per tier, hit Price it — each cell prices the full material quantity two ways: buying off the live sell books cheapest-first, and (7d average).</div>`;
+  toolCalcRenderOut();
   updateLiveBtns();
 }
 
