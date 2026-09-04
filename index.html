@@ -2671,11 +2671,15 @@ function selectInvChip(key, lk) {
   // While searching, every hit container is already expanded and the chips mirror those result blocks:
   // a chip click hides/shows its whole block (bar + items) and must NOT touch the normal-mode
   // selection — it used to, invisibly, so the container popped open once the search cleared.
-  if ((invSearch || '').trim()) { toggleInvLocWrap(lk); return; }
+  // A section key is '<player>|<section>' — or 'lk<player>|<section>' for the Player Lookup's own copy of
+  // the inventory, which has its own search box and its own body to repaint (there is no psec-inv-lk… section).
+  const pid = key.split('|')[0], isLookup = pid.startsWith('lk');
+  const q = isLookup ? (lookupState.invQ || '') : (invSearch || '');
+  if (q.trim()) { toggleInvLocWrap(lk); return; }
   // Multi-expand: each chip toggles its own container independently (was a single index = accordion).
   const s = invSelectedChip[key] instanceof Set ? invSelectedChip[key] : (invSelectedChip[key] = new Set());
   if (s.has(lk)) s.delete(lk); else s.add(lk);
-  fillPlayerInvCached(key.split('|')[0]); // re-render just that player's section
+  if (isLookup) lookupRenderInvBody(); else fillPlayerInvCached(pid); // re-render just that section
 }
 
 // ── Multi-player Inventory (one collapsible section per tracked player) ──────────
