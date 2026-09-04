@@ -1502,7 +1502,17 @@ function toggleRemovedPanel(btn) {
 
 // ── NAV ──
 const TAB_TITLES = {skills:'Experience',inventory:'Player Inventory',crafting:'Player Crafts',tasks:'Tasks',orders:'Market Orders',jsn:'Networth',opencrafts:'Open Crafts',market:'Market',deals:'Deals',shopping:'Shopping List',map:'Map',planner:'Crafting Planner',tools:'Tool Crafting',groupcraft:'Group Craft'};
-function switchTab(tab) {
+// ── Client-side routing ── the URL mirrors the active tab (/experience, /inventory, /crafts, …) through the
+// History API. The page never reloads on navigation, so the live layer (per-session sockets + cache) is
+// untouched: boot reads the path (a path wins over the remembered tab; "/" falls back to it), back/forward
+// switch tabs, and a reload keeps you where you were because the proxy answers any page-like path with
+// index.html (see proxy.js). Unknown paths land on the remembered tab and the URL is corrected.
+const TAB_ROUTES = { skills:'/experience', inventory:'/inventory', crafting:'/crafts', tasks:'/tasks', orders:'/orders', jsn:'/networth', opencrafts:'/open-crafts', market:'/market', deals:'/deals', shopping:'/shopping', map:'/map', planner:'/planner', tools:'/tools', groupcraft:'/group-craft' };
+const ROUTE_TABS = Object.fromEntries(Object.entries(TAB_ROUTES).map(([t, p]) => [p, t]));
+function routeTab(pathname){ const p = (pathname || '/').replace(/\/+$/, '') || '/'; return ROUTE_TABS[p] || null; }   // null = "/" or not a tab route
+function routeApply(){ const t = routeTab(location.pathname); if (t && document.getElementById('tab-' + t)) currentTab = t; }
+window.addEventListener('popstate', () => { const t = routeTab(location.pathname); if (t && t !== currentTab) switchTab(t); });   // the path is already right — switchTab won't push
+function switchTab(tab, opts) {
   stopPassiveCraftTimer(); stopCraftActiveTick();   // both belong to the Crafts tab; re-armed by renderCraftingTab
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -1512,6 +1522,11 @@ function switchTab(tab) {
   document.querySelector('main').classList.toggle('planner-mode', tab === 'planner');
   currentTab = tab;
   safeSetItem('bc_tab', tab);
+  // URL mirrors the tab. The boot render REPLACES the entry it landed on (no phantom history step); a
+  // back/forward navigation already carries the right path, so nothing is pushed for it.
+  const routePath = TAB_ROUTES[tab];
+  if (routePath && location.pathname !== routePath) history[(opts && opts.replace) ? 'replaceState' : 'pushState']({ tab }, '', routePath);
+  document.title = (TAB_TITLES[tab] || tab) + ' · Bitcraft Companion';
   if (tab === 'market') renderMarket();
   else if (tab === 'deals') renderDeals();
   else if (tab === 'shopping') {
@@ -11782,6 +11797,7 @@ async function renderGroupCraft(){
 (async () => {
   try { await restorePrefsFromServer(); } catch(e) {}
   try { const t = localStorage.getItem('bc_tab'); if (t && document.getElementById('tab-'+t)) currentTab = t; } catch(e) {}
+  routeApply();   // a path in the address bar wins over the remembered tab
   // Load saved shopping lists so in-memory state mirrors storage before the Shopping tab is opened.
   try { loadShoppingLists(); } catch(e) {}
   initSearch();
@@ -11817,7 +11833,7 @@ async function renderGroupCraft(){
   }
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
-  switchTab(currentTab);
+  switchTab(currentTab, { replace: true });
   loadAlerts(); startAlerts();  // background notification poller (independent of the current tab)
   loadNotifHistory(); renderNotifBell();   // restore the notification-history bell
   startSkillActiveTick();        // expire the "active" skill tag between XP events (no REST poll needed)

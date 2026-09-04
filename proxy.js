@@ -383,8 +383,15 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Serve the app itself
-  if (req.url === '/' || req.url === '/index.html') {
+  // Serve the app itself — for "/" and for any client-side ROUTE the browser navigates to directly.
+  // The app's paths (/inventory, /crafts, /player/…) exist only inside the page; a reload, bookmark or
+  // pasted link asks the server for them and must get index.html back (the app reads the path and opens
+  // the right tab). Gated on `Accept: text/html` — a browser navigation — so the app's own fetch() calls
+  // (Accept */*) to same-named JSON routes such as /deals and /market, and file requests (a dot in the
+  // last segment), are untouched. /api/… is never a page.
+  const urlPath = req.url.split('?')[0];
+  const isPageNav = req.method === 'GET' && /\btext\/html\b/.test(req.headers.accept || '') && !urlPath.startsWith('/api/') && !/\.[A-Za-z0-9]+$/.test(urlPath);
+  if (urlPath === '/' || urlPath === '/index.html' || isPageNav) {
     const filePath = path.join(__dirname, 'index.html');
     const data = fs.readFileSync(filePath);
     // The app is one big file, so this is the first and largest thing every visitor downloads.
