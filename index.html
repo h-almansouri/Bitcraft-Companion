@@ -2133,8 +2133,8 @@ async function renderExperienceTab() {
 //     skill_category Sum(0=None,1=Profession,2=Adventure) → 1 byte, max_level i32 }
 // Buff catalogue: buff_id → { name, beneficial }. Two static desc tables joined in JS —
 // active_buff_state gives a buff_id, buff_desc maps that to a buff_type_id + `beneficial`, and
-// buff_type_desc supplies the display name the alert matches /food/i against. Static, so fetched once
-// and persisted for a week exactly like skill_desc.
+// buff_type_desc supplies the display name the alert's food scope matches /^food/i against (anchored —
+// see checkPlayerBuffs). Static, so fetched once and persisted for a week exactly like skill_desc.
 const BUFF_DESC_KEY = 'bcBuffDescs', BUFF_DESC_TTL = 7*24*60*60*1000;
 let _buffDescs = null;
 async function relayBuffDescs(){
@@ -10687,7 +10687,16 @@ async function checkPlayerBuffs(p){
       const d = await apiFetch(`/api/players/${id}/buffs`);
       active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
     }
-    const wanted = b => t.scope==='food' ? /food/i.test(b.buffName||b.buffTypeName||'') : b.beneficial;
+    // "Food buff only" = name STARTS with "Food" (anchored). The old unanchored /food/i also caught the
+    // "Tree Food Stash" buff family added 2026-09 — 10 tier variants, beneficial, duration 20s, pulsing
+    // constantly — and pinged "lost ..." on every lapse. Measured against the live catalog: exactly two
+    // real food types exist ("Food Buffs" 180s, "Food Regen" 900s) and both start with "Food", while the
+    // stash starts with "Tree" (or its tiered display name "Simple/Fine/… Tree Food Stash" — either way
+    // never "Food…"). buff_type_desc.category can't discriminate instead: 62 of 75 types share category 1.
+    // The beneficial guard keeps a hypothetical "Food Poisoning"-style debuff out too.
+    const wanted = b => t.scope==='food'
+      ? (/^food/i.test(b.buffName||b.buffTypeName||'') && b.beneficial !== false)
+      : b.beneficial;
     const watched = active.filter(wanted);
     const cur = new Set(watched.map(b => b.buffTypeName || b.buffName));
     if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
