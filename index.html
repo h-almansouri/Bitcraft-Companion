@@ -235,6 +235,9 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .tool-row-x{position:absolute;top:0;right:2px;font-size:11px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity .1s}
 .tool-grid-row:hover .tool-row-x{opacity:.65}
 .tool-row-x:hover{opacity:1!important;color:var(--red-light)}
+/* calculator count inputs: no number spinners */
+.tc-num::-webkit-outer-spin-button,.tc-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.tc-num{-moz-appearance:textfield;appearance:textfield}
 .tool-cell.tool-cost .tool-have{color:var(--amber-light)}
 .tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
@@ -10096,20 +10099,27 @@ function toolCalcHtml(){
     const t=i+1, tco=TIER_COLORS[t]||TIER_COLORS[TIER_COLORS.length-1];
     return `<label style="display:inline-flex;align-items:center;gap:.25rem">
       <span class="tool-tier-badge" style="background:${tco.bg};border:1px solid ${tco.c};border-radius:6px;padding:0 5px;font-size:11px">T${t}</span>
-      <input type="number" min="0" step="1" value="${toolCalcCounts[i]||''}" placeholder="0" class="sj-input" style="width:62px" onchange="toolCalcSetCount(${t}, this.value)">
+      <input type="number" min="0" step="1" value="${toolCalcCounts[i]||''}" placeholder="0" class="sj-input tc-num" style="width:62px" onchange="toolCalcSetCount(${t}, this.value)">
     </label>`;
   }).join('');
   return `<div style="display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin:0 0 .55rem">${inputs}
       <button class="btn ctrl-btn" onclick="toolCalcPriceIt()"><i class="ti ti-cash"></i> Price it</button>
+      <button class="btn ctrl-btn" onclick="toolCalcReset()" title="Set every tier back to 0"><i class="ti ti-eraser"></i> Reset</button>
       <span id="tool-calc-prog" style="font-size:11px;color:var(--text3)">${escHtml(toolCalcMsg)}</span></div>
     <div id="tool-calc-out"></div>`;
+}
+function toolCalcReset(){
+  toolCalcCounts = Array(10).fill(0);
+  safeSetItem('bc_tool_calc_counts', JSON.stringify(toolCalcCounts));
+  toolCalcMsg = '';
+  renderToolCrafting();   // full re-render so the input fields themselves clear
 }
 function toolCalcRenderOut(progressOnly){
   const prog = document.getElementById('tool-calc-prog'); if (prog) prog.textContent = toolCalcMsg;
   if (progressOnly) return;
   const el = document.getElementById('tool-calc-out'); if (!el) return;
   const tiers = []; for (let t=1;t<=10;t++) if (toolCalcCounts[t-1] > 0) tiers.push(t);
-  if (!tiers.length){ el.innerHTML = `<div style="font-size:12px;color:var(--text3)">Enter how many tools you're crafting at each tier — e.g. 1000 T1 upgraded into 1000 T2, of which 300 go on to T3 → type 1000 / 1000 / 300. Then <b>Price it</b>.</div>`; return; }
+  if (!tiers.length){ el.innerHTML = ''; return; }
   const itemsById = (craftingData && craftingData.itemsById) || {};
   const header = `<div class="tool-grid-row tool-grid-head">
     <div class="tool-hcell">Tier</div>
@@ -10118,6 +10128,7 @@ function toolCalcRenderOut(progressOnly){
   </div>`;
   const rows = [];
   let grandBuy = 0, grandAvg = 0, grandShort = false, grandAvgMiss = false, anyBook = false, oldestTs = null;
+  const grandCol = [0,1,2,3].map(() => ({ buy:0, avg:0, short:false, avgMiss:false, booked:false }));
   const money = (buy, avg, tip, short, avgMiss) => `<div class="tool-cell" title="${escHtml(tip)}" style="flex-direction:column;gap:1px;padding:.3rem .2rem">
       <span class="tool-have">${buy == null ? '—' : fmtNum(buy) + (short ? '<span style="color:var(--amber-light)">*</span>' : '')}</span>
       <span style="font-size:10px;color:var(--text3)">(${avgMiss ? '—' : fmtNum(avg)})</span>
@@ -10137,6 +10148,9 @@ function toolCalcRenderOut(progressOnly){
       else tip += ' — no order book yet (click Price it)';
       if (unitAvg != null){ tip += ` · 7d ${fmtCount(unitAvg*qty)} @ ${(+unitAvg).toFixed(2)}/ea`; rowAvg += unitAvg*qty; }
       else rowAvgMiss = true;
+      const g = grandCol[m.col];
+      if (w){ g.buy += w.cost; g.booked = true; if (w.short) g.short = true; }
+      if (unitAvg != null) g.avg += unitAvg*qty; else g.avgMiss = true;
       cellsByCol[m.col] = money(w ? w.cost : null, unitAvg != null ? unitAvg*qty : 0, tip, w && w.short, unitAvg == null);
     });
     const prevN = t > 1 ? toolCalcCounts[t-2] : null;
@@ -10151,7 +10165,7 @@ function toolCalcRenderOut(progressOnly){
   }
   const grandRow = tiers.length > 1 ? `<div class="tool-grid-row" style="--tc:var(--border2);--tcbg:var(--bg3)">
       <div class="tool-tier-cell"><span class="tool-tier-badge">Σ</span></div>
-      <div class="tool-cell tool-zero" style="grid-column:span 4;justify-content:flex-end;font-size:11px;color:var(--text3);padding-right:.6rem">everything below your inputs</div>
+      ${grandCol.map((g, ci) => money(g.booked ? g.buy : null, g.avg, `${TOOL_COLS[ci].label} total across all tiers`, g.short, g.avgMiss)).join('')}
       ${money(anyBook ? grandBuy : null, grandAvg, 'Grand total across all tiers', grandShort, grandAvgMiss)}
     </div>` : '';
   const notes = [];
@@ -10280,8 +10294,7 @@ async function renderToolCrafting(){
     + hiddenRow
     + rowHiddenChips('ss')
     + subtitle('<i class="ti ti-calculator" style="color:var(--text3)"></i> Tool cost calculator', '1.4rem')
-    + toolCalcHtml()
-    + `<div class="tool-note"><i class="ti ti-info-circle"></i> Each tool needs 4 ingots, 2 planks, 2 leather, 2 rope (T2+ also needs the previous-tier tool). <b>Tools</b> = how many you could craft from the resources shown (ignores the previous-tier tool). <b>Scrap · Seed · Solvent</b> shows how many of each you're holding at that tier — hover a column header and click the <b>×</b> to hide it; hover a row and click the <b>×</b> on its tier badge to hide the row (each table keeps its own hidden set). <b>Calculator</b>: type how many tools you're crafting per tier, hit Price it — each cell prices the full material quantity two ways: buying off the live sell books cheapest-first, and (7d average).</div>`;
+    + toolCalcHtml();
   toolCalcRenderOut();
   updateLiveBtns();
 }
