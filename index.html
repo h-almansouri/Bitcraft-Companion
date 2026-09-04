@@ -180,6 +180,10 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .skill-card-name i{font-size:15px;color:var(--text3)}
 .skill-card-level{font-size:18px;font-weight:700;color:var(--text)}
 .skill-card-row{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:.4rem}
+.skill-tool{display:flex;align-items:center;gap:5px;font-size:11px;margin:.1rem 0 .45rem;min-height:18px}
+.skill-tool-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.skill-tool .badge{font-size:9px;padding:1px 5px;flex-shrink:0}
+.skill-tool-none{color:var(--text3)}
 .skill-bar-wrap{background:var(--bg4);border-radius:3px;height:4px;overflow:hidden;margin-bottom:.35rem}
 .skill-bar{height:100%;background:var(--teal);border-radius:3px;transition:width .5s}
 .skill-xp-row{font-size:11px;color:var(--text2)}
@@ -2440,6 +2444,59 @@ async function seedSkillSession(id) {
   skillsByPlayer[id] = { skills, rankings: {} };
   updateSkillSession(id, skills);
 }
+// ── Equipped tool per profession (Experience cards) ──
+// Every upgradeable tool carries a profession tag in the game data ("Miner Tool" … 12 tags, 85 items each =
+// 10 tiers × rarities), so belt→skill is a tag lookup, not a name list. The belt is read from whatever
+// inventory the app already holds for the player (invByPlayer for tracked, the lookup's snapshot for a lookup)
+// or fetched once and cached 5 min; cards render a placeholder and are patched in place when it lands.
+const TOOL_TAG_SKILL = { 'Forester Tool':'Forestry', 'Carpenter Tool':'Carpentry', 'Mason Tool':'Masonry', 'Miner Tool':'Mining', 'Blacksmith Tool':'Smithing', 'Leatherworker Tool':'Leatherworking', 'Hunter Tool':'Hunting', 'Tailor Tool':'Tailoring', 'Farmer Tool':'Farming', 'Fisher Tool':'Fishing', 'Forager Tool':'Foraging', 'Scholar Tool':'Scholar' };
+const toolbeltCache = {};   // entityId -> { ts, bySkill } | { ts, pending }
+const TOOLBELT_TTL = 5*60*1000;
+function toolbeltIndex(inv){   // skill name -> { name, tier, rarity, icon } from an inventory payload's Toolbelt
+  const out = {};
+  if (!inv) return out;
+  const items = inv.items || {}, byId = (craftingData && craftingData.itemsById) || {};
+  (inv.inventories || []).filter(x => /^tool ?belt$/i.test(x.inventoryName || '')).forEach(x => {
+    (x.pockets || []).forEach(pk => {
+      const s = slotContents(pk); if (!s || +s.itemType === 1) return;
+      const m = items[s.itemId] || {}, c = byId[s.itemId] || {};
+      const skill = TOOL_TAG_SKILL[c.tag || m.tag || '']; if (!skill) return;
+      const cand = { name: c.name || m.name || ('Item ' + s.itemId), tier: +(c.tier != null ? c.tier : m.tier) || 0, rarity: String(m.rarityStr || c.rarity || m.rarity || ''), icon: c.iconAssetName || m.iconAssetName };
+      if (!out[skill] || cand.tier > out[skill].tier) out[skill] = cand;   // two of one type on the belt: show the higher tier
+    });
+  });
+  return out;
+}
+function toolbeltFor(entityId){   // synchronous: whatever is already in hand, else null
+  entityId = String(entityId);
+  const c = toolbeltCache[entityId];
+  if (c && c.bySkill && Date.now() - c.ts < TOOLBELT_TTL) return c.bySkill;
+  const lk = (typeof lookupState !== 'undefined' && lookupState.id === entityId && lookupState.data.inventory && !lookupState.data.inventory._error) ? lookupState.data.inventory : null;
+  const inv = invByPlayer[entityId] || lk;
+  if (inv){ const bySkill = toolbeltIndex(inv); toolbeltCache[entityId] = { ts: Date.now(), bySkill }; return bySkill; }
+  return null;
+}
+function ensureToolbelt(entityId){   // fetch once, then patch every rendered card for this player
+  entityId = String(entityId);
+  const c = toolbeltCache[entityId];
+  if (c && (c.pending || (c.bySkill && Date.now() - c.ts < TOOLBELT_TTL))) return;
+  toolbeltCache[entityId] = { ts: Date.now(), pending: true };
+  const p = isPlayerTracked(entityId) ? fetchPlayerInv(entityId) : fetchPlayerInvBitjita(entityId);
+  p.then(inv => { toolbeltCache[entityId] = { ts: Date.now(), bySkill: toolbeltIndex(inv) }; patchSkillTools(entityId); })
+   .catch(() => { toolbeltCache[entityId] = { ts: Date.now(), bySkill: {} }; patchSkillTools(entityId); });
+}
+function skillToolHtml(entityId, skillName){
+  const belt = toolbeltFor(entityId);
+  if (!belt){ ensureToolbelt(entityId); return '<span class="skill-tool-none"><span class="dot-spin"></span></span>'; }
+  const t = belt[skillName];
+  if (!t) return '<span class="skill-tool-none">No tool</span>';
+  const rar = (t.rarity || '').toLowerCase();
+  const col = t.tier > 0 ? TIER_COLORS[Math.min(t.tier, TIER_COLORS.length-1)].c : 'var(--text2)';
+  return gameIconImg(t.icon, 16) + '<span class="skill-tool-name" style="color:' + col + '" title="' + escHtml(t.name) + '">' + escHtml(t.name) + '</span>' + (rar ? '<span class="badge badge-' + escHtml(rar) + '">' + escHtml(cap(rar)) + '</span>' : '');
+}
+function patchSkillTools(entityId){
+  document.querySelectorAll('.skill-tool[data-entity="' + entityId + '"]').forEach(el => { el.innerHTML = skillToolHtml(entityId, el.dataset.skillname); });
+}
 function skillsSectionHtml(pData, rankData, entityId) {
     const player = pData.player || {};
     entityId = String(entityId != null ? entityId : (player.entityId || ''));
@@ -2480,6 +2537,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
             </div>
             <div class="skill-card-level">${sk.level}</div>
           </div>
+          ${sk.category === 'Profession' ? `<div class="skill-tool" data-entity="${entityId}" data-skillname="${escHtml(sk.name)}">${skillToolHtml(entityId, sk.name)}</div>` : ''}
           <div class="skill-card-row">
             <span>Progress</span><span>${sk.pct}%</span>
           </div>
@@ -2789,8 +2847,11 @@ function equipmentSectionHtml(data, pfx){
     <div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="eq-sets">${cards.join('')}</div></div>
   </div>`;
 }
+// Toolbelt items that never upgrade — Cooking Pot, Mallet, Hexite Tuner — are noise on the belt view. Hidden
+// from the DISPLAY only (the Toolbelt inventory), never from the data other tabs pool.
+const TOOLBELT_HIDE = new Set(['cooking pot', 'mallet', 'hexite tuner']);
 function inventoryContentHtml(data, q, pfx) {
-  const allSlots = buildSlotsFor(data);
+  const allSlots = buildSlotsFor(data).filter(s => !(/^tool ?belt$/i.test(s.inventoryName || '') && TOOLBELT_HIDE.has(((s.meta && s.meta.name) || '').toLowerCase())));
   q = (q||'').toLowerCase();
   const equip = q ? '' : equipmentSectionHtml(data, pfx);   // hidden while searching, so results stay focused
   if (!allSlots.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
@@ -5870,8 +5931,17 @@ async function fetchPlayerInvRelay(id){
 // Fetch a player's full inventory as {inventories, items, cargos} — without touching any global.
 // The relay covers everything (personal, banks, house storage, vehicles); the bitjita path below is
 // only a fallback for when the relay is unreachable.
+// Regions removed from the game (the temporary "Islands", gone 2026-09). Containers there — Town Banks,
+// houses, recovery chests — still come back in the data but can never be reached, so both fetch paths drop
+// them at the source: the Inventory tab, the lookup, and every pooled count derived from invData (Planner,
+// Tools, Tasks, Networth) agree. A container without a regionId is kept (never drop on missing data).
+const DEAD_REGIONS = new Set([3, 11, 15, 23]);
+function dropDeadRegionInvs(d){
+  if (!d || !Array.isArray(d.inventories)) return d;
+  return { ...d, inventories: d.inventories.filter(inv => !(inv.regionId != null && DEAD_REGIONS.has(+inv.regionId))) };
+}
 async function fetchPlayerInv(id) {
-  try { return await fetchPlayerInvRelay(id); } catch(e){ if (bitjitaDisabled()) throw e; /* relay down → fall back to bitjita */ }
+  try { return dropDeadRegionInvs(await fetchPlayerInvRelay(id)); } catch(e){ if (bitjitaDisabled()) throw e; /* relay down → fall back to bitjita */ }
   return fetchPlayerInvBitjita(id);
 }
 // bitjita's per-player inventory + housing. Also the Player Lookup's source for players outside the roster:
@@ -5898,7 +5968,7 @@ async function fetchPlayerInvBitjita(id) {
       housingInvs.push({ inventoryName: inv.buildingNickname || inv.buildingName || hd.buildingName || 'House', claimName: hd.claimName || house.claimName || 'Housing', regionId: hd.regionId || house.regionId || null, _isHousing: true, pockets: slots });
     });
   });
-  return { ...d, inventories: [...(d.inventories || []), ...housingInvs] };
+  return dropDeadRegionInvs({ ...d, inventories: [...(d.inventories || []), ...housingInvs] });
 }
 
 // ── Traveler tasks — material planning grid ──
