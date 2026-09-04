@@ -993,6 +993,7 @@ let invSearch = '';
 let invSelectedChip   = {};  // sectionKey -> Set of expanded location ids (_invLocId) — any number open at once
 let invSectionCollapsed = {}; // sectionKey -> bool
 let invLocCollapsed   = {};  // per-location-block key -> bool (collapse one inventory's items)
+let invLocHidden      = {};  // search mode: per-location-block key -> bool (whole result block hidden via its chip)
 let craftTabActive = 'active';
 let countdownInterval = null;
 let lastTaskData = null;   // cached task data for live refresh re-renders
@@ -2501,14 +2502,23 @@ function toggleInvLocBlock(k) {
   const chev = document.getElementById('inv-locc-' + k);
   if (body) body.style.display = invLocCollapsed[k] ? 'none' : '';
   if (chev) chev.style.transform = invLocCollapsed[k] ? 'rotate(-90deg)' : '';
-  const chip = document.getElementById('inv-chip-' + k);   // search-mode chip mirrors its block
-  if (chip) chip.classList.toggle('active', !invLocCollapsed[k]);
+}
+// Search mode: a chip click hides/shows the WHOLE result block (bar + items) — the chip in the row still
+// names the container, so hiding is how you compact results you don't care about. The chip's active
+// state mirrors visibility. Reset whenever the search is cleared (input handler) so each search starts
+// with everything visible; the bar's chevron still collapses just the items inside a visible block.
+function toggleInvLocWrap(k) {
+  invLocHidden[k] = !invLocHidden[k];
+  const wrap = document.getElementById('inv-locw-' + k);
+  if (wrap) wrap.style.display = invLocHidden[k] ? 'none' : '';
+  const chip = document.getElementById('inv-chip-' + k);
+  if (chip) chip.classList.toggle('active', !invLocHidden[k]);
 }
 function selectInvChip(key, lk) {
   // While searching, every hit container is already expanded and the chips mirror those result blocks:
-  // a chip click collapses/expands its block (same as the bar's chevron) and must NOT touch the
-  // normal-mode selection — it used to, invisibly, so the container popped open once the search cleared.
-  if ((invSearch || '').trim()) { toggleInvLocBlock(lk); return; }
+  // a chip click hides/shows its whole block (bar + items) and must NOT touch the normal-mode
+  // selection — it used to, invisibly, so the container popped open once the search cleared.
+  if ((invSearch || '').trim()) { toggleInvLocWrap(lk); return; }
   // Multi-expand: each chip toggles its own container independently (was a single index = accordion).
   const s = invSelectedChip[key] instanceof Set ? invSelectedChip[key] : (invSelectedChip[key] = new Set());
   if (s.has(lk)) s.delete(lk); else s.add(lk);
@@ -2650,7 +2660,7 @@ function inventoryContentHtml(data, q, pfx) {
     const collapsed = !!invSectionCollapsed[secKey];
     const sel = invSelectedChip[secKey] instanceof Set ? invSelectedChip[secKey] : new Set();
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocCollapsed[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocHidden[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     // Searching expands every container with a hit; otherwise every chip the user has toggled open (any number).
     const expandedLocs = q ? sorted : sorted.filter(loc => sel.has(_invLocId(secKey, loc)));
     const multi = expandedLocs.length > 1;
@@ -2664,7 +2674,7 @@ function inventoryContentHtml(data, q, pfx) {
       const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
       if (!q) return `<div class="inv-chip-content">${multi ? `<div class="inv-locb-cap">${escHtml(loc.name)}${sub?` <span class="inv-locb-sub">${escHtml(sub)}</span>`:''}</div>` : ''}${renderItemGrid(mSlots)}</div>`;
       const col = !!invLocCollapsed[lk];
-      return `<div class="inv-chip-content">
+      return `<div class="inv-chip-content" id="inv-locw-${lk}"${invLocHidden[lk]?' style="display:none"':''}>
         <div class="inv-locb-hdr" onclick="toggleInvLocBlock('${lk}')">
           <i class="ti ti-chevron-down" id="inv-locc-${lk}" style="font-size:12px;color:var(--text3);flex-shrink:0;transition:transform .2s;${col?'transform:rotate(-90deg)':''}"></i>
           <span class="inv-locb-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-locb-sub">${escHtml(sub)}</span>`:''}
@@ -2706,7 +2716,7 @@ async function renderInventoryTab(silent) {
       </div>
       <div id="inv-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId)).join('')}</div>`;
     const inp = document.getElementById('inv-search-input');
-    inp.addEventListener('input', () => { invSearch = inp.value; renderAllInvBodies(); });
+    inp.addEventListener('input', () => { invSearch = inp.value; if (!invSearch.trim()) invLocHidden = {}; renderAllInvBodies(); });
     updateLiveBtns();
   }
   await loadInventories(silent);
