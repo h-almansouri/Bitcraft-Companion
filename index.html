@@ -1696,7 +1696,6 @@ function switchTab(tab, opts) {
   // back/forward navigation already carries the right path, so nothing is pushed for it.
   const routePath = TAB_ROUTES[tab];
   if (routePath && location.pathname !== routePath) history[(opts && opts.replace) ? 'replaceState' : 'pushState']({ tab }, '', routePath);
-  document.title = (TAB_TITLES[tab] || tab) + ' · Bitcraft Companion';
   if (tab === 'market') renderMarket();
   else if (tab === 'deals') renderDeals();
   else if (tab === 'shopping') {
