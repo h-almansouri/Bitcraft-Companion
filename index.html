@@ -8737,6 +8737,7 @@ async function bcInitRegionSelect(){
 }
 let bcResSearch = '', bcResTier = '', bcResTag = '';
 const BC_RESOURCE_POLL_MS = 60000;
+let bcPollMult = 1;                    // poll backoff multiplier while bcmap-api is unreachable (see bcRefreshAllTracked)
 
 // Dot radius: scarcer resources draw bigger; dots shrink when zoomed out (less clutter) and grow
 // when zoomed in (easier to see your surroundings). Combined with a thin border for visibility.
@@ -8994,12 +8995,14 @@ async function bcFetchResourcePts(kind, id){
   if (!marketRegions.length){ try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){} }
   // Region filter: only fetch the chosen region (lighter), or all regions when unset.
   const regionsToScan = bcMapRegion ? marketRegions.filter(r => String(r.regionId||r.id||r.entityId) === String(bcMapRegion)) : marketRegions;
-  const pts = [];
+  const pts = []; let answered = 0;
   await Promise.all(regionsToScan.map(async r => {
     const rid = r.regionId || r.id || r.entityId; if (rid == null) return;
     try {
       const res = await fetch(`${API}/bcmap/region${rid}/${kind}/${id}`);
-      if (!res.ok) return;
+      if (res.status === 404){ answered++; return; }   // no tile for this type/region: a real "none"
+      if (!res.ok) return;                              // 5xx / gateway error: the feed is down, not empty
+      answered++;
       const d = await res.json();
       (d.features || []).forEach(f => {
         const g = f.geometry; if (!g) return;
@@ -9008,6 +9011,9 @@ async function bcFetchResourcePts(kind, id){
       });
     } catch(e){}
   }));
+  // feedOk=false: not one region answered (bcmap-api down / unreachable) — the count is UNKNOWN, not zero.
+  // Callers show "feed down" instead of "none found" and don't treat the type as empty.
+  pts.feedOk = answered > 0;
   return pts;
 }
 function bcRedrawTracked(){
@@ -9019,7 +9025,10 @@ function bcUpdateResStatus(){
   const ts = Object.values(bcTrackedRes);
   if (!ts.length){ status.textContent = ''; return; }
   const total = ts.reduce((s,t)=>s+(t.count||0), 0);
-  status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}`;
+  const notes = [];
+  if (bcRelayDown && bcUseRelay && (bcRelayEnemyTypes().length || bcRelayResourceTypes().length)) notes.push('relay down — retrying');
+  if (ts.some(t => t.feedOk === false)) notes.push('map feed down');
+  status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}` + notes.map(n => ' · ' + n).join('');
 }
 async function bcToggleMapItem(kind, id){
   const key = bcResKey(kind, id);
@@ -9031,13 +9040,19 @@ async function bcToggleMapItem(kind, id){
   const status = document.getElementById('bc-res-status');
   if (status) status.innerHTML = '<i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i> Loading…';
   bcSaveTrackedRes();
-  if (kind === 'enemy' && bcUseRelay){ bcRelaySync(); bcRenderTrackedResList(); return; }   // live via prism-relay
+  if (kind === 'enemy' && bcUseRelay){                                       // live via prism-relay
+    bcRelaySync(); bcRenderTrackedResList();
+    if (!bcRelayDown) return;                                               // connected (or connecting): the relay cache drives the points
+    // relay known-down → the REST aggregate covers it until the relay is back (see bcRelayFallback)
+  }
   const pts = await bcFetchResourcePts(kind, id);
   const t = bcTrackedRes[key]; if (!t) return; // untracked while loading
-  t.pts = pts; t.count = pts.length;
-  // bcmap-api's static tiles omit transient/dynamic nodes (e.g. Uncharted Shipment cargo). If it has
-  // none, fall back to the live prism-relay resource_location stream, which does carry them.
-  if (kind === 'resource' && bcUseRelay && pts.length === 0){ t.relay = true; bcSaveTrackedRes(); bcRelaySync(); }
+  if (t.kind === 'enemy' && bcRelayActive()) return;   // the relay came back while we were fetching — its cache owns the points now
+  t.pts = pts; t.count = pts.length; t.feedOk = pts.feedOk;
+  // bcmap-api's static tiles omit transient/dynamic nodes (e.g. Uncharted Shipment cargo). If it ANSWERED
+  // with none, fall back to the live prism-relay resource_location stream, which does carry them. Not when the
+  // feed is down — that would silently opt every tracked type into live streaming (Sticks alone is ~125k rows).
+  if (kind === 'resource' && bcUseRelay && pts.length === 0 && pts.feedOk){ t.relay = true; bcSaveTrackedRes(); bcRelaySync(); }
   bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
   bcScheduleResourcePoll();
 }
@@ -9072,8 +9087,9 @@ function bcRenderTrackedResList(){
   el.innerHTML = `<div class="bc-trk-hdr">Tracked (${ts.length})</div>` + ts.map(t => {
     const key = bcResKey(t.kind, t.id);
     const live = !!t.relay;
+    const down = t.count === 0 && t.feedOk === false;   // nothing answered — the count is unknown, not zero
     const ct = typeof t.count === 'number'
-      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}${live?' · live':''}">${t.count===0?'none found':t.count.toLocaleString()}</span>`
+      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${down ? 'Map data feed unreachable right now — retrying automatically' : `${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}${live?' · live':''}`}">${down ? 'feed down' : t.count===0 ? 'none found' : t.count.toLocaleString()}</span>`
       : '';
     // Live toggle (resources only — enemies are always live). On = stream spawns/harvests from the relay
     // in real time; off = the 60s aggregate poll.
@@ -9097,8 +9113,8 @@ const BC_LIVE_MAX = 50000;
 // Opt a tracked resource into (or out of) live relay streaming instead of the 60s aggregate poll.
 function bcToggleResLive(key){
   const t = bcTrackedRes[key]; if (!t || t.kind !== 'resource') return;
-  if (!bcUseRelay){ alert('Live map streaming (prism-relay) is currently unavailable.'); return; }
   if (!t.relay){                 // → go live
+    if (!bcUseRelay || bcRelayDown){ alert('Live map streaming (prism-relay) is unreachable right now — the app keeps retrying in the background.'); return; }
     if (typeof t.count === 'number' && t.count > BC_LIVE_MAX &&
         !confirm(`${t.name} has ~${t.count.toLocaleString()} nodes right now. Streaming that many live can make the map sluggish. Go live anyway?`)) return;
     t.relay = true; t.liveOptIn = true;
@@ -9123,13 +9139,20 @@ async function bcRefreshAllTracked(){
     if (t.kind === 'enemy' && bcRelayActive()) return;              // enemies are live via the relay — don't overwrite
     if (t.kind === 'resource' && t.relay && bcRelayActive()) return; // relay-backed resources too
     const pts = await bcFetchResourcePts(t.kind, t.id);
-    if (bcTrackedRes[key]){ bcTrackedRes[key].pts = pts; bcTrackedRes[key].count = pts.length; }
+    const cur = bcTrackedRes[key]; if (!cur) return;
+    if (cur.kind === 'enemy' && bcRelayActive()) return;                 // relay came back mid-fetch: its cache owns the points
+    if (cur.kind === 'resource' && cur.relay && bcRelayActive()) return;
+    cur.pts = pts; cur.count = pts.length; cur.feedOk = pts.feedOk;
   }));
-  // Any resource bcmap-api returns nothing for → back it with the live relay (Uncharted Shipment etc.).
-  // Also migrates resources tracked before relay-backing existed.
+  // Any resource bcmap-api ANSWERS nothing for → back it with the live relay (Uncharted Shipment etc.).
+  // Also migrates resources tracked before relay-backing existed. Never off a failed fetch (feedOk false):
+  // with the feed down that would opt every tracked type into live streaming at once.
   let flagged = false;
-  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0 && t.liveOptIn !== false){ t.relay = true; flagged = true; } } }
+  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0 && t.feedOk !== false && t.liveOptIn !== false){ t.relay = true; flagged = true; } } }
   if (flagged){ bcSaveTrackedRes(); bcRelaySync(); }
+  // Feed down for everything the poll covers → poll less often (60s → 2 → 4 → 5 min) until it answers again.
+  const polled = Object.values(bcTrackedRes).filter(t => !((t.kind === 'enemy' || t.relay) && bcRelayActive()));
+  bcPollMult = (polled.length && polled.every(t => t.feedOk === false)) ? Math.min(5, bcPollMult * 2) : 1;
   bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
 }
 function bcScheduleResourcePoll(){
@@ -9143,7 +9166,7 @@ function bcScheduleResourcePoll(){
     } else {
       bcScheduleResourcePoll(); // tab hidden / not on map — keep timer alive, resume when visible
     }
-  }, BC_RESOURCE_POLL_MS);
+  }, BC_RESOURCE_POLL_MS * bcPollMult);
 }
 function bcStopResourcePoll(){ if (bcResourcePollTimer){ clearTimeout(bcResourcePollTimer); bcResourcePollTimer = null; } }
 
@@ -9155,7 +9178,14 @@ function bcStopResourcePoll(){ if (bcResourcePollTimer){ clearTimeout(bcResource
 // streamed from resource_location too (rare types = few rows, no firehose). If the relay can't connect,
 // enemies transparently fall back to the REST poll.  See docs/live-map-plan.md.
 let bcUseRelay = (() => { try { return localStorage.getItem('bc_use_relay') !== '0'; } catch(e){ return true; } })();
-let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false;
+let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false, bcRelayConnecting = false;
+// Relay unreachable (connect failed / connection dropped): enemies fall back to the REST poll meanwhile and
+// the app keeps retrying with backoff (30s → 1 → 2 → 5 min) while the Map tab shows something that streams.
+// Before, one failed handshake turned the relay off for the whole session — and a saved identity token the
+// relay no longer accepts (it signs tokens with its own key; a redeploy invalidates old ones) failed EVERY
+// session, so every creature sat on the aggregate feed for good ("none found" whenever that feed is down).
+let bcRelayDown = false, bcRelayRetryT = null, bcRelayRetryMs = 0, bcRelayNextTry = 0;
+const BC_RELAY_RETRY_MIN = 30000, BC_RELAY_RETRY_MAX = 5*60*1000;
 let bcRelaySubs = {};              // enemyType -> SubscriptionHandle
 let bcRelaySubRegion = null;       // region the current subs were built for ('' = all regions)
 let bcRelayRedrawT = null;
@@ -9179,8 +9209,8 @@ function bcRelayRebuild(){
     if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } }  // plain Small-Hex
   }
   catch(e){ return; }
-  bcRelayEnemyTypes().forEach(t => t.count = t.pts.length);
-  resTypes.forEach(t => t.count = t.pts.length);
+  bcRelayEnemyTypes().forEach(t => { t.count = t.pts.length; t.feedOk = true; });
+  resTypes.forEach(t => { t.count = t.pts.length; t.feedOk = true; });
   if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
@@ -9192,7 +9222,10 @@ function bcRelaySync(){
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
   const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcRelayResourceTypes().length > 0 || bcGrowthOn);
   if (!shouldStream){ bcRelayDisconnect(); bcGrowthApply(); return; }   // also hides the overlay layer + stops its tick
-  if (!bcRelayConn){ bcRelayConnect(); return; }               // onConnect re-invokes bcRelaySync
+  if (!bcRelayConn){                                            // onConnect re-invokes bcRelaySync
+    if (bcRelayDown && Date.now() < bcRelayNextTry){ if (!bcRelayRetryT) bcRelayArmRetry(bcRelayNextTry - Date.now()); return; }   // known down: wait for the backoff timer
+    bcRelayConnect(); return;
+  }
   if (!bcRelayReady) return;
   const { tables } = bcRelayLib;
   const regionKey = bcMapRegion || '';
@@ -9235,40 +9268,74 @@ function bcRelaySync(){
   bcRelayScheduleRedraw();   // paint whatever is already cached
 }
 async function bcRelayConnect(){
-  if (bcRelayConn) return;
-  let lib; try { lib = await bcRelayLoadLib(); } catch(e){ bcRelayFallback(); return; }
+  if (bcRelayConn || bcRelayConnecting) return;
+  bcRelayConnecting = true;
+  let lib; try { lib = await bcRelayLoadLib(); } catch(e){ bcRelayConnecting = false; bcRelayFallback(); return; }
+  let token; try { token = localStorage.getItem('bc_relay_token') || undefined; } catch(e){}
+  let conn = null;   // this attempt's connection — the handlers ignore events for a superseded one
   try {
-    bcRelayConn = lib.DbConnection.builder()
+    conn = lib.DbConnection.builder()
       .withUri(BC_RELAY_URI).withDatabaseName(BC_RELAY_MODULE)
-      .withToken(localStorage.getItem('bc_relay_token') || undefined)
-      .onConnect((conn, identity, token) => {
-        try { if (token) localStorage.setItem('bc_relay_token', token); } catch(e){}
+      .withToken(token)
+      .onConnect((c, identity, tok) => {
+        if (bcRelayConn !== conn){ try { c.disconnect(); } catch(e){} return; }   // dropped while handshaking (left the Map tab)
+        try { if (tok) localStorage.setItem('bc_relay_token', tok); } catch(e){}
         bcRelayReady = true; bcRelaySubs = {}; bcRelaySubRegion = null;
-        conn.db.enemy_location.onInsert(() => bcRelayScheduleRedraw());
-        conn.db.enemy_location.onUpdate(() => bcRelayScheduleRedraw());
-        conn.db.enemy_location.onDelete(() => bcRelayScheduleRedraw());
-        conn.db.resource_location.onInsert(() => bcRelayScheduleRedraw());
-        conn.db.resource_location.onUpdate(() => bcRelayScheduleRedraw());
-        conn.db.resource_location.onDelete(() => bcRelayScheduleRedraw());
-        conn.db.growth_timers.onInsert(() => bcGrowthScheduleRebuild());
-        conn.db.growth_timers.onUpdate(() => bcGrowthScheduleRebuild());
-        conn.db.growth_timers.onDelete(() => bcGrowthScheduleRebuild());
+        bcRelayDown = false; bcRelayRetryMs = 0; clearTimeout(bcRelayRetryT); bcRelayRetryT = null;
+        c.db.enemy_location.onInsert(() => bcRelayScheduleRedraw());
+        c.db.enemy_location.onUpdate(() => bcRelayScheduleRedraw());
+        c.db.enemy_location.onDelete(() => bcRelayScheduleRedraw());
+        c.db.resource_location.onInsert(() => bcRelayScheduleRedraw());
+        c.db.resource_location.onUpdate(() => bcRelayScheduleRedraw());
+        c.db.resource_location.onDelete(() => bcRelayScheduleRedraw());
+        c.db.growth_timers.onInsert(() => bcGrowthScheduleRebuild());
+        c.db.growth_timers.onUpdate(() => bcGrowthScheduleRebuild());
+        c.db.growth_timers.onDelete(() => bcGrowthScheduleRebuild());
         bcRelaySync();
       })
-      .onConnectError(() => { bcRelayConn = null; bcRelayReady = false; bcRelayFallback(); })
-      .onDisconnect(() => { bcRelayReady = false; bcRelaySubs = {}; })
+      .onConnectError(() => {
+        if (bcRelayConn !== conn) return;
+        bcRelayConn = null; bcRelayReady = false;
+        // The handshake is refused (401) when the saved identity token is one the relay no longer accepts —
+        // indistinguishable from an outage here — so drop the token and retry once anonymously: the relay
+        // issues a fresh token to an anonymous connect. Only if that fails too is the relay called down.
+        if (token){ try { localStorage.removeItem('bc_relay_token'); } catch(e){} bcRelayConnect(); return; }
+        bcRelayFallback();
+      })
+      .onDisconnect(() => {
+        if (bcRelayConn !== conn) return;   // an intentional bcRelayDisconnect already moved on
+        bcRelayConn = null; bcRelayReady = false; bcRelaySubs = {}; bcRelaySubRegion = null;
+        bcGrowthSub = null; bcGrowthSubRegion = null;   // its handle died with the connection; bcRelaySync re-subscribes
+        bcRelayFallback();                  // dropped mid-session (relay restart): REST covers it, then reconnect
+      })
       .build();
-  } catch(e){ bcRelayConn = null; bcRelayFallback(); }
+    bcRelayConn = conn;
+  } catch(e){ bcRelayConn = null; bcRelayConnecting = false; bcRelayFallback(); return; }
+  bcRelayConnecting = false;
+}
+function bcRelayArmRetry(ms){
+  clearTimeout(bcRelayRetryT);
+  bcRelayNextTry = Date.now() + ms;
+  bcRelayRetryT = setTimeout(() => { bcRelayRetryT = null; bcRelaySync(); }, ms);   // reconnects only if the Map tab still needs it
 }
 function bcRelayDisconnect(){
   Object.values(bcRelaySubs).forEach(s => { try { s.unsubscribe(); } catch(e){} });
   bcRelaySubs = {}; bcRelaySubRegion = null; bcRelayReady = false;
+  clearTimeout(bcRelayRetryT); bcRelayRetryT = null;   // nothing to stream → no reconnect attempts either
   if (bcGrowthSub){ try { bcGrowthSub.unsubscribe(); } catch(e){} bcGrowthSub = null; bcGrowthSubRegion = null; }
   bcGrowthClear();
-  if (bcRelayConn){ try { bcRelayConn.disconnect(); } catch(e){} bcRelayConn = null; }
+  if (bcRelayConn){ const c = bcRelayConn; bcRelayConn = null; try { c.disconnect(); } catch(e){} }   // null first: its onDisconnect must not reconnect
 }
-// Relay unavailable → turn it off and let the REST poll cover enemies too.
-function bcRelayFallback(){ bcUseRelay = false; bcRefreshAllTracked().catch(()=>{}); bcScheduleResourcePoll(); }
+// Relay unreachable → the REST poll covers enemies (and relay-backed resources) meanwhile, and the relay is
+// retried with backoff. bcUseRelay (the user's preference) is left alone — it used to be flipped off for the
+// whole session, which parked every creature on the aggregate feed until a reload.
+function bcRelayFallback(){
+  bcRelayDown = true;
+  bcRelayRetryMs = bcRelayRetryMs ? Math.min(BC_RELAY_RETRY_MAX, bcRelayRetryMs * 2) : BC_RELAY_RETRY_MIN;
+  bcRelayArmRetry(bcRelayRetryMs);
+  bcRefreshAllTracked().catch(()=>{}); bcScheduleResourcePoll();
+  bcUpdateResStatus();
+}
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
 // growth_timers is sparse (~tens/region), so these are real Leaflet markers (not canvas dots) with a
