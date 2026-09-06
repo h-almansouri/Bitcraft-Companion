@@ -967,7 +967,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
     <div style="display:flex;align-items:center;gap:.75rem">
       <div class="search-wrap tb-search" id="lookup-search-wrap" title="Look up any player without tracking them">
         <i class="ti ti-user-search si"></i>
-        <input type="text" id="lookup-input" placeholder="Look up a player…" autocomplete="off">
+        <input type="search" id="lookup-input" placeholder="Look up a player…" autocomplete="off">
         <div class="search-results" id="lookup-results" style="display:none"></div>
       </div>
       <div class="topbar-right" id="topbar-right"></div>
@@ -1581,7 +1581,9 @@ function openLookup(id, sub, opts){
   lookupLoadSub(sub);
 }
 function lookupSub(sub){ if (lookupState.id) openLookup(lookupState.id, sub); }
-function lookupExit(){ let t = null; try { t = localStorage.getItem('bc_tab'); } catch(e){} switchTab(t && TAB_ROUTES[t] ? t : 'skills'); }
+function lookupExit(){ lookupClearSearch(); let t = null; try { t = localStorage.getItem('bc_tab'); } catch(e){} switchTab(t && TAB_ROUTES[t] ? t : 'skills'); }
+// Empty the topbar lookup box (its pending search + dropdown too): "Back to app", and the box's own clear "x".
+function lookupClearSearch(){ clearTimeout(_lookupSearchTimer); const inp = document.getElementById('lookup-input'); if (inp) inp.value = ''; lookupHideResults(); }
 async function lookupLoadInfo(){
   const id = lookupState.id;
   try { const d = await apiFetch('/api/players/' + id); if (lookupState.id !== id) return; lookupState.info = d.player || d || {}; }
