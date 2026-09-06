@@ -1563,19 +1563,40 @@ const LOOKUP_SUBS = { skills:'experience', inventory:'inventory', crafting:'craf
 const LOOKUP_SUBS_BY_PATH = Object.fromEntries(Object.entries(LOOKUP_SUBS).map(([k, v]) => [v, k]));
 function lookupPath(id, sub){ return '/player/' + id + (sub && sub !== 'skills' ? '/' + LOOKUP_SUBS[sub] : ''); }
 function lookupSetMode(on){
+  const was = lookupState.active;
   lookupState.active = !!on;
   const mn = document.getElementById('main-nav'), ln = document.getElementById('lookup-nav');
   if (mn) mn.style.display = on ? 'none' : '';
   if (ln) ln.style.display = on ? '' : 'none';
+  if (was && !on){ lookupReleaseLive(lookupState.id); bcSyncAlertFeed(); }   // page closed: stop streaming that player
+}
+// ── Live XP on the lookup page ──
+// The "Active" chip is computed, not stored: a baseline of each skill's XP plus a stream of XP changes
+// (the most recently gained skill is active until its gains stop). The page always had the baseline (the
+// same card renderer builds it); what it lacked was the stream — the relay sockets carry only the tracked
+// roster. So while the page is open, an untracked player's experience_state channel is added to the
+// live.bitjita socket the map/alerts already use (see lookupLiveId), and the same handlers paint here.
+// Leaving a looked-up player who isn't tracked: drop the XP session/baseline the page built, so tracking
+// them later seeds fresh (a stale baseline would make the first live delta a bogus "gain" and stretch the
+// XP/hr clock back to the lookup). Tracked players keep theirs — the Experience tab owns those.
+function lookupReleaseLive(id){ id = String(id || ''); if (!id || isPlayerTracked(id)) return; delete skillsByPlayer[id]; delete skillSession[id]; }
+// A live XP delta for the looked-up player also lands in the page's REST snapshot, so re-rendering the
+// Experience sub (switching subs, coming back) shows the live numbers rather than the values at load.
+function lookupPatchSnapshot(id, changed){
+  if (String(lookupState.id) !== String(id)) return;
+  const d = lookupState.data.skills, exp = d && d.pData && d.pData.player && d.pData.player.experience;
+  if (!Array.isArray(exp)) return;
+  changed.forEach(sk => { const e = exp.find(x => +x.skill_id === +sk.skillId); if (e) e.quantity = sk.xp; });
 }
 function openLookup(id, sub, opts){
   id = String(id || '').trim(); if (!/^\d+$/.test(id)) return;
   sub = LOOKUP_SUBS[sub] ? sub : 'skills';
-  if (lookupState.id !== id) lookupState = { active:true, id, sub, info:null, data:{}, busy:{}, invQ:'' };
+  if (lookupState.id !== id){ if (lookupState.active) lookupReleaseLive(lookupState.id); lookupState = { active:true, id, sub, info:null, data:{}, busy:{}, invQ:'' }; }
   lookupState.sub = sub;
   const path = lookupPath(id, sub);
   if (location.pathname !== path) history[(opts && (opts.replace || opts.fromHistory)) ? 'replaceState' : 'pushState']({ lookup:id, sub }, '', path);
   switchTab('lookup');
+  bcSyncAlertFeed();   // (re)subscribe this player's XP stream now — same tab, possibly a different player
   lookupRender();
   if (!lookupState.info) lookupLoadInfo();
   lookupLoadSub(sub);
@@ -1602,7 +1623,9 @@ async function lookupLoadSub(sub, force){
       // Tracked players read the live cache (same vintage + session bookkeeping as the Skills tab);
       // everyone else comes from bitjita. Rankings are bitjita-only either way.
       const pP = tracked && usingCache() ? fetchSkillsRelay(id).catch(() => apiFetch('/api/players/' + id)) : apiFetch('/api/players/' + id);
-      const [p, r] = await Promise.all([pP, apiFetch('/api/players/' + id + '/skill-rankings').catch(() => ({}))]);
+      // Level thresholds are loaded by the tracked Experience tab; with nobody tracked this page would render
+      // every skill as level 0 / 0% without them. Idempotent, one small cached fetch.
+      const [p, r] = await Promise.all([pP, apiFetch('/api/players/' + id + '/skill-rankings').catch(() => ({})), ensureThresholds().catch(() => {})]);
       d = { pData: p, ranks: r };
     }
     else if (sub === 'inventory') d = tracked ? await fetchPlayerInv(id) : await fetchPlayerInvBitjita(id);
@@ -1660,7 +1683,7 @@ function lookupRender(){
 }
 function lookupRenderInvBody(){ const b = document.getElementById('lookup-inv-body'); if (!b || !lookupState.data.inventory) return; b.innerHTML = inventoryContentHtml(lookupState.data.inventory, lookupState.invQ || '', 'lk' + lookupState.id); }
 function lookupRefresh(){ const s = lookupState; if (!s.id) return; s.info = null; delete s.data[s.sub]; lookupLoadInfo(); lookupLoadSub(s.sub, true); }
-function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); lookupRenderHeader(); }
+function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); bcSyncAlertFeed(); lookupRenderHeader(); }   // tracked now: the relay feed takes over, drop the page's channel
 // Topbar search → lookup (never tracks). Same endpoint as the sidebar search, its own dropdown.
 let _lookupSearchTimer = null, _lookupSearchBound = false;
 function initLookupSearch(){
@@ -2069,6 +2092,7 @@ function updateSkillSession(entityId, skills){
   skills.forEach(sk => {
     const e = s[sk.skillId];
     if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0, gainSeq:0, gaps:[]}; return; }
+    if (sk.xp < e.curXp) return;   // a staler read than what the stream already showed (cached REST behind a live delta): XP never goes down — don't rewind the baseline into a fake "gain"
     if (sk.xp > e.curXp){
       // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
       if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
@@ -2105,7 +2129,8 @@ function startSkillActiveTick(){
   stopSkillActiveTick();
   skillActiveTick = setInterval(() => {
     if (document.hidden) return;
-    trackedPlayers.forEach(p => { const id = String(p.entityId); if (recomputeSkillActive(id) && currentTab === 'skills') syncSkillActiveStates(id); });
+    const ids = trackedPlayers.map(p => String(p.entityId)); const lk = lookupLiveId(); if (lk) ids.push(lk);   // the looked-up player's chip expires the same way
+    ids.forEach(id => { if (recomputeSkillActive(id) && skillCardsHost(id)) syncSkillActiveStates(id); });
   }, SKILL_ACTIVE_TICK_MS);   // 250ms, not 1s: the tick's own resolution was adding up to a second of lag on top of the grace
 }
 function stopSkillActiveTick(){ if (skillActiveTick){ clearInterval(skillActiveTick); skillActiveTick = null; } }
@@ -8517,7 +8542,7 @@ function bcEnsureSocket(){
   bcPlayerSocket.onmessage = (e) => { bcLastWsMsg = Date.now(); bcWsHandle(e.data); };
   bcPlayerSocket.onclose = () => {
     clearInterval(bcWsPing);
-    if (!bcWsManualClose && Object.keys(bcTracked).length){
+    if (!bcWsManualClose && (Object.keys(bcTracked).length || bcAlertIds().length || lookupLiveId())){   // whoever still needs it: map, alerts, lookup page
       clearTimeout(bcWsReconnect);
       bcWsReconnect = setTimeout(bcEnsureSocket, 2500); // auto-reconnect
     }
@@ -8569,7 +8594,12 @@ document.addEventListener('visibilitychange', () => {
 // one there (that region's mirror was the sick one at the time), and it caught up to 467 later. So don't
 // "trust the relay's number over bitjita's": take the freshest, whichever it came from.
 const BC_ALERT_CHANNELS = ['stamina_state','character_stats_state','experience_state','active_buff_state'];
-let bcAlertKey = '';
+let bcAlertKey = '', bcLookupChan = null;   // bcLookupChan: the looked-up player's experience_state channel currently subscribed
+// The player on the lookup page streams XP from this socket while the page is open — only when they're NOT
+// tracked (a tracked player's deltas already arrive on the relay feed; if that's down, the alert fallback
+// covers the roster). Measured 2026-09-06 against the relay, 30 players / 90s: every change matched, bitjita
+// minus relay p50 −3ms, p90 +2ms, max +22ms, ~1.1s cadence mid-grind — same upstream, no visible lag.
+function lookupLiveId(){ return (typeof lookupState !== 'undefined' && lookupState.active && lookupState.id && !isPlayerTracked(lookupState.id)) ? String(lookupState.id) : null; }
 // Who needs the fallback stream right now. Empty while the relay IS the source: the relay feed already
 // drives these handlers, and a second stream into them would double-fire every alert.
 function bcAlertIds(){
@@ -8579,11 +8609,15 @@ function bcAlertIds(){
 // Open / extend / close the socket to match that set. Cheap and idempotent — called from the alert tick,
 // from restartAlerts, and on visibilitychange, so a relay going down is picked up within one tick.
 function bcSyncAlertFeed(){
-  const want = bcAlertIds(), key = want.join(',');
+  const lk = lookupLiveId();
+  const want = bcAlertIds(), key = want.join(',') + (lk ? '|xp:' + lk : '');
   const changed = key !== bcAlertKey;
   bcAlertKey = key;
-  if (!want.length){
-    // Only tear down if the MAP isn't using it either — the two share one connection.
+  // The looked-up player's channel is per page: drop it the moment the page closes or shows someone else.
+  // (`unsubscribe` verified 2026-09-06: acked, and the dropped channels went silent while the rest streamed on.)
+  if (bcLookupChan && bcLookupChan !== lk){ bcWsUnsubscribe(['experience_state:' + bcLookupChan]); bcLookupChan = null; }
+  if (!want.length && !lk){
+    // Only tear down if the MAP isn't using it either — map, alerts and lookup share one connection.
     if (!Object.keys(bcTracked).length && bcPlayerSocket){
       bcWsManualClose = true; clearInterval(bcWsPing);
       try { bcPlayerSocket.close(); } catch(e){}
@@ -8599,6 +8633,7 @@ function bcWsSubscribe(){
   if (!bcPlayerSocket || bcPlayerSocket.readyState !== 1) return;
   const chans = Object.keys(bcTracked).map(id => 'mobile_entity_state:'+id);
   bcAlertIds().forEach(id => BC_ALERT_CHANNELS.forEach(t => chans.push(t+':'+id)));
+  const lk = lookupLiveId(); if (lk){ chans.push('experience_state:' + lk); bcLookupChan = lk; }   // the looked-up player's XP stream
   if (!chans.length) return;
   // ⚠️ live.bitjita silently IGNORES any subscribe message with more than 100 channels — not truncated,
   // the whole message: 100 streamed, 101 delivered nothing (measured 2026-08-13). The `subscribed` ack
@@ -8607,6 +8642,10 @@ function bcWsSubscribe(){
   const uniq = [...new Set(chans)];
   for (let i = 0; i < uniq.length; i += 90)
     try { bcPlayerSocket.send(JSON.stringify({ type:'subscribe', channels: uniq.slice(i, i + 90) })); } catch(e){}
+}
+function bcWsUnsubscribe(chans){
+  if (!bcPlayerSocket || bcPlayerSocket.readyState !== 1 || !chans.length) return;
+  try { bcPlayerSocket.send(JSON.stringify({ type:'unsubscribe', channels: chans })); } catch(e){}
 }
 function bcWsHandle(raw){
   let msg; try { msg = JSON.parse(raw); } catch(e){ return; }
@@ -8621,9 +8660,12 @@ function bcWsHandle(raw){
     (typeof d.destination_x === 'number' && typeof d.destination_z === 'number') ? { x:d.destination_x/1000, z:d.destination_z/1000 } : null);
 }
 // Feed the fallback rows into the SAME handlers the relay drives, so there is one alert implementation
-// and not two that can drift. There is no unsubscribe on this protocol, so a channel for a player who
-// later stops needing it keeps arriving — hence the guards here rather than relying on the subscription.
+// and not two that can drift. The alert channels are never pruned (the protocol's `unsubscribe` is only
+// used for the lookup page's channel), so a channel for a player who later stops needing it keeps
+// arriving — hence the guards here rather than relying on the subscription.
 function bcAlertEvent(table, id, d){
+  // The lookup page's XP stream rides this socket too (lookupLiveId) — route it before the alert guards below.
+  if (table === 'experience_state' && id === lookupLiveId()) return onLiveExperience(id, (d.experience_stacks || []).map(s => ({ skill_id: +s.skill_id, quantity: +s.quantity })));
   if (usingCache() || !isPlayerTracked(id)) return;   // relay reclaimed the source, or roster shrank
   if (table === 'character_stats_state'){
     const v = d.values || d.stats;
@@ -8676,7 +8718,7 @@ function bcUntrackPlayer(id){
   if (!Object.keys(bcTracked).length){
     bcStopPlayerPoll();
     // Don't hang up if the ALERT fallback is still using this socket — the map and the alerts share one.
-    if (bcPlayerSocket && !bcAlertIds().length){ bcWsManualClose = true; clearInterval(bcWsPing); try { bcPlayerSocket.close(); } catch(e){} bcPlayerSocket = null; }
+    if (bcPlayerSocket && !bcAlertIds().length && !lookupLiveId()){ bcWsManualClose = true; clearInterval(bcWsPing); try { bcPlayerSocket.close(); } catch(e){} bcPlayerSocket = null; }
   }
 }
 function bcToggleFollow(id){
@@ -11445,7 +11487,8 @@ function onLiveExperience(id, data){
   });
   if (!changed.length) return;
   updateSkillSession(id, store.skills);
-  if (currentTab === 'skills'){
+  lookupPatchSnapshot(id, changed);   // the lookup page re-renders from its REST snapshot — keep it current
+  if (skillCardsHost(id)){
     changed.forEach(sk => updateSkillCardLive(id, sk));
     syncSkillActiveStates(id); // one active skill may have handed off to another — update ALL cards, not just the ones that gained
     // Keep the expanded calculator panel in sync on the SAME tick as the small card — it used to refresh
@@ -11454,8 +11497,17 @@ function onLiveExperience(id, data){
     if (openSkill && changed.some(sk => sk.skillId === openSkill)) updateSkillJourneyLive(id);
   }
 }
+// Where this player's skill cards are on screen right now: their section on the Experience tab, or the
+// lookup page when it's showing this player's Experience. Null = not visible, nothing to paint (the session
+// bookkeeping still runs; the cards catch up on the next render).
+function skillCardsHost(id){
+  id = String(id);
+  if (currentTab === 'skills') return document.getElementById('psec-skills-' + id);
+  if (currentTab === 'lookup' && lookupState.active && lookupState.id === id && lookupState.sub === 'skills') return document.getElementById('lookup-body');
+  return null;
+}
 function updateSkillCardLive(id, sk){
-  const body = document.getElementById('psec-skills-' + id); if (!body) return;
+  const body = skillCardsHost(id); if (!body) return;
   const card = body.querySelector(`.skill-card[data-skill="${sk.skillId}"]`); if (!card) return;
   const ti = tierInfo(sk.level);
   const rank = ((skillsByPlayer[id] && skillsByPlayer[id].rankings) || {})[sk.skillId];
@@ -11479,7 +11531,7 @@ function updateSkillJourneyLive(entityId){
 // Sync every skill card's "active" highlight + badge to skillSession (only one skill is active at a
 // time; handoff on skill-swap must clear the previous card, which may not be in this tick's changes).
 function syncSkillActiveStates(id){
-  const body = document.getElementById('psec-skills-' + id); if (!body) return;
+  const body = skillCardsHost(id); if (!body) return;
   const sess = skillSession[id] || {};
   body.querySelectorAll('.skill-card[data-skill]').forEach(card => {
     const active = !!(sess[card.dataset.skill] && sess[card.dataset.skill].active);
