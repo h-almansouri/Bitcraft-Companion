@@ -757,6 +757,9 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .bc-mp-list{margin-top:6px;display:flex;flex-direction:column;gap:3px;max-height:130px;overflow-y:auto}
 .bc-mp-prow{display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:3px 7px}
 .bc-mp-prow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bc-pl-col{width:13px!important;height:13px!important;min-width:0;padding:0!important;margin:0;border:1px solid var(--border)!important;border-radius:50%!important;background:none;cursor:pointer;flex:0 0 13px}   /* !important: the sidebar's generic input rule sets width:100% (same fix as .bc-trk-col) */
+.bc-pl-col::-webkit-color-swatch{border:none;border-radius:50%}
+.bc-pl-col::-webkit-color-swatch-wrapper{padding:0}
 .bc-mp-status{margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45;flex-shrink:0}
 .bc-player-tip{background:rgba(13,15,20,.45)!important;border:none!important;color:rgba(255,255,255,.82)!important;font-size:9px!important;font-weight:500;padding:0 3px!important;box-shadow:none!important;text-shadow:0 1px 2px rgba(0,0,0,.9);border-radius:3px}
 .bc-player-tip::before{display:none!important}
@@ -8750,14 +8753,33 @@ function bcToggleFollow(id){
   bcSaveTrackedPlayers();
   bcRenderTrackedList();
 }
+// Colour picker on a tracked player's row (the circle next to the name). Live, while dragging in the
+// native picker: recolour the marker and its destination trail only — rebuilding the list would replace
+// the <input> and close the picker. Committed (picker closed): persist and re-render.
+function bcSetPlayerColorLive(id, color){
+  const t = bcTracked[id]; if (!t || !color) return;
+  t.color = color;
+  const el = t.marker && t.marker.getElement && t.marker.getElement(), pulse = el && el.querySelector('.bc-player-pulse');
+  if (pulse) pulse.style.setProperty('--pc', color); else if (t.marker) t.marker.setIcon(bcPlayerIcon(color));
+  if (t.line) t.line.setStyle({ color });
+}
+function bcSetPlayerColor(id, color){ bcSetPlayerColorLive(id, color); bcSaveTrackedPlayers(); bcRenderTrackedList(); }
 function bcRenderTrackedList(){
   const el = document.getElementById('bc-players-list'); if (!el) return;
   const ids = Object.keys(bcTracked);
+  // Positions arrive on every move event and each one re-renders this list. While a colour picker is
+  // open on a row, rebuilding would replace its <input> and slam the picker shut mid-drag, so patch the
+  // online state in place instead; the next update after the picker closes rebuilds normally.
+  const ae = document.activeElement;
+  if (ae && ae.classList && ae.classList.contains('bc-pl-col') && el.contains(ae)){
+    ids.forEach(id => { const row = el.querySelector(`.bc-mp-prow[data-id="${id}"]`); if (!row) return; const online = bcTracked[id].last != null; const nm = row.querySelector('.nm'); if (nm) nm.style.opacity = online ? '' : '.55'; });
+    return;
+  }
   el.innerHTML = ids.length ? ids.map(id => {
     const t = bcTracked[id]; const online = t.last != null;
-    return `<div class="bc-mp-prow">
-      <span style="width:7px;height:7px;border-radius:50%;background:${online?'#22c55e':'#6b7280'};flex-shrink:0" title="${online?'Online':'Offline / no data'}"></span>
-      <span class="nm" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
+    return `<div class="bc-mp-prow" data-id="${id}">
+      <input type="color" class="bc-pl-col" value="${t.color}" oninput="bcSetPlayerColorLive('${id}', this.value)" onchange="bcSetPlayerColor('${id}', this.value)" title="${online?'Online':'Offline / no data'} — click to change this player's colour">
+      <span class="nm" title="${escHtml(t.name)}"${online?'':' style="opacity:.55"'}>${escHtml(t.name)}</span>
       <i class="ti ti-focus-2" title="Follow" style="cursor:pointer;font-size:14px;color:${t.follow?'#22c55e':'var(--text3)'}" onclick="bcToggleFollow('${id}')"></i>
       <i class="ti ti-x" title="Stop tracking" style="cursor:pointer;font-size:14px;color:var(--text3)" onclick="bcUntrackPlayer('${id}')"></i>
     </div>`;
