@@ -4267,13 +4267,13 @@ const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state']; 
 // A player's pockets/toolbelt/wallet hang off inventory_state.owner_entity_id = player and their banks
 // off player_owner_entity_id — both directly subscribable. But HOUSE chests and VEHICLES have their own
 // entity ids: the container row's owner_entity_id is the BUILDING or DEPLOYABLE, so we subscribe the
-// discovery tables (building_state by constructed_by, deployable_state_v2 by owner) and then need a
+// discovery tables (the house's dimension cells via location_state, deployable_state_v2 by owner) and then need a
 // second hop for the contents. The discovered ids become part of the ROSTER KEY: when the cache reveals
 // an id we're not subscribed to (new wagon, new chest), the watcher below triggers the ONE redial path
 // (§3.2). Ids persist per roster, so a warm boot subscribes everything in its first dial — zero redials
 // steady-state.
-const LIVE_CONTAINERS_KEY = 'bcLiveContainers';
-let liveRefs = { containers: [], buildings: [], networks: [], locs: [], regionHint: {} };   // discovered ids the subscription covers
+const LIVE_CONTAINERS_KEY = 'bcLiveContainers2';   // v2: house interiors discovered by dimension cell, not by builder (old sets carried builder-rule ids)
+let liveRefs = { containers: [], buildings: [], networks: [], chunks: [], regionHint: {} };   // discovered ids the subscription covers
 let liveRosterIds = [];      // player ids the current subscription covers
 // Everything the app needs that ISN'T matched by a player-id filter: the buildings behind bank/house
 // containers and craft stations (they belong to other people, or carry no owner column), their
@@ -4285,12 +4285,26 @@ function liveWantedRefs(){
   const containers = new Set();   // things whose inventory_state contents we need
   const buildings = new Set();    // building_state + nickname lookups
   const networks = new Set();     // house dimension networks
-  const locs = new Set();         // buildings whose location (→ dimension) decides house membership
+  const chunks = new Set();       // "region:chunk_index" — the cell(s) of each tracked player's house interior
   const claims = new Set();       // settlement names
   const regionHint = {};          // id -> mirror that actually holds it, where the id can't be trusted
-  // house interiors: buildings this player constructed with NO claim (claim 0 = inside a dimension)
-  liveRows('building_state', r => String(r.claim_entity_id) === '0' && tracked.has(String(r.constructed_by_player_entity_id)))
-    .forEach(r => { const id = String(r.entity_id); containers.add(id); buildings.add(id); locs.add(id); });
+  // House interiors — by the HOUSE, not by who built what's in it. The old rule ("buildings this player
+  // constructed with no claim") missed every chest somebody else placed in their house (all three of
+  // Chelsey's were Velcruza's, so her Housing section was empty) and spent one location query per
+  // candidate telling house chests from storage placed elsewhere. A house is a dimension:
+  // player_housing_state → network → dimension row → its chunk cell(s) (houseChunkIndexes), and
+  // location_state is indexed by chunk_index, so one query per cell lists everything inside (measured
+  // 9-22 rows, ~340ms). Players carry no location_state row, so visitors never enter this set — only
+  // the buildings and fixtures inside, which is exactly what we want. Three hops on a cold boot
+  // (network → cells → contents), persisted per roster like every other ref, so a warm boot dials once.
+  liveRows('player_housing_state', r => tracked.has(String(r.entity_id)))
+    .forEach(r => { networks.add(String(r.network_entity_id)); buildings.add(String(r.entrance_building_entity_id)); });
+  liveRowsByRegion('dimension_description_state', r => networks.has(String(r.dimension_network_entity_id)))
+    .forEach(x => houseChunkIndexes(x.row).forEach(c => chunks.add(x.region + ':' + c)));
+  liveRowsByRegion('location_state', () => true).forEach(x => {
+    if (!chunks.has(x.region + ':' + x.row.chunk_index)) return;
+    const id = String(x.row.entity_id); containers.add(id); buildings.add(id); regionHint[id] = x.region;
+  });
   // ⚠️ Deployables MOVE between regions, and their inventory rows move with them, so the region encoded
   // in the entity id stops being where the data is. Verified: Velcruza's "Personal Cache (III)" has its
   // inventory_state row in r13 while its id says r19 — we asked r19, got nothing, and every vehicle and
@@ -4305,8 +4319,6 @@ function liveWantedRefs(){
     liveRows(t, r => tracked.has(String(r.owner_entity_id))).forEach(r => {
       const b = String(r.building_entity_id || '0'); if (b !== '0') buildings.add(b);
     }));
-  liveRows('player_housing_state', r => tracked.has(String(r.entity_id)))
-    .forEach(r => { networks.add(String(r.network_entity_id)); buildings.add(String(r.entrance_building_entity_id)); });
   // Claim names, SECOND-ORDER: the ids come from rows the subscription already delivers — a building's
   // claim_entity_id, and the claim each order/listing sits in. This replaces one JOIN per building
   // (73 of them on a busy region) with a handful of chunked plain lookups. Costs one more discovery
@@ -4316,15 +4328,13 @@ function liveWantedRefs(){
   ['sell_order_state','buy_order_state','closed_listing_state'].forEach(t =>
     liveRows(t, r => tracked.has(String(r.owner_entity_id))).forEach(r => addClaim(r.claim_entity_id)));
   const cap = (s, n) => [...s].sort().slice(0, n);
-  // `locs` is capped far tighter than the rest because each id costs its OWN query (see perId in
-  // liveQuerySet — an OR-chain over location_state is a 14.6s full scan, so chunking is not an option).
-  // These are house-INTERIOR buildings only (claim 0, built by a tracked player); a real house runs to
-  // tens, so 150 is generous while bounding one region at 150 subscriptions instead of 600.
-  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), locs: cap(locs, 150), claims: cap(claims, 400), regionHint };
+  // `chunks` are house-interior cells: one indexed location_state query each (never an OR-chain over
+  // location_state — that's a 14.6s full scan), normally one cell per house, so 64 is generous.
+  return { containers: cap(containers, 600), buildings: cap(buildings, 900), networks: cap(networks, 20), chunks: cap(chunks, 64), claims: cap(claims, 400), regionHint };
 }
 // regionHint rides in the key: a deployable moving region changes NOTHING about the id list, so without
 // this the "did the refs change?" check says no and we keep querying the mirror it left.
-const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claims || []].map(a => a.join(',')).join('|')
+const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.chunks || [], r.claims || []].map(a => a.join(',')).join('|')
   + '|' + Object.keys(r.regionHint || {}).sort().map(k => k + ':' + r.regionHint[k]).join(',');
 // ⚠️ REF SETS MAY ONLY GROW WITHIN A ROSTER. Merging (rather than replacing) is what stops the boot
 // flash: a partly-snapshotted cache can only ever DERIVE a subset, and adopting that subset demoted a
@@ -4333,7 +4343,7 @@ const liveRefsKey = r => [r.containers, r.buildings, r.networks, r.locs, r.claim
 // Cost of monotonicity: an id that dies (chest destroyed) lingers for the session and returns no rows.
 // That's bounded by the same caps liveWantedRefs applies, and a roster change starts over with a fresh
 // persisted entry — cheap insurance against a visible hole.
-const LIVE_REF_CAPS = { containers: 600, buildings: 900, networks: 20, locs: 150, claims: 400 };
+const LIVE_REF_CAPS = { containers: 600, buildings: 900, networks: 20, chunks: 64, claims: 400 };
 function liveMergeRefs(a, b){
   const out = {};
   Object.keys(LIVE_REF_CAPS).forEach(k => {
@@ -4352,7 +4362,7 @@ function liveSaveRefs(pKey, refs){ try { localStorage.setItem(LIVE_CONTAINERS_KE
 const LIVE_DISCOVERY_DEBOUNCE_MS = 350;
 let _liveContTimer = null;
 onLiveChange(evs => {
-  if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
+  if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','dimension_description_state','location_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
   clearTimeout(_liveContTimer);
   _liveContTimer = setTimeout(() => {
     // ⚠️ Only ever derive refs from a WHOLE world. Recomputing while regions were still snapshotting
@@ -4381,7 +4391,6 @@ function liveQuerySet(ids, region){
     ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
     ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
     `SELECT * FROM inventory_state WHERE ${ids.map(i => `player_owner_entity_id = ${i}`).join(' OR ')}`,   // banks (per region)
-    `SELECT * FROM building_state WHERE ${ids.map(i => `constructed_by_player_entity_id = ${i}`).join(' OR ')}`,   // house-interior discovery
     `SELECT * FROM deployable_state_v2 WHERE ${ids.map(i => `owner_id = ${i}`).join(' OR ')}`,             // vehicle discovery
     // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
     // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
@@ -4418,7 +4427,9 @@ function liveQuerySet(ids, region){
   // as well once the building rows have told us the claim ids.
   chunked(here(liveRefs.claims || []), 'entity_id', 'claim_state');
   chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
-  perId(here(liveRefs.locs), 'entity_id', 'location_state');   // which dimension each candidate sits in
+  // House-interior cells (each carries its region): everything inside a tracked player's house. One
+  // indexed query per cell — see the location_state scan warning above for why never an OR-chain.
+  (liveRefs.chunks || []).forEach(k => { const [rg, c] = k.split(':'); if (+rg === region && /^\d+$/.test(c || '')) sqls.push(`SELECT * FROM location_state WHERE chunk_index = ${c}`); });
   // Movement feed for the idle alert's activity veto (see liveActivity): one row per tracked player,
   // a handful of deltas per move segment, silence while stationary — measured 4 deltas/50s in normal
   // play, snapshot = 1 row. perId (indexed), NEVER chunked — the location-family scan trap above.
@@ -5849,10 +5860,22 @@ function liveEquipSlots(row){
 // constructed with claim 0 → their inventory rows), vehicles (deployable_state_v2 → their inventory
 // rows). All 13 regions — the old current-region-only equipment/vehicle limitation is gone. The only
 // network here is the cached place/nickname resolve for buildings we've never seen.
-// Which buildings are actually INSIDE a player's house — read straight from the cache. The house's
-// dimension(s) come from dimension_description_state (subscribed by the player's network id) and each
-// candidate's dimension from location_state (subscribed by building id); both are part of the held
-// subscription, so this is a local comparison with no round trip.
+// Everything INSIDE a player's house — read straight from the cache. The house's dimension(s) come from
+// dimension_description_state (subscribed by the player's network id) and the interior's entities from
+// location_state (subscribed by the house's chunk cells, see houseChunkIndexes); both are part of the
+// held subscription, so this is a local read with no round trip. Null until the dimensions are known.
+// The chunk cells of an interior dimension, from the game's own formula (chunk_coordinates.rs):
+// chunk_index = (dimension − 1) × 1,000,000 + chunk_z × 1000 + chunk_x + 1, over the dimension's
+// [position_large, position_large + size_large) rectangle — sizes are in chunks, interiors are 1×1
+// (interior_helpers.rs), so this is normally a single cell. Verified: dimension 3801 → cell 3800000001.
+function houseChunkIndexes(d){
+  const dim = +d.dimension_id; if (!dim) return [];
+  const px = +d.dimension_position_large_x || 0, pz = +d.dimension_position_large_z || 0;
+  const sx = Math.max(1, Math.min(4, +d.dimension_size_large_x || 1)), sz = Math.max(1, Math.min(4, +d.dimension_size_large_z || 1));
+  const out = [];
+  for (let z = pz; z < pz + sz; z++) for (let x = px; x < px + sx; x++) out.push(String((dim - 1) * 1000000 + z * 1000 + x + 1));
+  return out;
+}
 function houseDimensions(housing){
   const net = String(housing.network_entity_id);
   return new Set(liveRows('dimension_description_state', r => String(r.dimension_network_entity_id) === net)
@@ -5893,18 +5916,15 @@ async function fetchPlayerInvRelay(id){
   const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
   // house chests + the house's entrance (for its display name)
   const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
-  // ⚠️ "built by this player, in no claim" is NOT the same as "inside their house" — it also matches
-  // storage they placed elsewhere in the world, which showed up as phantom containers (5 extra for a
-  // 46-chest house, all merging under one building-type name because the tab groups by name). Scope to
-  // the house's actual interior: player_housing_state.network_entity_id → dimension_description_state
-  // → location_state.dimension. Verified to reproduce the relay's own housing view exactly.
-  const candidates = liveRows('building_state', r => String(r.claim_entity_id) === '0' && String(r.constructed_by_player_entity_id) === id);
+  // Everything inside the house's dimension(s) — player_housing_state.network_entity_id →
+  // dimension_description_state → the interior's chunk cell(s) → location_state (see liveWantedRefs) —
+  // and the buildings among those are the house's containers, whoever placed them. The old rule,
+  // "buildings this player constructed with no claim", showed Chelsey an empty house: all three of her
+  // chests were built by Velcruza. Chests a player placed in SOMEONE ELSE's house belong to that house
+  // (they show under its owner when tracked), not here.
   const inHouse = housing ? buildingsInHouse(housing) : null;
   const houseB = new Map();
-  candidates.forEach(r => {
-    if (inHouse && !inHouse.has(String(r.entity_id))) return;   // placed somewhere else — not house storage
-    houseB.set(String(r.entity_id), r);
-  });
+  if (inHouse) liveRows('building_state', r => inHouse.has(String(r.entity_id))).forEach(r => houseB.set(String(r.entity_id), r));
   syncRelayPlaces();   // fold the cache's building/nickname/claim rows into the persisted name maps
   const bankInvs = [];
   bankRows.forEach(r => {
