@@ -11322,7 +11322,7 @@ function renderAlerts(){
       </div>
       ${_ttsSection}
       <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full, driven by a live stamina stream rather than polling — so it lands the moment it happens.</div>
-      <div class="al-section-title">Default alerts &amp; sounds <span style="font-weight:400;color:var(--text3);font-size:11px">— apply to every tracked player unless overridden below</span></div>
+      <div class="al-section-title">Default alerts &amp; sounds <span style="font-weight:400;color:var(--text3);font-size:11px">— changing one here applies it to every tracked player; the per-player rows below can then differ</span></div>
       <div class="al-list">
         ${_alKeys.map(typeRow).join('')}
       </div>
@@ -11336,12 +11336,18 @@ function toggleAlertTts(on){ loadAlerts(); alertSettings.tts.on = !!on; saveAler
 function setAlertTtsVoice(uri){ loadAlerts(); alertSettings.tts.voice = uri; saveAlerts(); testAlertTts(); }
 function setAlertTtsRate(v){ loadAlerts(); alertSettings.tts.rate = parseFloat(v) || 0.95; saveAlerts(); }
 function testAlertTts(){ loadAlerts(); speakAlert('Alert test — stamina is full.'); }
-function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
+// A change on a "Default alerts" row applies to EVERY tracked player. The per-player chips store explicit
+// overrides, and before this the default only reached players without one — so a player whose chip had
+// ever been ticked by hand stayed pinned, and "turn idle off for everyone" silently skipped them (the
+// first tracked player, typically, being the one whose chips get touched). Clearing that setting's
+// overrides makes the default row a real bulk switch; chips can still diverge again afterwards.
+function palClearOverride(field){ const ps = palPlayers(); Object.values(ps).forEach(p => { if (p && field in p) delete p[field]; }); }
+function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !!on; palClearOverride(key); saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); playAlertSound(v); }
 function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
-function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); saveAlerts(); restartAlerts(); }
-function setAlertStaminaDrop(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n)) n = 0; alertSettings.types.stamina.dropPct = Math.max(0, Math.min(99, n)); saveAlerts(); restartAlerts(); }
-function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; alertSettings.types.craftDone.muteSecs = n; saveAlerts(); }
+function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); palClearOverride('idleSecs'); saveAlerts(); restartAlerts(); renderAlerts(); }
+function setAlertStaminaDrop(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n)) n = 0; alertSettings.types.stamina.dropPct = Math.max(0, Math.min(99, n)); palClearOverride('staminaDrop'); saveAlerts(); restartAlerts(); renderAlerts(); }
+function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; alertSettings.types.craftDone.muteSecs = n; palClearOverride('craftMuteSecs'); saveAlerts(); renderAlerts(); }
 function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
 
 // ══════════════════════════════════════════════════════════════════════════
