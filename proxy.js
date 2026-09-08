@@ -536,22 +536,6 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Proxy the bitcraftmap data backend (live resources/enemies by region) → /bcmap/region7/resource/1
-  if (req.url.startsWith('/bcmap/')) {
-    const bcReq = https.request({
-      hostname: 'bcmap-api.bitjita.com',
-      path: req.url.slice('/bcmap'.length),
-      method: 'GET',
-      headers: { 'User-Agent': 'BitcraftCompanion/1.0' }
-    }, (apiRes) => {
-      res.writeHead(apiRes.statusCode, { 'Content-Type': apiRes.headers['content-type'] || 'application/json' });
-      apiRes.pipe(res);
-    });
-    bcReq.on('error', (err) => { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); });
-    bcReq.end();
-    return;
-  }
-
   // Forward the request body for methods that carry one. This passthrough was GET-only — it called
   // proxy.end() with nothing — so a POST arrived upstream with an empty body and came back
   // "400 Invalid JSON in request body". /api/market/prices/bulk needs it.

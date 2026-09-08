@@ -8376,8 +8376,8 @@ async function bcInitMap(){
 
   // Restore tracked resources/enemies (refetch their points)
   const savedRes = bcLoadTrackedRes();
-  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, liveOptIn:t.liveOptIn, count:0, pts:[] }; });
-  if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); bcRefreshAllTracked(); bcScheduleResourcePoll(); }
+  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, count:0, pts:[] }; });
+  if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); }   // bcRelaySync below subscribes them
   // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
   const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
   bcGrowthApply(); bcRelaySync();
@@ -8596,7 +8596,6 @@ document.addEventListener('visibilitychange', () => {
     // Snap markers to current positions via REST without waiting for the 15s fallback poll.
     Object.keys(bcTracked).forEach(id => bcFetchPlayerPos(id).then(r => { if (r && r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z); }));
   }
-  if (Object.keys(bcTrackedRes).length) bcRefreshAllTracked().catch(()=>{});
   if (bcEventsLayer) bcRefreshEvents().catch(()=>{}); // keep Hexite Vault timers/positions current
   if (bcGeysersLayer) bcRefreshUncharted().catch(()=>{}); // keep Uncharted POIs current
 });
@@ -8805,25 +8804,29 @@ function bcTrackFromSearch(i){
   bcPlayerSearchResults = [];
 }
 
-// ===== Phase 3: live resources / enemies (bcmap-api by region) =====
+// ===== Phase 3: live resources / enemies (prism-relay) =====
+// One model for every tracked type: a relay subscription (see the "Live positions via prism-relay" section).
 let bcResourceIndex = {}, bcCreatureIndex = {};
 // Resource/creature type ids that have too few nodes/spawns world-wide to be worth tracking (built offline
 // by counting bcmap-api points across all regions — see docs/live-map-plan.md). Resources under ~15 nodes
 // and creatures with 0 spawns are hidden so the list isn't cluttered with un-trackable entries (Depleted/
 // Spawner/Den/interior props, doors, planted saplings, ultra-rare drop-only ores like Auric/Argent, …).
 let bcUntrackable = { resources: new Set(), enemies: new Set() };
-let bcResourceLayer = null, bcResourcePollTimer = null;
+let bcResourceLayer = null;
 let bcMapRegion = '';                  // '' = all regions; else a regionId (limits resource fetching)
 function bcLoadMapRegion(){ try { const v = localStorage.getItem('bc_map_region'); if (v != null) bcMapRegion = v; } catch(e){} }
-function bcSetMapRegion(v){ bcMapRegion = v || ''; safeSetItem('bc_map_region', bcMapRegion); bcRefreshAllTracked(); bcRelaySync(); }
+function bcSetMapRegion(v){ bcMapRegion = v || ''; safeSetItem('bc_map_region', bcMapRegion); bcRelaySync(); }   // every subscription is rebuilt for the new scope
 async function bcInitRegionSelect(){
   const sel = document.getElementById('bc-region-sel'); if (!sel) return;
   if (!marketRegions.length){ try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){} }
   sel.innerHTML = regionOptionsHtml(bcMapRegion);  // "Name (R##)", first option = All regions
 }
 let bcResSearch = '', bcResTier = '', bcResTag = '';
-const BC_RESOURCE_POLL_MS = 60000;
-let bcPollMult = 1;                    // poll backoff multiplier while bcmap-api is unreachable (see bcRefreshAllTracked)
+// Above this many live points with "All regions" selected, the status line suggests picking a region. The
+// relay serves it fine (Sticks world-wide is 1.2M rows in ~6s, measured 2026-09-08) but it's a lot of browser
+// memory for a map nobody can read at that density. There is no pre-check — the count is only known once
+// the snapshot has landed — so it's a hint after the fact, not a gate.
+const BC_BIG_HINT = 300000;
 
 // Dot radius: scarcer resources draw bigger; dots shrink when zoomed out (less clutter) and grow
 // when zoomed in (easier to see your surroundings). Combined with a thin border for visibility.
@@ -9074,34 +9077,9 @@ let bcTrackedRes = {};                 // "kind:id" -> {kind,id,name,color,count
 const bcResColors = ['#5fd0ff','#ff7b7b','#7CFF7B','#ffd166','#c77dff','#5ce1e6','#ff9f45','#f178b6'];
 let bcResColorIdx = 0;
 function bcResKey(kind,id){ return kind + ':' + id; }
-function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, relay:!!t.relay, liveOptIn:t.liveOptIn })))); }
+function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color })))); }
 function bcLoadTrackedRes(){ try { const v = localStorage.getItem('bc_map_tracked_res_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
 
-async function bcFetchResourcePts(kind, id){
-  if (!marketRegions.length){ try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){} }
-  // Region filter: only fetch the chosen region (lighter), or all regions when unset.
-  const regionsToScan = bcMapRegion ? marketRegions.filter(r => String(r.regionId||r.id||r.entityId) === String(bcMapRegion)) : marketRegions;
-  const pts = []; let answered = 0;
-  await Promise.all(regionsToScan.map(async r => {
-    const rid = r.regionId || r.id || r.entityId; if (rid == null) return;
-    try {
-      const res = await fetch(`${API}/bcmap/region${rid}/${kind}/${id}`);
-      if (res.status === 404){ answered++; return; }   // no tile for this type/region: a real "none"
-      if (!res.ok) return;                              // 5xx / gateway error: the feed is down, not empty
-      answered++;
-      const d = await res.json();
-      (d.features || []).forEach(f => {
-        const g = f.geometry; if (!g) return;
-        if (g.type === 'MultiPoint') g.coordinates.forEach(c => pts.push(c));
-        else if (g.type === 'Point') pts.push(g.coordinates);
-      });
-    } catch(e){}
-  }));
-  // feedOk=false: not one region answered (bcmap-api down / unreachable) — the count is UNKNOWN, not zero.
-  // Callers show "feed down" instead of "none found" and don't treat the type as empty.
-  pts.feedOk = answered > 0;
-  return pts;
-}
 function bcRedrawTracked(){
   if (!bcResourceLayer) return;
   bcResourceLayer.setDatasets(Object.values(bcTrackedRes).map(t => ({ pts: t.pts||[], color: t.color, count: t.count })));
@@ -9112,11 +9090,11 @@ function bcUpdateResStatus(){
   if (!ts.length){ status.textContent = ''; return; }
   const total = ts.reduce((s,t)=>s+(t.count||0), 0);
   const notes = [];
-  if (bcRelayDown && bcUseRelay && (bcRelayEnemyTypes().length || bcRelayResourceTypes().length)) notes.push('relay down — retrying');
-  if (ts.some(t => t.feedOk === false)) notes.push('map feed down');
+  if (bcRelayDown) notes.push('relay down — retrying');
+  if (!bcMapRegion && ts.some(t => (t.count || 0) > BC_BIG_HINT)) notes.push('big type — pick a region to lighten it');
   status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}` + notes.map(n => ' · ' + n).join('');
 }
-async function bcToggleMapItem(kind, id){
+function bcToggleMapItem(kind, id){
   const key = bcResKey(kind, id);
   if (bcTrackedRes[key]){ bcUntrackRes(key); return; }
   const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {};
@@ -9126,30 +9104,14 @@ async function bcToggleMapItem(kind, id){
   const status = document.getElementById('bc-res-status');
   if (status) status.innerHTML = '<i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block"></i> Loading…';
   bcSaveTrackedRes();
-  if (kind === 'enemy' && bcUseRelay){                                       // live via prism-relay
-    bcRelaySync(); bcRenderTrackedResList();
-    if (!bcRelayDown) return;                                               // connected (or connecting): the relay cache drives the points
-    // relay known-down → the REST aggregate covers it until the relay is back (see bcRelayFallback)
-  }
-  const pts = await bcFetchResourcePts(kind, id);
-  const t = bcTrackedRes[key]; if (!t) return; // untracked while loading
-  if (t.kind === 'enemy' && bcRelayActive()) return;   // the relay came back while we were fetching — its cache owns the points now
-  t.pts = pts; t.count = pts.length; t.feedOk = pts.feedOk;
-  // bcmap-api's static tiles omit transient/dynamic nodes (e.g. Uncharted Shipment cargo). If it ANSWERED
-  // with none, fall back to the live prism-relay resource_location stream, which does carry them. Not when the
-  // feed is down — that would silently opt every tracked type into live streaming (Sticks alone is ~125k rows).
-  if (kind === 'resource' && bcUseRelay && pts.length === 0 && pts.feedOk){ t.relay = true; bcSaveTrackedRes(); bcRelaySync(); }
-  bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
-  bcScheduleResourcePoll();
+  bcRelaySync();   // one subscription per tracked type, region-scoped when a region is selected; its cache drives the points
+  bcRenderTrackedResList();
 }
 function bcUntrackRes(key){
-  const trk = bcTrackedRes[key];
-  const wasRelay = trk && (trk.kind === 'enemy' || trk.relay);   // enemies + relay-backed resources stream live
   delete bcTrackedRes[key];
   bcSaveTrackedRes();
-  if (wasRelay && bcUseRelay) bcRelaySync();      // drop that type's subscription (disconnects if none left)
+  bcRelaySync();      // drop that type's subscription (disconnects if none left)
   bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList(); bcUpdateResStatus();
-  if (!Object.keys(bcTrackedRes).length) bcStopResourcePoll();
 }
 // Live update while dragging in the picker: update the map only — do NOT re-render the tracked
 // list, which would replace the <input type=color> and close the native picker.
@@ -9172,100 +9134,32 @@ function bcRenderTrackedResList(){
   el.style.display = '';
   el.innerHTML = `<div class="bc-trk-hdr">Tracked (${ts.length})</div>` + ts.map(t => {
     const key = bcResKey(t.kind, t.id);
-    const live = !!t.relay;
-    const down = t.count === 0 && t.feedOk === false;   // nothing answered — the count is unknown, not zero
-    const ct = typeof t.count === 'number'
-      ? `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${down ? 'Map data feed unreachable right now — retrying automatically' : `${t.count.toLocaleString()} found${bcMapRegion?' in this region':''}${live?' · live':''}`}">${down ? 'feed down' : t.count===0 ? 'none found' : t.count.toLocaleString()}</span>`
-      : '';
-    // Live toggle (resources only — enemies are always live). On = stream spawns/harvests from the relay
-    // in real time; off = the 60s aggregate poll.
-    const liveBtn = (t.kind === 'resource' && bcUseRelay)
-      ? `<i class="ti ti-broadcast bc-trk-live" title="${live ? 'Updating live via relay — click to use the 60s poll' : 'Update live via relay instead of the 60s poll'}" style="cursor:pointer;font-size:14px;flex-shrink:0;margin-left:2px;color:${live ? 'var(--teal-light)' : 'var(--text3)'}" onclick="bcToggleResLive('${key}')"></i>`
-      : '';
+    const pending = !t.applied;   // subscription not applied yet (connecting, or a region switch rebuilding it)
+    const ct = pending
+      ? `<span class="bc-trk-ct" title="Loading from the relay…">…</span>`
+      : `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} live${bcMapRegion?' in this region':' world-wide'}">${t.count===0?'none found':t.count.toLocaleString()}</span>`;
     return `<div class="bc-trk">
       <span class="bc-trk-nm" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
       ${t.tier>0?`<span class="bc-trk-t">T${t.tier}</span>`:''}
       ${t.tag?`<span class="bc-trk-tag">${escHtml(t.tag)}</span>`:''}
       ${ct}
-      ${liveBtn}
       <input type="color" class="bc-trk-col" value="${t.color}" oninput="bcSetResColorLive('${key}', this.value)" onchange="bcSetResColor('${key}', this.value)" title="Change color">
       <i class="ti ti-x bc-trk-x" onclick="bcUntrackRes('${key}')" title="Untrack"></i>
     </div>`;
   }).join('');
 }
-// Above this many live nodes, streaming a resource type via the relay is a firehose (e.g. Sticks ~125k)
-// — warn before opting in. Uncharted Shipment (~28k) streams fine, so the bar is set generously.
-const BC_LIVE_MAX = 50000;
-// Opt a tracked resource into (or out of) live relay streaming instead of the 60s aggregate poll.
-function bcToggleResLive(key){
-  const t = bcTrackedRes[key]; if (!t || t.kind !== 'resource') return;
-  if (!t.relay){                 // → go live
-    if (!bcUseRelay || bcRelayDown){ alert('Live map streaming (prism-relay) is unreachable right now — the app keeps retrying in the background.'); return; }
-    if (typeof t.count === 'number' && t.count > BC_LIVE_MAX &&
-        !confirm(`${t.name} has ~${t.count.toLocaleString()} nodes right now. Streaming that many live can make the map sluggish. Go live anyway?`)) return;
-    t.relay = true; t.liveOptIn = true;
-    bcSaveTrackedRes();
-    bcRelaySync();               // subscribe on the relay; its cache drives the points
-    bcRenderTrackedResList();
-  } else {                       // → back to the 60s poll
-    t.relay = false; t.liveOptIn = false;
-    bcSaveTrackedRes();
-    bcRelaySync();               // drop that subscription (disconnects the relay if nothing live is left)
-    bcRenderTrackedResList();
-    bcFetchResourcePts(t.kind, t.id).then(pts => {   // repaint from the aggregate right away
-      const cur = bcTrackedRes[key];
-      if (cur && !cur.relay){ cur.pts = pts; cur.count = pts.length; bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus(); }
-    }).catch(()=>{});
-    bcScheduleResourcePoll();
-  }
-}
-async function bcRefreshAllTracked(){
-  await Promise.all(Object.keys(bcTrackedRes).map(async key => {
-    const t = bcTrackedRes[key]; if (!t) return;
-    if (t.kind === 'enemy' && bcRelayActive()) return;              // enemies are live via the relay — don't overwrite
-    if (t.kind === 'resource' && t.relay && bcRelayActive()) return; // relay-backed resources too
-    const pts = await bcFetchResourcePts(t.kind, t.id);
-    const cur = bcTrackedRes[key]; if (!cur) return;
-    if (cur.kind === 'enemy' && bcRelayActive()) return;                 // relay came back mid-fetch: its cache owns the points
-    if (cur.kind === 'resource' && cur.relay && bcRelayActive()) return;
-    cur.pts = pts; cur.count = pts.length; cur.feedOk = pts.feedOk;
-  }));
-  // Any resource bcmap-api ANSWERS nothing for → back it with the live relay (Uncharted Shipment etc.).
-  // Also migrates resources tracked before relay-backing existed. Never off a failed fetch (feedOk false):
-  // with the feed down that would opt every tracked type into live streaming at once.
-  let flagged = false;
-  if (bcUseRelay){ for (const key in bcTrackedRes){ const t = bcTrackedRes[key]; if (t.kind === 'resource' && !t.relay && t.count === 0 && t.feedOk !== false && t.liveOptIn !== false){ t.relay = true; flagged = true; } } }
-  if (flagged){ bcSaveTrackedRes(); bcRelaySync(); }
-  // Feed down for everything the poll covers → poll less often (60s → 2 → 4 → 5 min) until it answers again.
-  const polled = Object.values(bcTrackedRes).filter(t => !((t.kind === 'enemy' || t.relay) && bcRelayActive()));
-  bcPollMult = (polled.length && polled.every(t => t.feedOk === false)) ? Math.min(5, bcPollMult * 2) : 1;
-  bcRedrawTracked(); bcRenderTrackedResList(); bcUpdateResStatus();
-}
-function bcScheduleResourcePoll(){
-  bcStopResourcePoll();
-  bcResourcePollTimer = setTimeout(() => {
-    // ALWAYS reschedule the next tick — even if this refresh throws. Chaining the next poll off a
-    // bare .then() meant a single rejected fetch (network blip, 429, a draw error) killed the loop
-    // permanently. .catch swallows the error so the timer keeps ticking and self-heals.
-    if (currentTab === 'map' && !document.hidden && Object.keys(bcTrackedRes).length){
-      bcRefreshAllTracked().catch(()=>{}).then(bcScheduleResourcePoll);
-    } else {
-      bcScheduleResourcePoll(); // tab hidden / not on map — keep timer alive, resume when visible
-    }
-  }, BC_RESOURCE_POLL_MS * bcPollMult);
-}
-function bcStopResourcePoll(){ if (bcResourcePollTimer){ clearTimeout(bcResourcePollTimer); bcResourcePollTimer = null; } }
-
-// ── Live enemy positions via prism-relay (SpacetimeDB) ──────────────────────────────────────────────
-// Animals move constantly and carry per-entity IDs, so we stream them live (bccodex-style) from the
-// community relay instead of the 60s aggregate poll. RESOURCES mostly stay on the poll — resource_location
-// is a 125k+/type firehose and the aggregate GeoJSON is far cheaper for static nodes — EXCEPT resources
-// bcmap-api has no data for (transient/dynamic cargo like Uncharted Shipment): those are marked t.relay and
-// streamed from resource_location too (rare types = few rows, no firehose). If the relay can't connect,
-// enemies transparently fall back to the REST poll.  See docs/live-map-plan.md.
-let bcUseRelay = (() => { try { return localStorage.getItem('bc_use_relay') !== '0'; } catch(e){ return true; } })();
+// ── Live positions via prism-relay (SpacetimeDB) ─────────────────────────────────────────────────
+// Every tracked type — creatures and resources alike — is one subscription on the community relay
+// (enemy_location / resource_location, filtered to the type and, when a region is selected, the region);
+// the SDK cache drives the points and bcRelayRebuild turns it into datasets. Resources used to come from
+// bcmap-api's static tiles with the relay as an opt-in: that feed died for days at a time, static tiles
+// never carried transient cargo, and the two-source dance produced "none found until you press live".
+// Measured 2026-09-08: the relay serves a common tree type world-wide in ~1.3s (155k rows), an ore in ~0.6s
+// (18k), and static types produce no deltas at all — so for the one or two types people actually track,
+// one source is simpler and no heavier. Relay unreachable → "relay down — retrying" + backoff reconnect.
+// See docs/live-map-plan.md.
 let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false, bcRelayConnecting = false;
-// Relay unreachable (connect failed / connection dropped): enemies fall back to the REST poll meanwhile and
+// Relay unreachable (connect failed / connection dropped): the list keeps its last counts, says so, and
 // the app keeps retrying with backoff (30s → 1 → 2 → 5 min) while the Map tab shows something that streams.
 // Before, one failed handshake turned the relay off for the whole session — and a saved identity token the
 // relay no longer accepts (it signs tokens with its own key; a redeploy invalidates old ones) failed EVERY
@@ -9277,9 +9171,8 @@ let bcRelaySubRegion = null;       // region the current subs were built for (''
 let bcRelayRedrawT = null;
 const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-relay';
 function bcRelayEnemyTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'enemy'); }
-// Resources bcmap-api has no data for, streamed live from resource_location instead (e.g. Uncharted Shipment).
-function bcRelayResourceTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'resource' && t.relay); }
-function bcRelayActive(){ return bcUseRelay && bcRelayReady; }
+function bcRelayResourceTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'resource'); }
+function bcRelayActive(){ return bcRelayReady; }
 async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${API}/mapassets/prism-relay.js`); return bcRelayLib; }
 // Rebuild each tracked enemy's points from the SDK cache (bucketed by enemyType). Throttled — animals
 // emit a flood of move events — and only repaints while the Map tab is showing.
@@ -9295,15 +9188,14 @@ function bcRelayRebuild(){
     if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } }  // plain Small-Hex
   }
   catch(e){ return; }
-  bcRelayEnemyTypes().forEach(t => { t.count = t.pts.length; t.feedOk = true; });
-  resTypes.forEach(t => { t.count = t.pts.length; t.feedOk = true; });
+  bcRelayEnemyTypes().forEach(t => t.count = t.pts.length);
+  resTypes.forEach(t => t.count = t.pts.length);
   if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
 function bcRelaySync(){
-  if (!bcUseRelay) return;
-  // Only stream while the Map tab is open and showing enemies — drop the connection otherwise (polite,
+  // Only stream while the Map tab is open and showing tracked types — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
   const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcRelayResourceTypes().length > 0 || bcGrowthOn);
@@ -9337,7 +9229,8 @@ function bcRelaySync(){
         ? [ tables.resource_location.where(r => r.resourceId.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
         : [ tables.resource_location.where(r => r.resourceId.eq(id)) ];    // all regions (heavier)
     }
-    bcRelaySubs[k] = bcRelayConn.subscriptionBuilder().onApplied(() => bcRelayScheduleRedraw()).onError(() => {}).subscribe(q);
+    const tkey = bcResKey(want[k].kind, String(id)); if (bcTrackedRes[tkey]) bcTrackedRes[tkey].applied = false;   // "…" in the list until the snapshot lands
+    bcRelaySubs[k] = bcRelayConn.subscriptionBuilder().onApplied(() => { if (bcTrackedRes[tkey]) bcTrackedRes[tkey].applied = true; bcRelayScheduleRedraw(); }).onError(() => {}).subscribe(q);
   }
   // growth_timers respawn overlay (region-scoped; only ~tens of rows)
   if (bcGrowthOn){
@@ -9412,15 +9305,14 @@ function bcRelayDisconnect(){
   bcGrowthClear();
   if (bcRelayConn){ const c = bcRelayConn; bcRelayConn = null; try { c.disconnect(); } catch(e){} }   // null first: its onDisconnect must not reconnect
 }
-// Relay unreachable → the REST poll covers enemies (and relay-backed resources) meanwhile, and the relay is
-// retried with backoff. bcUseRelay (the user's preference) is left alone — it used to be flipped off for the
-// whole session, which parked every creature on the aggregate feed until a reload.
+// Relay unreachable → keep whatever the list last knew, say so in the status line, and retry the relay with
+// backoff. (One failed handshake used to switch the relay off for the whole session, which parked every
+// creature on the old aggregate feed until a reload — the feed that no longer exists.)
 function bcRelayFallback(){
   bcRelayDown = true;
   bcRelayRetryMs = bcRelayRetryMs ? Math.min(BC_RELAY_RETRY_MAX, bcRelayRetryMs * 2) : BC_RELAY_RETRY_MIN;
   bcRelayArmRetry(bcRelayRetryMs);
-  bcRefreshAllTracked().catch(()=>{}); bcScheduleResourcePoll();
-  bcUpdateResStatus();
+  bcRenderTrackedResList(); bcUpdateResStatus();
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
