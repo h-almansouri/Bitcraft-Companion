@@ -757,6 +757,8 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .bc-mp-list{margin-top:6px;display:flex;flex-direction:column;gap:3px;max-height:130px;overflow-y:auto}
 .bc-mp-prow{display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:3px 7px}
 .bc-mp-prow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bc-players-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin:6px 0 2px}
+.bc-players-count{color:var(--text3);font-size:11px}
 .bc-pl-col{width:13px!important;height:13px!important;min-width:0;padding:0!important;margin:0;border:1px solid var(--border)!important;border-radius:50%!important;background:none;cursor:pointer;flex:0 0 13px}   /* !important: the sidebar's generic input rule sets width:100% (same fix as .bc-trk-col) */
 .bc-pl-col::-webkit-color-swatch{border:none;border-radius:50%}
 .bc-pl-col::-webkit-color-swatch-wrapper{padding:0}
@@ -1762,6 +1764,7 @@ function switchTab(tab, opts) {
   else if (tab === 'skills') renderExperienceTab();
   else if (currentPlayer) loadTab(tab);
   bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
+  if (tab === 'map' && typeof bcPlayersSchedule === 'function') bcPlayersSchedule();   // repaint the "everyone online" layer from the cache
 }
 function loadTab(tab, silent=false) {
   if (tab === 'skills') { renderExperienceTab(); return; } // multi-player: one section per tracked player
@@ -4014,6 +4017,7 @@ const LIVE_COLS = {
   equipment_state: ['entity_id','equipment_slots'],
   equipment_preset_state: ['entity_id','player_entity_id','index','active','equipment_slots'],
   signed_in_player_state: ['entity_id'],
+  player_username_state: ['entity_id','username'],
   traveler_task_state: ['entity_id','player_entity_id','traveler_id','task_id','completed'],
   claim_state: ['entity_id','owner_player_entity_id','owner_building_entity_id','name','neutral'],
   world_region_name_state: ['id','player_facing_name','module_name_prefix'],
@@ -4389,17 +4393,26 @@ function liveQuerySet(ids, region){
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
   const self  = ids.map(i => `entity_id = ${i}`).join(' OR ');
   const pcol  = ids.map(i => `player_entity_id = ${i}`).join(' OR ');
-  const sqls = [
+  // Roster queries only when there IS a roster — the map's "everyone online" layer can hold the sockets
+  // open with no tracked player at all (see bcPlayersWanted), and an empty OR-chain is not SQL.
+  const sqls = !ids.length ? [] : [
     ...LIVE_TABLES_OWNED.map(t => `SELECT * FROM ${t} WHERE ${owner}`),
     ...LIVE_TABLES_SELF.map(t => `SELECT * FROM ${t} WHERE ${self}`),
     ...LIVE_TABLES_PLAYERCOL.map(t => `SELECT * FROM ${t} WHERE ${pcol}`),
     `SELECT * FROM inventory_state WHERE ${ids.map(i => `player_owner_entity_id = ${i}`).join(' OR ')}`,   // banks (per region)
     `SELECT * FROM deployable_state_v2 WHERE ${ids.map(i => `owner_id = ${i}`).join(' OR ')}`,             // vehicle discovery
-    // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
-    // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
-    'SELECT * FROM world_region_name_state',
-    'SELECT * FROM traveler_task_loop_timer',
   ];
+  // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
+  // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
+  sqls.push('SELECT * FROM world_region_name_state', 'SELECT * FROM traveler_task_loop_timer');
+  // Map "everyone online" layer (bcPlayersWanted): the same three questions bitjita's map asks its relay —
+  // movement rows of signed-in players in the overworld, their usernames, and the signed-in list itself.
+  // Semijoins, so a sign-out deletes that player's rows from the result — no client-side reaping. Measured
+  // r19, 2026-09-08: 51 players, 13 KB snapshot in 350 ms, ~28 movement deltas/s while they play.
+  if (bcPlayersWanted(region)) sqls.push(
+    'SELECT mobile_entity_state.* FROM mobile_entity_state JOIN signed_in_player_state ON mobile_entity_state.entity_id = signed_in_player_state.entity_id WHERE mobile_entity_state.dimension = 1',
+    'SELECT player_username_state.* FROM player_username_state JOIN signed_in_player_state ON player_username_state.entity_id = signed_in_player_state.entity_id',
+    'SELECT * FROM signed_in_player_state');
   // Discovered references. An entity id encodes its region in the top byte, so each socket only carries
   // the ids that actually live in ITS mirror — 13 regions don't all get all 900 lookups.
   // ⚠️ …except when the entity MOVED. A deployable (cart, boat, cache) carries its inventory row into
@@ -4443,7 +4456,7 @@ function liveQuerySet(ids, region){
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
       'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
-      'dimension_description_state', 'location_state', 'mobile_entity_state'],
+      'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -4457,7 +4470,7 @@ function liveRegionName(rg){
 // only updates pause for the ~1s the redials take.
 function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
-  if (!ids.length){ liveStopAll(); return; }
+  if (!ids.length && !bcPlayersOn){ liveStopAll(); return; }   // the map's "everyone online" layer alone keeps the sockets up
   const pKey = ids.join(',');
   // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
@@ -4472,7 +4485,7 @@ function liveStart(){
   // save-on-change-only path meant a cleared (or never-written) blob stayed empty forever, so every
   // refresh paid a cold discovery round it should have skipped.
   if (!saved || liveRefsKey(saved) !== liveRefsKey(liveRefs)) liveSaveRefs(pKey, liveRefs);
-  const key = pKey + '#' + liveRefsKey(liveRefs);
+  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey();   // the layer's on/off + region scope is part of the query set
   // roster/ref redial → kick the doorbells again once re-complete, and re-arm the settle gate so the
   // NEXT first-flip (a roster change re-enters the boot path) waits for discovery all over again
   if (key !== liveRosterKey){ _liveCompleteKicked = false; _liveRefsSettled = false; }
@@ -4916,8 +4929,10 @@ function liveBridge(evs){
       // presence: a row EXISTS iff signed in — inserts mark online, deletes mark offline. Snapshots seed
       // the truth for players present; absence is handled by refreshPlayerOnline's cache read.
       let touched = false;
-      ev.rows.forEach(r => { playerOnline[String(r.entity_id)] = true; touched = true; });
-      if (ev.isDelta) ev.deletes.forEach(r => { playerOnline[String(r.entity_id)] = false; touched = true; });
+      // With the map's "everyone online" layer on this table is subscribed whole (~50 rows/region), so
+      // sign-ins/outs arrive for the whole world — only a tracked player's change repaints the roster dots.
+      ev.rows.forEach(r => { const id = String(r.entity_id); playerOnline[id] = true; if (isPlayerTracked(id)) touched = true; });
+      if (ev.isDelta) ev.deletes.forEach(r => { const id = String(r.entity_id); playerOnline[id] = false; if (isPlayerTracked(id)) touched = true; });
       if (touched) applyPlayerOnlineDots();
     }
   });
@@ -8013,6 +8028,7 @@ function renderMap(){
               <button class="bc-mp-btn" id="bc-track-me" onclick="bcTrackMe()" title="Track yourself">Me</button>
             </div>
             <div id="bc-player-results"></div>
+            <div class="bc-players-row"><label style="display:flex;align-items:center;gap:.4rem;flex:1;cursor:pointer" title="Every signed-in player in the overworld, streamed from the bitcraftsync relay as they move. Follows the region selector — all regions is heavier."><input type="checkbox" id="bc-players-toggle" style="width:auto" onchange="bcPlayersToggle(this.checked)"> <i class="ti ti-users"></i> Everyone online <span id="bc-players-count" class="bc-players-count"></span></label><input type="color" class="bc-pl-col" id="bc-players-color" value="#f8fafc" oninput="bcPlayersSetColor(this.value)" title="Dot colour"></div>
             <div id="bc-players-list" class="bc-mp-list"></div>
           </div>
           <div class="map-side-sec map-side-grow">
@@ -8362,6 +8378,7 @@ async function bcInitMap(){
 
   // ----- Resource canvas overlay + sidebar wiring -----
   bcResourceLayer = new (bcPointLayerClass())({ radius:3 }).addTo(bcMap);
+  bcMap.on('click', bcPlayersClick);   // a dot on the "everyone online" layer → that player's lookup page
   await bcLoadIndexes();
   bcLoadHidden();
   bcLoadMapRegion();
@@ -8380,6 +8397,7 @@ async function bcInitMap(){
   if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); }   // bcRelaySync below subscribes them
   // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
   const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
+  bcPlayersApply(); bcPlayersSchedule();   // "everyone online" layer: restore the toggle, paint from whatever the cache already holds
   bcGrowthApply(); bcRelaySync();
 
   // Restore tracked players (refetch positions + resubscribe)
@@ -8590,6 +8608,7 @@ document.addEventListener('visibilitychange', () => {
   // dropped while backgrounded would otherwise stay dead until the next 15s tick.
   if (!document.hidden) bcSyncAlertFeed();
   if (document.hidden || currentTab !== 'map') return;
+  bcPlayersSchedule();   // the layer's repaint is skipped while hidden — catch up now
   if (Object.keys(bcTracked).length){
     const stale = !bcPlayerSocket || bcPlayerSocket.readyState !== 1 || (bcLastWsMsg && Date.now() - bcLastWsMsg > 90000);
     if (stale) bcForceReconnect(); else bcWsSubscribe();
@@ -8752,6 +8771,58 @@ function bcToggleFollow(id){
   bcSaveTrackedPlayers();
   bcRenderTrackedList();
 }
+// ── "Everyone online" layer ──
+// Every signed-in player in the overworld, as dots with names, straight from the roster's held sockets to
+// the bitcraftsync relay: three extra queries per live region (liveQuerySet → bcPlayersWanted), no new
+// sockets. It follows the region selector — one region is ~28 movement deltas/s, all regions ~9× that —
+// and stays subscribed while it's on whatever tab is showing (redialling 13 sockets on every tab switch
+// would be worse); only the repaint is gated on the Map tab. Players tracked on the map keep their own
+// coloured marker and are left out here. Clicking a dot opens that player's lookup page.
+let bcPlayersOn = (() => { try { return localStorage.getItem('bc_map_players_on') === '1'; } catch(e){ return false; } })();
+let bcPlayersColor = (() => { try { return localStorage.getItem('bc_map_players_color') || '#f8fafc'; } catch(e){ return '#f8fafc'; } })();
+let bcPlayersLayer = null, bcPlayersT = null, bcPlayersLast = { pts: [], ids: [] };
+function bcPlayersKey(){ return bcPlayersOn ? (bcMapRegion || 'all') : ''; }
+function bcPlayersWanted(region){ return bcPlayersOn && !DEAD_REGIONS.has(+region) && (!bcMapRegion || +bcMapRegion === +region); }
+function bcPlayersToggle(on){
+  bcPlayersOn = !!on; safeSetItem('bc_map_players_on', bcPlayersOn ? '1' : '0');
+  bcPlayersApply();
+  liveStart();            // the query set changed → one redial of the held sockets (the roster's one code path)
+  bcPlayersSchedule();
+}
+function bcPlayersSetColor(c){ bcPlayersColor = c; safeSetItem('bc_map_players_color', c); bcPlayersSchedule(); }
+function bcPlayersApply(){
+  if (!bcMap) return;
+  if (!bcPlayersLayer) bcPlayersLayer = new (bcPointLayerClass())({ radius: 4 });
+  if (bcPlayersOn){ if (!bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.addTo(bcMap); }
+  else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [] }; }
+  const chk = document.getElementById('bc-players-toggle'); if (chk) chk.checked = bcPlayersOn;
+  const col = document.getElementById('bc-players-color'); if (col) col.value = bcPlayersColor;
+  const ct = document.getElementById('bc-players-count'); if (ct && !bcPlayersOn) ct.textContent = '';
+}
+function bcPlayersSchedule(){ if (bcPlayersT) return; bcPlayersT = setTimeout(() => { bcPlayersT = null; bcPlayersRebuild(); }, 300); }
+function bcPlayersRebuild(){
+  if (!bcPlayersOn || !bcPlayersLayer) return;
+  const signed = new Set(liveRows('signed_in_player_state', () => true).map(r => String(r.entity_id)));
+  const names = {}; liveRows('player_username_state', () => true).forEach(r => { names[String(r.entity_id)] = r.username; });
+  const pts = [], ids = [], labels = [];
+  liveRows('mobile_entity_state', r => +r.dimension === 1 && signed.has(String(r.entity_id)) && !bcTracked[String(r.entity_id)]).forEach(r => {
+    const x = +r.location_x / 1000, z = +r.location_z / 1000; if (!isFinite(x) || !isFinite(z)) return;   // milli-hex → map space
+    pts.push([x, z]); ids.push(String(r.entity_id)); labels.push(names[String(r.entity_id)] || '');
+  });
+  bcPlayersLast = { pts, ids };
+  const ct = document.getElementById('bc-players-count'); if (ct) ct.textContent = pts.length ? `(${pts.length})` : '';
+  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, labelMinZoom: -1 }]);
+}
+// Click on a dot → that player's lookup page (nearest within a few pixels; markers, popups and controls excluded).
+function bcPlayersClick(e){
+  if (!bcPlayersOn || !bcPlayersLast.pts.length) return;
+  const tgt = e.originalEvent && e.originalEvent.target;
+  if (tgt && tgt.closest && tgt.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control')) return;
+  const cp = e.containerPoint; let best = null, bestD = 14 * 14;
+  bcPlayersLast.pts.forEach((p, i) => { const q = bcMap.latLngToContainerPoint(L.latLng(p[1], p[0])); const dx = q.x - cp.x, dy = q.y - cp.y, d = dx*dx + dy*dy; if (d < bestD){ bestD = d; best = i; } });
+  if (best != null) openLookup(bcPlayersLast.ids[best]);
+}
+onLiveChange(evs => { if (bcPlayersOn && evs.some(e => e.table === 'mobile_entity_state' || e.table === 'signed_in_player_state' || e.table === 'player_username_state')) bcPlayersSchedule(); });
 // Colour picker on a tracked player's row (the circle next to the name). Live, while dragging in the
 // native picker: recolour the marker and its destination trail only — rebuilding the list would replace
 // the <input> and close the picker. Committed (picker closed): persist and re-render.
@@ -8815,7 +8886,7 @@ let bcUntrackable = { resources: new Set(), enemies: new Set() };
 let bcResourceLayer = null;
 let bcMapRegion = '';                  // '' = all regions; else a regionId (limits resource fetching)
 function bcLoadMapRegion(){ try { const v = localStorage.getItem('bc_map_region'); if (v != null) bcMapRegion = v; } catch(e){} }
-function bcSetMapRegion(v){ bcMapRegion = v || ''; safeSetItem('bc_map_region', bcMapRegion); bcRelaySync(); }   // every subscription is rebuilt for the new scope
+function bcSetMapRegion(v){ bcMapRegion = v || ''; safeSetItem('bc_map_region', bcMapRegion); bcRelaySync(); if (bcPlayersOn){ liveStart(); bcPlayersSchedule(); } }   // every subscription is rebuilt for the new scope (the players layer's too)
 async function bcInitRegionSelect(){
   const sel = document.getElementById('bc-region-sel'); if (!sel) return;
   if (!marketRegions.length){ try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){} }
@@ -8958,6 +9029,20 @@ function bcPointLayerClass(){
           }
           if (sq) ctx.fillRect(px - r, py - r, d, d);
           else ctx.drawImage(sp.cv, px - sp.off, py - sp.off);
+        }
+        // Optional name labels (the "everyone online" layer): small sets only, capped per frame, drawn once
+        // the map is zoomed in enough for text to read; outlined so they survive any terrain underneath.
+        if (set.labels && z >= (set.labelMinZoom != null ? set.labelMinZoom : -1)){
+          ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+          ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.strokeStyle = 'rgba(0,0,0,.8)'; ctx.fillStyle = '#fff';
+          let drawn = 0;
+          for (let i=0, j=0; i<n && drawn < 500; i++, j+=2){
+            const label = set.labels[i]; if (!label) continue;
+            const cx = proj[j] * scale - origin.x, cy = proj[j+1] * scale - origin.y;
+            if (cx < minX-r || cx > maxX+r || cy < minY-r || cy > maxY+r) continue;
+            const px = cx - minX + r + 3, py = cy - minY;
+            ctx.strokeText(label, px, py); ctx.fillText(label, px, py); drawn++;
+          }
         }
       }
     }
