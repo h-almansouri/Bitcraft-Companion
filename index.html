@@ -759,6 +759,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .bc-mp-prow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bc-players-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin:6px 0 2px}
 .bc-players-count{color:var(--text3);font-size:11px}
+.bc-ppop{display:flex;align-items:center;gap:10px;white-space:nowrap}
 .bc-pl-col{width:13px!important;height:13px!important;min-width:0;padding:0!important;margin:0;border:1px solid var(--border)!important;border-radius:50%!important;background:none;cursor:pointer;flex:0 0 13px}   /* !important: the sidebar's generic input rule sets width:100% (same fix as .bc-trk-col) */
 .bc-pl-col::-webkit-color-swatch{border:none;border-radius:50%}
 .bc-pl-col::-webkit-color-swatch-wrapper{padding:0}
@@ -7945,71 +7946,6 @@ function bcFeatLatLng(f){
   return L.latLng(c[1], c[0]);
 }
 
-// ----- Hexite Vault world events (live, timed POIs from events.geojson) -----
-// These are world events (not resources — bcmap-api has no point layer for them), served live with a
-// reset timer. Rendered as their own toggleable map layer that refreshes periodically.
-let bcEventsLayer = null, bcVaultIcon = null, bcEventsTimer = null;
-function bcGetVaultIcon(){
-  if (bcVaultIcon) return bcVaultIcon;
-  bcVaultIcon = L.icon({ iconUrl:`${API}/mapassets/vault-event.webp`, iconSize:[38,38], iconAnchor:[19,19], popupAnchor:[0,-19] });  // bitcraftmap's vault icon
-  return bcVaultIcon;
-}
-function bcFmtDur(ms){ const s=Math.max(0,Math.floor(ms/1000)); const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return h>0?`${h}h ${m}m`:`${m}m`; }
-function bcVaultPopup(name, ll, timer){
-  let t = '';
-  if (timer && !isNaN(+timer)){
-    const ms = timer - Date.now();
-    t = ms > 0
-      ? `<br><span style="color:var(--teal-light)">Timer: ${bcFmtDur(ms)}</span> <span style="color:var(--text3)">(${timer.toLocaleTimeString()})</span>`
-      : `<br><span style="color:var(--amber-light)">Active</span>`;
-  }
-  return `<b>${escHtml(name)}</b> <span style="color:var(--text3)">· World event</span>${t}<br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`;
-}
-async function bcRefreshEvents(){
-  if (!bcEventsLayer) return 0;
-  const feats = await bcLoadGeo('events.geojson');
-  bcEventsLayer.clearLayers();
-  const icon = bcGetVaultIcon();
-  feats.forEach(f => {
-    const ll = bcFeatLatLng(f); if (!ll) return;
-    const p = f.properties || {};
-    const m = L.marker(ll, { icon, title: p.name || 'World Event' });
-    m.bindPopup(bcVaultPopup(p.name || 'World Event', ll, p.timer ? new Date(p.timer) : null));
-    m.addTo(bcEventsLayer);
-  });
-  return feats.length;
-}
-
-// ----- Uncharted POIs: Volcanic Geysers, Hermit Crab Dens, Shipwrecks -----
-// World-generated buildings bitjita publishes in one export (uncharted.geojson), split by iconName —
-// same pipeline as events.geojson. bcmap-api/relay don't carry these; this is the only feed.
-let bcGeysersLayer = null, bcHermitLayer = null, bcShipwreckLayer = null, bcUnchartedIcons = {};
-function bcUnchartedIcon(kind){
-  if (bcUnchartedIcons[kind]) return bcUnchartedIcons[kind];
-  const files = { 'volcanic-geyser':'volcanic-geyser.webp', 'hermit-crab':'hermit-crab.webp', 'shipwreck':'shipwreck.webp' };
-  const file = files[kind] || files['volcanic-geyser'];   // bitcraftmap's own icons (self-hosted)
-  return (bcUnchartedIcons[kind] = L.icon({ iconUrl:`${API}/mapassets/${file}`, iconSize:[38,38], iconAnchor:[19,19], popupAnchor:[0,-19] }));
-}
-async function bcRefreshUncharted(){
-  if (!bcGeysersLayer) return { geyser:0, hermit:0, shipwreck:0 };
-  const layers = { 'volcanic-geyser': bcGeysersLayer, 'hermit-crab': bcHermitLayer, 'shipwreck': bcShipwreckLayer };
-  Object.values(layers).forEach(l => l.clearLayers());
-  const feats = await bcLoadGeo('uncharted.geojson');
-  const counts = { 'volcanic-geyser':0, 'hermit-crab':0, 'shipwreck':0 };
-  feats.forEach(f => {
-    const ll = bcFeatLatLng(f); if (!ll) return;
-    const p = f.properties || {};
-    const kind = p.iconName || 'volcanic-geyser';
-    const layer = layers[kind]; if (!layer) return;
-    counts[kind] = (counts[kind] || 0) + 1;
-    const nm = (p.name || p.popupText || kind).replace(/\s*\(N:.*$/, '');   // strip the coords already in the name
-    const m = L.marker(ll, { icon: bcUnchartedIcon(kind), title: nm });
-    m.bindPopup(`<b>${escHtml(nm)}</b> <span style="color:var(--text3)">· Uncharted</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
-    m.addTo(layer);
-  });
-  return { geyser:counts['volcanic-geyser'], hermit:counts['hermit-crab'], shipwreck:counts['shipwreck'] };
-}
-
 function renderMap(){
   const host = document.getElementById('map-content');
   if (!host) return;
@@ -8285,16 +8221,6 @@ async function bcInitMap(){
   const temples  = await poiLayer('temples.geojson',  'temple.svg',       26, 'Temple');
   const ruined   = await poiLayer('ruined.geojson',   'ruinedCity.png',   28, 'Ruined City');
   const wonders  = await poiLayer('trees.geojson',    'travelerTree.svg', 26, 'Wonder');
-  // Hexite Vault world events — own live layer (refreshed on a timer; default on so they're visible)
-  bcEventsLayer = L.layerGroup();
-  const eventsCount = await bcRefreshEvents();
-  // Uncharted POIs (geysers / hermit crab dens / shipwrecks) — three layers from uncharted.geojson
-  bcGeysersLayer = L.layerGroup(); bcHermitLayer = L.layerGroup(); bcShipwreckLayer = L.layerGroup();
-  const uncharted = await bcRefreshUncharted();
-  if (bcEventsTimer) clearInterval(bcEventsTimer);
-  bcEventsTimer = setInterval(() => { if (currentTab === 'map' && !document.hidden){ bcRefreshEvents(); bcRefreshUncharted(); } }, 120000);
-  // (added to the map by bcApplyLayerState)
-
   // ----- Roads (tiled overlay) -----
   const roadsLayer = L.tileLayer(`${BC_TILE_BASE}/roads/tiles/{z}/{x}/{y}.webp`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
@@ -8303,7 +8229,7 @@ async function bcInitMap(){
 
   // ----- Custom layer control (Claims/Caves expand to per-tier toggles) -----
   bcLoadLayers();
-  bcLayerReg = { roads:roadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer, events:bcEventsLayer, geysers:bcGeysersLayer, hermitdens:bcHermitLayer, shipwrecks:bcShipwreckLayer };
+  bcLayerReg = { roads:roadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer };
   Object.keys(claimTierLayers).forEach(t => bcLayerReg['claimT'+t] = claimTierLayers[t]);
   Object.keys(caveTierLayers).forEach(t => bcLayerReg['caveT'+t] = caveTierLayers[t]);
   const lc = L.control({ position:'topright' });
@@ -8325,20 +8251,6 @@ async function bcInitMap(){
         </div>
       </div>`;
     };
-    // A collapsible group of individually-named layers (vs the tier groups above).
-    const namedGroup = (gid, label, color, children) => {
-      const total = children.reduce((s,c)=>s+c.count,0);
-      return `<div class="bc-lgroup">
-        <div class="bc-lghdr">
-          <input type="checkbox" id="bc-lgm-${gid}" checked onchange="bcToggleNamedGroup('${gid}',this.checked)">
-          ${dot(color)}<span class="bc-lgname" onclick="bcExpandLayerGroup('${gid}')">${label} (${total})</span>
-          <i class="ti ti-chevron-down bc-lgchev" id="bc-lgchev-${gid}" onclick="bcExpandLayerGroup('${gid}')"></i>
-        </div>
-        <div class="bc-lgbody" id="bc-lg-${gid}" style="display:none">
-          ${children.map(c=>`<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="${c.k}" checked onchange="bcToggleLayer('${c.k}',this.checked);bcSyncNamedMaster('${gid}')">${dot(c.color)}<span>${c.label}</span> <span class="bc-lcount">(${c.count})</span></label>`).join('')}
-        </div>
-      </div>`;
-    };
     div.innerHTML =
       flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
       group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad',
@@ -8347,13 +8259,7 @@ async function bcInitMap(){
       flat('dungeons',`Dungeons (${dungeons.count})`,dot('#e0556e')) +
       flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
       flat('ruined',`Ruined Cities (${ruined.count})`,dot('#c8c8c8')) +
-      flat('wonders',`Wonders (${wonders.count})`,dot('#63c45a')) +
-      namedGroup('uncharted','Uncharted','#7dd3fc',[
-        {k:'events',     label:'Hexite Vaults',    count:eventsCount,       color:'#5eead4'},
-        {k:'geysers',    label:'Volcanic Geysers', count:uncharted.geyser,  color:'#fb7185'},
-        {k:'hermitdens', label:'Hermit Crab Dens', count:uncharted.hermit,  color:'#fb923c'},
-        {k:'shipwrecks', label:'Shipwrecks',       count:uncharted.shipwreck,color:'#94a3b8'},
-      ]);
+      flat('wonders',`Wonders (${wonders.count})`,dot('#63c45a'));
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
     return div;
@@ -8420,13 +8326,16 @@ function bcToggleWaystones(on){
   else bcMap.removeLayer(bcWaystoneLayer);
   bcCullMarkers();
 }
-let bcLayersOff = new Set();   // layer keys currently toggled OFF (default = all on); persisted
-function bcLoadLayers(){ try { const v = localStorage.getItem('bc_map_layers_v1'); if (v) bcLayersOff = new Set(JSON.parse(v)); } catch(e){} }
-function bcSaveLayers(){ safeSetItem('bc_map_layers_v1', JSON.stringify([...bcLayersOff])); }
+// Layer keys currently toggled ON; persisted. Default = everything OFF: a fresh load used to paint every
+// claim, cave, dungeon, temple, ruin and wonder at once — a wall of markers to click back off. v1 stored
+// the OFF set (default-on); a stored v1 is migrated once in bcApplyLayerState so nobody loses their picks.
+let bcLayersOn = new Set(), _bcLayersV1Off = null;
+function bcLoadLayers(){ try { const v2 = localStorage.getItem('bc_map_layers_v2'); if (v2){ bcLayersOn = new Set(JSON.parse(v2)); return; } const v1 = localStorage.getItem('bc_map_layers_v1'); if (v1) _bcLayersV1Off = new Set(JSON.parse(v1)); } catch(e){} }
+function bcSaveLayers(){ safeSetItem('bc_map_layers_v2', JSON.stringify([...bcLayersOn])); }
 function bcToggleLayer(k, on){
   const l = bcLayerReg[k]; if (!l || !bcMap) return;
-  if (on){ bcLayersOff.delete(k); if (!bcMap.hasLayer(l)) l.addTo(bcMap); }
-  else { bcLayersOff.add(k); bcMap.removeLayer(l); }
+  if (on){ bcLayersOn.add(k); if (!bcMap.hasLayer(l)) l.addTo(bcMap); }
+  else { bcLayersOn.delete(k); bcMap.removeLayer(l); }
   bcSaveLayers();
   bcCullMarkers();   // populate a freshly-shown claim/cave tier with just its in-view markers
 }
@@ -8437,9 +8346,10 @@ function bcToggleLayerGroup(prefix, on){
   });
 }
 function bcApplyLayerState(){
-  // On load: ADD the layers that should be on and remove the ones saved as off, then set checkboxes.
+  // On load: ADD the layers the user turned on, remove the rest, then set the checkboxes to match.
+  if (_bcLayersV1Off){ bcLayersOn = new Set(Object.keys(bcLayerReg).filter(k => !_bcLayersV1Off.has(k))); _bcLayersV1Off = null; bcSaveLayers(); }   // one-time v1 (off-set) migration
   Object.keys(bcLayerReg).forEach(k => {
-    const on = !bcLayersOff.has(k);
+    const on = bcLayersOn.has(k);
     const l = bcLayerReg[k];
     if (l){
       if (on){ if (!bcMap.hasLayer(l)) l.addTo(bcMap); }
@@ -8448,7 +8358,6 @@ function bcApplyLayerState(){
     const cb = document.querySelector(`input[data-lk="${k}"]`); if (cb) cb.checked = on;
   });
   ['claim','cave'].forEach(p => bcSyncMaster(p));
-  Object.keys(bcNamedGroups).forEach(g => bcSyncNamedMaster(g));
   bcCullMarkers();
 }
 // Viewport culling for the two dense marker sets (claims ~1.9k, caves ~3k): only markers inside the padded
@@ -8479,10 +8388,6 @@ function bcSyncMaster(prefix){
   const any = Object.keys(bcLayerReg).filter(k => k.startsWith(prefix+'T')).some(k => { const cb = document.querySelector(`input[data-lk="${k}"]`); return cb && cb.checked; });
   const m = document.getElementById('bc-lgm-'+prefix); if (m) m.checked = any;
 }
-// Collapsible groups of individually-named layers (e.g. Uncharted = vaults + geysers + dens + shipwrecks).
-const bcNamedGroups = { uncharted: ['events','geysers','hermitdens','shipwrecks'] };
-function bcToggleNamedGroup(gid, on){ (bcNamedGroups[gid]||[]).forEach(k => { bcToggleLayer(k, on); const cb = document.querySelector(`input[data-lk="${k}"]`); if (cb) cb.checked = on; }); }
-function bcSyncNamedMaster(gid){ const any = (bcNamedGroups[gid]||[]).some(k => { const cb = document.querySelector(`input[data-lk="${k}"]`); return cb && cb.checked; }); const m = document.getElementById('bc-lgm-'+gid); if (m) m.checked = any; }
 
 // ===== Phase 2: live player tracking (wss://live.bitjita.com) =====
 // Initial position comes from /api/players/{id} (locationX/locationZ, already in map space);
@@ -8615,8 +8520,6 @@ document.addEventListener('visibilitychange', () => {
     // Snap markers to current positions via REST without waiting for the 15s fallback poll.
     Object.keys(bcTracked).forEach(id => bcFetchPlayerPos(id).then(r => { if (r && r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z); }));
   }
-  if (bcEventsLayer) bcRefreshEvents().catch(()=>{}); // keep Hexite Vault timers/positions current
-  if (bcGeysersLayer) bcRefreshUncharted().catch(()=>{}); // keep Uncharted POIs current
 });
 // ═══ THIS SOCKET IS ALSO THE ALERT FALLBACK ═══
 // live.bitjita.com's channels are `<table>:<entity_id>` and are NOT limited to mobile_entity_state —
@@ -8777,10 +8680,10 @@ function bcToggleFollow(id){
 // sockets. It follows the region selector — one region is ~28 movement deltas/s, all regions ~9× that —
 // and stays subscribed while it's on whatever tab is showing (redialling 13 sockets on every tab switch
 // would be worse); only the repaint is gated on the Map tab. Players tracked on the map keep their own
-// coloured marker and are left out here. Clicking a dot opens that player's lookup page.
+// coloured marker and are left out here. Clicking a dot pops up the player's name with a "View profile" button.
 let bcPlayersOn = (() => { try { return localStorage.getItem('bc_map_players_on') === '1'; } catch(e){ return false; } })();
 let bcPlayersColor = (() => { try { return localStorage.getItem('bc_map_players_color') || '#f8fafc'; } catch(e){ return '#f8fafc'; } })();
-let bcPlayersLayer = null, bcPlayersT = null, bcPlayersLast = { pts: [], ids: [] };
+let bcPlayersLayer = null, bcPlayersT = null, bcPlayersLast = { pts: [], ids: [], names: [] };
 function bcPlayersKey(){ return bcPlayersOn ? (bcMapRegion || 'all') : ''; }
 function bcPlayersWanted(region){ return bcPlayersOn && !DEAD_REGIONS.has(+region) && (!bcMapRegion || +bcMapRegion === +region); }
 function bcPlayersToggle(on){
@@ -8794,7 +8697,7 @@ function bcPlayersApply(){
   if (!bcMap) return;
   if (!bcPlayersLayer) bcPlayersLayer = new (bcPointLayerClass())({ radius: 4 });
   if (bcPlayersOn){ if (!bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.addTo(bcMap); }
-  else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [] }; }
+  else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [], names: [] }; }
   const chk = document.getElementById('bc-players-toggle'); if (chk) chk.checked = bcPlayersOn;
   const col = document.getElementById('bc-players-color'); if (col) col.value = bcPlayersColor;
   const ct = document.getElementById('bc-players-count'); if (ct && !bcPlayersOn) ct.textContent = '';
@@ -8809,18 +8712,26 @@ function bcPlayersRebuild(){
     const x = +r.location_x / 1000, z = +r.location_z / 1000; if (!isFinite(x) || !isFinite(z)) return;   // milli-hex → map space
     pts.push([x, z]); ids.push(String(r.entity_id)); labels.push(names[String(r.entity_id)] || '');
   });
-  bcPlayersLast = { pts, ids };
+  bcPlayersLast = { pts, ids, names: labels };
   const ct = document.getElementById('bc-players-count'); if (ct) ct.textContent = pts.length ? `(${pts.length})` : '';
-  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, labelMinZoom: -1 }]);
+  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, radius: 4, labelMinZoom: -1 }]);   // 8px dots: clearly smaller than a tracked player's 16px marker
 }
-// Click on a dot → that player's lookup page (nearest within a few pixels; markers, popups and controls excluded).
+// Click on a dot → a small popup with the player's name and a "View profile" button (nearest dot within a few
+// pixels; clicks on markers, popups and controls are left alone). Jumping straight to the profile on a click
+// was too abrupt on a layer with hundreds of dots.
 function bcPlayersClick(e){
   if (!bcPlayersOn || !bcPlayersLast.pts.length) return;
   const tgt = e.originalEvent && e.originalEvent.target;
   if (tgt && tgt.closest && tgt.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control')) return;
   const cp = e.containerPoint; let best = null, bestD = 14 * 14;
   bcPlayersLast.pts.forEach((p, i) => { const q = bcMap.latLngToContainerPoint(L.latLng(p[1], p[0])); const dx = q.x - cp.x, dy = q.y - cp.y, d = dx*dx + dy*dy; if (d < bestD){ bestD = d; best = i; } });
-  if (best != null) openLookup(bcPlayersLast.ids[best]);
+  if (best == null) return;
+  const id = bcPlayersLast.ids[best], name = bcPlayersLast.names[best] || ('Player ' + id), p = bcPlayersLast.pts[best];
+  bcMap.closePopup();
+  L.popup({ offset: [0, -6], autoPan: false })
+    .setLatLng(L.latLng(p[1], p[0]))
+    .setContent(`<div class="bc-ppop"><b>${escHtml(name)}</b><button class="btn ctrl-btn" onclick="bcMap.closePopup();openLookup('${id}')"><i class="ti ti-user-search"></i> View profile</button></div>`)
+    .openOn(bcMap);
 }
 onLiveChange(evs => { if (bcPlayersOn && evs.some(e => e.table === 'mobile_entity_state' || e.table === 'signed_in_player_state' || e.table === 'player_username_state')) bcPlayersSchedule(); });
 // Colour picker on a tracked player's row (the circle next to the name). Live, while dragging in the
@@ -9002,7 +8913,7 @@ function bcPointLayerClass(){
       for (const set of this._sets){
         const pts = set.pts; if (!pts || !pts.length) continue;
         const proj = this._project(pts), n = pts.length;
-        const r = Math.round(bcDotRadius(set.count != null ? set.count : n, z) * 4) / 4;
+        const r = set.radius != null ? set.radius : Math.round(bcDotRadius(set.count != null ? set.count : n, z) * 4) / 4;   // a set may pin its size
         // Occupancy grid (cell ≈ dot size): skip points landing on an already-painted cell, so the number
         // of draw calls is bounded by SCREEN AREA, not node count — dense sets (Sticks is >1M world-wide)
         // overdraw the same pixels thousands of times otherwise. Small sets (animals) stay exact.
