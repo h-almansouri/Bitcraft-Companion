@@ -8713,7 +8713,7 @@ function bcPlayersToggle(on){
 function bcPlayersSetColor(c){ bcPlayersColor = c; safeSetItem('bc_map_players_color', c); bcPlayersSchedule(); }
 function bcPlayersApply(){
   if (!bcMap) return;
-  if (!bcPlayersLayer) bcPlayersLayer = new (bcPointLayerClass())({ radius: 4 });
+  if (!bcPlayersLayer) bcPlayersLayer = new (bcPointLayerClass())({ radius: 5.5 });
   if (bcPlayersOn){ if (!bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.addTo(bcMap); }
   else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [], names: [] }; }
   const chk = document.getElementById('bc-players-toggle'); if (chk) chk.checked = bcPlayersOn;
@@ -8732,7 +8732,7 @@ function bcPlayersRebuild(){
   });
   bcPlayersLast = { pts, ids, names: labels };
   const ct = document.getElementById('bc-players-count'); if (ct) ct.textContent = pts.length ? `(${pts.length})` : '';
-  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, radius: 4, labelMinZoom: -1 }]);   // 8px dots: clearly smaller than a tracked player's 16px marker
+  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, radius: 5.5, labelMinZoom: -1 }]);   // 11px dots: still smaller than a tracked player's 16px marker
 }
 // Click on a dot → a small popup with the player's name and a "View profile" button (nearest dot within a few
 // pixels; clicks on markers, popups and controls are left alone). Jumping straight to the profile on a click
@@ -9146,13 +9146,22 @@ function bcRenderTrackedResList(){
   const ts = Object.values(bcTrackedRes);
   if (!ts.length){ el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
+  const countCell = t => !t.applied   // subscription not applied yet (connecting, or a region switch rebuilding it)
+    ? `<span class="bc-trk-ct" title="Loading from the relay…">…</span>`
+    : `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} live${bcMapRegion?' in this region':' world-wide'}">${t.count===0?'none found':t.count.toLocaleString()}</span>`;
+  // The relay redraw re-renders this list on every throttled update, and a tracked creature type moves
+  // constantly — so while a colour picker is open on a row, rebuilding would replace its <input> and
+  // slam the picker shut. Patch the live counts in place instead; the next render after the picker
+  // closes rebuilds normally (same guard as the tracked-players list).
+  const ae = document.activeElement;
+  if (ae && ae.classList && ae.classList.contains('bc-trk-col') && el.contains(ae)){
+    ts.forEach(t => { const row = el.querySelector(`.bc-trk[data-key="${bcResKey(t.kind, t.id)}"]`); const ct = row && row.querySelector('.bc-trk-ct'); if (ct) ct.outerHTML = countCell(t); });
+    return;
+  }
   el.innerHTML = `<div class="bc-trk-hdr">Tracked (${ts.length})</div>` + ts.map(t => {
     const key = bcResKey(t.kind, t.id);
-    const pending = !t.applied;   // subscription not applied yet (connecting, or a region switch rebuilding it)
-    const ct = pending
-      ? `<span class="bc-trk-ct" title="Loading from the relay…">…</span>`
-      : `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} live${bcMapRegion?' in this region':' world-wide'}">${t.count===0?'none found':t.count.toLocaleString()}</span>`;
-    return `<div class="bc-trk">
+    const ct = countCell(t);
+    return `<div class="bc-trk" data-key="${key}">
       <span class="bc-trk-nm" title="${escHtml(t.name)}">${escHtml(t.name)}</span>
       ${t.tier>0?`<span class="bc-trk-t">T${t.tier}</span>`:''}
       ${t.tag?`<span class="bc-trk-tag">${escHtml(t.tag)}</span>`:''}
