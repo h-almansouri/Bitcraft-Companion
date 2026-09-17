@@ -7893,7 +7893,7 @@ function manualRefreshShopping() { fetchAllShoppingPrices(); }
 
 // ── MAP ──
 // Leaflet map. The custom CRS + base-image approach is adapted from the open-source
-// bitcraftmap project (BSD-2-Clause). Map data: bitcraftmap · bitjita.
+// bitcraftmap project (BSD-2-Clause). Map data: prism (BitCraftToolBox) · bitcraftmap · bitjita (fallback).
 let bcMap = null;            // Leaflet map instance (created once)
 let bcMapInited = false;
 let bcMapInitPromise = null;   // bcInitMap() in flight — cross-tab jumps (bcFocusClaim) await the claim markers
@@ -7930,7 +7930,9 @@ function bcMapCRS() {
 }
 
 async function bcLoadGeo(name){
-  // Live datasets from bitjita's map exports (proxied). Either FeatureCollections or plain arrays.
+  // Marker lists (claims, caves, dungeons, temples, ruins, wonders) from the map export host via /bcexports/ —
+  // prism.brico.app, regenerated every 15 minutes, with bitjita's older copy as the proxy's fallback.
+  // Either FeatureCollections or plain arrays.
   try {
     const r = await fetch(`${API}/bcexports/${name}`);
     if (!r.ok) return [];
@@ -7988,7 +7990,7 @@ function renderMap(){
         </div>
         <div id="map-el"></div>
       </div>
-      <div class="map-attrib">Map data: <a href="https://github.com/bitcraftmap/bitcraftmap" target="_blank">bitcraftmap</a> (BSD-2) · <a href="https://bitjita.com" target="_blank">bitjita</a></div>`;
+      <div class="map-attrib">Map data: <a href="https://github.com/BitCraftToolBox/prism" target="_blank">prism</a> · <a href="https://github.com/BitCraftToolBox/bitcraftmap" target="_blank">bitcraftmap</a> (BSD-2) · <a href="https://bitjita.com" target="_blank">bitjita</a></div>`;
     bcMapInited = true;
     bcMapInitPromise = bcInitMap();
   } else if (bcMap){
@@ -8131,13 +8133,28 @@ async function bcInitMap(){
   // No `bounds` option: with the negative-Y hex projection it wrongly rejects every tile;
   // out-of-range tiles simply 404 and render blank via errorTileUrl.
   const de = [[0,0],[BC_MAP_H, BC_MAP_W]];
-  // Terrain/road tiles load straight from bitjita (they're plain images, CORS-open) instead of through
+  // Terrain/road tiles load straight from the tile host (plain images, CORS-open, CDN-cached) instead of through
   // our proxy — that's the single biggest bandwidth saving, since map tiles never touch the host.
-  const BC_TILE_BASE = 'https://exports.bitjita.com/bitcraftmap';
-  L.tileLayer(`${BC_TILE_BASE}/maps/terrain/tiles/{z}/{x}/{y}.webp`, {
+  // prism.brico.app (BitCraftToolBox, the same project behind the prism relay) serves the exact tile layout
+  // bitjita's old export host did, but re-rendered from the game: terrain daily, roads hourly. bitjita's copy
+  // (terrain last rendered June 2026) stays as the per-tile fallback for when prism fails to answer.
+  const BC_TILE_BASE = 'https://prism.brico.app';
+  const BC_TILE_FALLBACK = 'https://exports.bitjita.com/bitcraftmap';
+  // A tile inside the world that fails on prism is retried once from bitjita's copy. Tiles outside the world 404 on
+  // every host and are left blank (errorTileUrl) with no retry, so in normal use the fallback costs nothing.
+  const bcTileFallback = (layer, path) => layer.on('tileerror', e => {
+    const t = e.tile, c = e.coords; if (!t || !c || t._bcFallback) return;
+    const s = Math.pow(2, c.z) / 256;   // map units → tile index at this zoom (identity CRS transform, 256px tiles)
+    if (c.x < 0 || c.x >= Math.ceil(BC_MAP_W * s) || c.y > -1 || c.y < Math.floor(-BC_MAP_H / BC_APOTHEM * s)) return;
+    t._bcFallback = true;
+    t.src = `${BC_TILE_FALLBACK}/${path}/${c.z}/${c.x}/${c.y}.webp`;
+  });
+  const terrainLayer = L.tileLayer(`${BC_TILE_BASE}/maps/terrain/tiles/{z}/{x}/{y}.webp`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
     tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true
-  }).addTo(bcMap);
+  });
+  bcTileFallback(terrainLayer, 'maps/terrain/tiles');
+  terrainLayer.addTo(bcMap);
   // Restore the last center + zoom (persisted on every pan/zoom); otherwise frame the whole map.
   const savedView = bcLoadMapView();
   if (savedView) bcMap.setView([savedView.lat, savedView.lng], savedView.zoom);
@@ -8226,6 +8243,7 @@ async function bcInitMap(){
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
     tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true, opacity:0.9
   });
+  bcTileFallback(roadsLayer, 'roads/tiles');
 
   // ----- Custom layer control (Claims/Caves expand to per-tier toggles) -----
   bcLoadLayers();

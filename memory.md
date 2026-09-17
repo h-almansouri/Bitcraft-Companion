@@ -12,7 +12,7 @@
 ## App architecture (current state, for orientation)
 
 - **Single-file app:** `C:\Bitcraft Companion App\index.html` (HTML + CSS + one big `<script>`). All client code lives here.
-- **Proxy:** `proxy.js` (Node, port 3000). Today a "dumb pipe": serves `index.html`, `/crafting-data` (craftingData.json), `/mapassets/*`, and proxies `/api/*`→bitjita.com, `/bcexports/*`→exports.bitjita.com/bitcraftmap, `/bcmap/*`→bcmap-api.bitjita.com.
+- **Proxy:** `proxy.js` (Node, port 3000). Today a "dumb pipe": serves `index.html`, `/crafting-data` (craftingData.json), `/mapassets/*`, and proxies `/api/*`→bitjita.com and `/bcexports/*`→prism.brico.app (falls back to exports.bitjita.com/bitcraftmap; `BC_EXPORT_HOSTS` env overrides the list).
 - **Launch configs:** `.claude/launch.json` — "Bitcraft Companion" (node proxy.js :3000) and "Bitcraft Static Preview" (npx serve :5173, autoPort). App fetches the proxy at `:3000` (CORS) regardless of where the HTML is served.
 - **Verify loop:** extract last `<script>` block → `node --check`; load in Claude Preview (5173) with the proxy on 3000; check console errors.
 

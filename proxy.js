@@ -4,6 +4,12 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
+// Map export hosts for /bcexports/*, primary first, as [hostname, path prefix]. prism.brico.app (BitCraftToolBox) serves
+// the same file layout bitjita's old export host did — terrain re-rendered from the game daily, roads hourly, the
+// GeoJSON lists every 15 minutes — while bitjita's copy still has June terrain, so it is only the fallback for when
+// prism errors out. Override without a deploy: BC_EXPORT_HOSTS="host/prefix,host/prefix" (no scheme).
+const BC_EXPORT_HOSTS = (process.env.BC_EXPORT_HOSTS || 'prism.brico.app,exports.bitjita.com/bitcraftmap')
+  .split(',').map(s => { const t = s.trim(); const i = t.indexOf('/'); return i < 0 ? [t, ''] : [t.slice(0, i), t.slice(i)]; });
 const TARGET = 'bitjita.com';
 const DATA_DIR = path.join(__dirname, 'data');
 
@@ -516,23 +522,32 @@ http.createServer((req, res) => {
   let hm = req.url.match(/^\/history\/(item|cargo)\/([^/?]+)$/);
   if (hm) { const h = loadHistory(); sendJson(res, 200, { key: `${hm[1]}_${hm[2]}`, points: h[`${hm[1]}_${hm[2]}`] || [] }, req); return; }
 
-  // Proxy bitjita's map exports (terrain tiles + live GeoJSON) → /bcexports/maps/terrain/tiles/{z}/{x}/{y}.webp, /bcexports/claims.geojson
+  // Map exports → /bcexports/claims.geojson, /bcexports/maps/terrain/tiles/{z}/{x}/{y}.webp … Tries BC_EXPORT_HOSTS in
+  // order: a connection error, timeout or non-2xx answer moves on to the next host, so a prism outage quietly serves
+  // bitjita's (older) copy. In practice only the GeoJSON lists come through here — the browser loads tiles straight
+  // from the host — and the lists are capped at 5 minutes in the browser cache so prism's 15-minute refresh shows up.
   if (req.url.startsWith('/bcexports/')) {
-    const exReq = https.request({
-      hostname: 'exports.bitjita.com',
-      path: '/bitcraftmap' + req.url.slice('/bcexports'.length),
-      method: 'GET',
-      headers: { 'User-Agent': 'BitcraftCompanion/1.0' }
-    }, (apiRes) => {
-      const isTile = /\.webp(\?|$)/.test(req.url);   // terrain/road tiles never change → cache hard
-      res.writeHead(apiRes.statusCode, {
-        'Content-Type': apiRes.headers['content-type'] || 'application/octet-stream',
-        'Cache-Control': isTile ? 'public, max-age=604800, immutable' : (apiRes.headers['cache-control'] || 'max-age=3600')
+    const rel = req.url.slice('/bcexports'.length);
+    const isTile = /\.webp(\?|$)/.test(req.url);
+    const tryHost = (i) => {
+      const [hostname, prefix] = BC_EXPORT_HOSTS[i];
+      const last = i + 1 >= BC_EXPORT_HOSTS.length;
+      const exReq = https.request({ hostname, path: prefix + rel, method: 'GET', headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, (apiRes) => {
+        if ((apiRes.statusCode < 200 || apiRes.statusCode >= 300) && !last) { apiRes.resume(); tryHost(i + 1); return; }
+        res.writeHead(apiRes.statusCode, {
+          'Content-Type': apiRes.headers['content-type'] || 'application/octet-stream',
+          'Cache-Control': isTile ? 'public, max-age=86400' : 'public, max-age=300'
+        });
+        apiRes.pipe(res);
       });
-      apiRes.pipe(res);
-    });
-    exReq.on('error', (err) => { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); });
-    exReq.end();
+      exReq.setTimeout(15000, () => exReq.destroy(new Error('timeout')));
+      exReq.on('error', (err) => {
+        if (!last) { tryHost(i + 1); return; }
+        if (!res.headersSent) { res.writeHead(502); res.end(JSON.stringify({ error: err.message })); } else { try { res.end(); } catch (_) {} }
+      });
+      exReq.end();
+    };
+    tryHost(0);
     return;
   }
 
