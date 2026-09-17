@@ -4035,7 +4035,8 @@ const LIVE_COLS = {
   dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
   location_state: ['entity_id','chunk_index','x','z','dimension'],
   // order = server struct field order (BitCraftPublic components.rs MobileEntityState)
-  mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','_pad1','_pad2'],
+  mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','_pad1','_pad2','_pad3'],
+  enemy_mob_monitor_state: ['entity_id','enemy_type','herd_entity_id','herd_location'],   // creature roster (bcCre*): id → type, herd
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -4251,14 +4252,15 @@ function liveApplyDelta(c, frame){
   const evs = [];
   (com.tables || []).forEach(t => {
     const tb = t.table_name;
+    if (tb === BC_CRE_ROSTER_TABLE){ bcCreOnRosterDelta(c, t); return; }   // creature roster: a compact map, never row objects (110k rows world-wide)
     const byRegion = liveCache[tb] || (liveCache[tb] = {});
     const slice = byRegion[c.region] || (byRegion[c.region] = new Map());
     const ins = [], del = [];
     (t.updates || []).forEach(u => {
       // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
       // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
-      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ r.__region = c.region; slice.delete(livePk(r)); del.push(r); } });
-      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ r.__region = c.region; slice.set(livePk(r), r); ins.push(r); } });
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } r.__region = c.region; slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } r.__region = c.region; slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
   });
@@ -4471,7 +4473,7 @@ function liveRegionName(rg){
 // only updates pause for the ~1s the redials take.
 function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
-  if (!ids.length && !bcPlayersOn){ liveStopAll(); return; }   // the map's "everyone online" layer alone keeps the sockets up
+  if (!ids.length && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer or a tracked creature type alone keeps the sockets up
   const pKey = ids.join(',');
   // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
@@ -4585,6 +4587,7 @@ function liveOpen(c){
     // ~15s forever and its ingest never recovered. Resetting on success instead lets a mirror that keeps
     // stalling decay to the 60s ceiling on its own.
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
+    bcCreOnOpen(c);   // creature roster/position sets ride this socket as NAMED subscriptions (SubscribeMulti) — see bcCre*
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
     // this the region sits at 'open' forever and liveReady() never trips. Give up, mark it tried, and
     // let onclose reschedule with backoff — the region rejoins the moment it starts answering again.
@@ -4615,12 +4618,14 @@ function liveOpen(c){
       if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
     }
     else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
-    else if (m.SubscriptionError){ c.tried = true; console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
+    else if (m.SubscribeMultiApplied) bcCreOnApplied(c, m.SubscribeMultiApplied);      // a creature set's snapshot
+    else if (m.UnsubscribeMultiApplied){ /* a replaced creature set: the next SubscribeMultiApplied rebuilds that region's dots whole */ }
+    else if (m.SubscriptionError){ c.tried = true; bcCreOnError(c, m.SubscriptionError); console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
     // IdentityToken (first frame) and anything unrecognised: ignore.
   };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onclose = () => {
-    c.ws = null; clearTimeout(c.snapTimer); c.tried = true;
+    c.ws = null; c.cre = null; clearTimeout(c.snapTimer); c.tried = true;   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
     if (c.closed || c.key !== liveRosterKey) return;
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     liveReschedule(c);
@@ -9104,7 +9109,8 @@ function bcUpdateResStatus(){
   if (!ts.length){ status.textContent = ''; return; }
   const total = ts.reduce((s,t)=>s+(t.count||0), 0);
   const notes = [];
-  if (bcRelayDown) notes.push('relay down — retrying');
+  if (bcRelayDown && bcRelayResourceTypes().length) notes.push('resource relay down — retrying');
+  if (bcCreWanted()){ const lag = bcCreRegions().filter(rg => { const c = liveConns[rg]; return c && c.ws && c.ws.readyState === 1 && !(c.cre && c.cre.posReady); }).length; if (lag) notes.push(`creatures: ${lag} region${lag > 1 ? 's' : ''} loading`); }
   if (!bcMapRegion && ts.some(t => (t.count || 0) > BC_BIG_HINT)) notes.push('big type — pick a region to lighten it');
   status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}` + notes.map(n => ' · ' + n).join('');
 }
@@ -9171,15 +9177,15 @@ function bcRenderTrackedResList(){
     </div>`;
   }).join('');
 }
-// ── Live positions via prism-relay (SpacetimeDB) ─────────────────────────────────────────────────
-// Every tracked type — creatures and resources alike — is one subscription on the community relay
-// (enemy_location / resource_location, filtered to the type and, when a region is selected, the region);
-// the SDK cache drives the points and bcRelayRebuild turns it into datasets. Resources used to come from
-// bcmap-api's static tiles with the relay as an opt-in: that feed died for days at a time, static tiles
-// never carried transient cargo, and the two-source dance produced "none found until you press live".
-// Measured 2026-09-08: the relay serves a common tree type world-wide in ~1.3s (155k rows), an ore in ~0.6s
-// (18k), and static types produce no deltas at all — so for the one or two types people actually track,
-// one source is simpler and no heavier. Relay unreachable → "relay down — retrying" + backoff reconnect.
+// ── Live RESOURCE positions via prism-relay (SpacetimeDB) ─────────────────────────────────────────
+// Every tracked resource type is one subscription on the community relay (resource_location, filtered
+// to the type and, when a region is selected, the region); the SDK cache drives the points and
+// bcRelayRebuild turns it into datasets. Resources used to come from bcmap-api's static tiles with the
+// relay as an opt-in: that feed died for days at a time, static tiles never carried transient cargo,
+// and the two-source dance produced "none found until you press live". Measured 2026-09-08: the relay
+// serves a common tree type world-wide in ~1.3s (155k rows), an ore in ~0.6s (18k), and static types
+// produce no deltas at all. Relay unreachable → "relay down — retrying" + backoff reconnect.
+// CREATURES left prism on 2026-09-17 (ghost herds) for the bitcraftsync relay — see bcCre* below.
 // See docs/live-map-plan.md.
 let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false, bcRelayConnecting = false;
 // Relay unreachable (connect failed / connection dropped): the list keeps its last counts, says so, and
@@ -9189,7 +9195,7 @@ let bcRelayLib = null, bcRelayConn = null, bcRelayReady = false, bcRelayConnecti
 // session, so every creature sat on the aggregate feed for good ("none found" whenever that feed is down).
 let bcRelayDown = false, bcRelayRetryT = null, bcRelayRetryMs = 0, bcRelayNextTry = 0;
 const BC_RELAY_RETRY_MIN = 30000, BC_RELAY_RETRY_MAX = 5*60*1000;
-let bcRelaySubs = {};              // enemyType -> SubscriptionHandle
+let bcRelaySubs = {};              // 'r<resourceId>' -> SubscriptionHandle
 let bcRelaySubRegion = null;       // region the current subs were built for ('' = all regions)
 let bcRelayRedrawT = null;
 const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-relay';
@@ -9202,26 +9208,22 @@ async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${A
 function bcRelayScheduleRedraw(){ if (bcRelayRedrawT) return; bcRelayRedrawT = setTimeout(() => { bcRelayRedrawT = null; bcRelayRebuild(); }, 200); }
 function bcRelayRebuild(){
   if (!bcRelayConn || !bcRelayReady) return;
-  const byEnemy = {}, byRes = {};
-  bcRelayEnemyTypes().forEach(t => { t.pts = []; byEnemy[+t.id] = t; });
+  const byRes = {};
   const resTypes = bcRelayResourceTypes();
   resTypes.forEach(t => { t.pts = []; byRes[+t.id] = t; });
-  try {
-    for (const r of bcRelayConn.db.enemy_location.iter()){ const t = byEnemy[r.enemyType]; if (t) t.pts.push([r.x/1000, r.z/1000]); }  // milli-hex -> map space
-    if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } }  // plain Small-Hex
-  }
+  try { if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } } }  // plain Small-Hex
   catch(e){ return; }
-  bcRelayEnemyTypes().forEach(t => t.count = t.pts.length);
   resTypes.forEach(t => t.count = t.pts.length);
   if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
 function bcRelaySync(){
+  bcCreSync();   // creatures ride the bitcraftsync sockets (bcCre*); everything below is prism: resources + respawn timers
   // Only stream while the Map tab is open and showing tracked types — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
-  const shouldStream = currentTab === 'map' && (bcRelayEnemyTypes().length > 0 || bcRelayResourceTypes().length > 0 || bcGrowthOn);
+  const shouldStream = currentTab === 'map' && (bcRelayResourceTypes().length > 0 || bcGrowthOn);
   if (!shouldStream){ bcRelayDisconnect(); bcGrowthApply(); return; }   // also hides the overlay layer + stops its tick
   if (!bcRelayConn){                                            // onConnect re-invokes bcRelaySync
     if (bcRelayDown && Date.now() < bcRelayNextTry){ if (!bcRelayRetryT) bcRelayArmRetry(bcRelayNextTry - Date.now()); return; }   // known down: wait for the backoff timer
@@ -9234,24 +9236,15 @@ function bcRelaySync(){
     Object.values(bcRelaySubs).forEach(s => { try { s.unsubscribe(); } catch(e){} });
     bcRelaySubs = {}; bcRelaySubRegion = regionKey;
   }
-  // Keyed by kind so an enemyType and a resourceId that share a number don't collide.
   const want = {};
-  bcRelayEnemyTypes().forEach(t => want['e'+(+t.id)] = { kind:'enemy', id:+t.id });
   bcRelayResourceTypes().forEach(t => want['r'+(+t.id)] = { kind:'resource', id:+t.id });
   for (const k in bcRelaySubs){ if (!want[k]){ try { bcRelaySubs[k].unsubscribe(); } catch(e){} delete bcRelaySubs[k]; } }
   for (const k in want){
     if (bcRelaySubs[k]) continue;
     const id = want[k].id;
-    let q;
-    if (want[k].kind === 'enemy'){
-      q = bcMapRegion
-        ? [ tables.enemy_location.where(r => r.enemyType.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
-        : [ tables.enemy_location.where(r => r.enemyType.eq(id)) ];        // all regions (heavier)
-    } else {
-      q = bcMapRegion
-        ? [ tables.resource_location.where(r => r.resourceId.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
-        : [ tables.resource_location.where(r => r.resourceId.eq(id)) ];    // all regions (heavier)
-    }
+    const q = bcMapRegion
+      ? [ tables.resource_location.where(r => r.resourceId.eq(id).and(r.regionId.eq(Number(bcMapRegion)))) ]
+      : [ tables.resource_location.where(r => r.resourceId.eq(id)) ];    // all regions (heavier)
     const tkey = bcResKey(want[k].kind, String(id)); if (bcTrackedRes[tkey]) bcTrackedRes[tkey].applied = false;   // "…" in the list until the snapshot lands
     bcRelaySubs[k] = bcRelayConn.subscriptionBuilder().onApplied(() => { if (bcTrackedRes[tkey]) bcTrackedRes[tkey].applied = true; bcRelayScheduleRedraw(); }).onError(() => {}).subscribe(q);
   }
@@ -9284,9 +9277,6 @@ async function bcRelayConnect(){
         try { if (tok) localStorage.setItem('bc_relay_token', tok); } catch(e){}
         bcRelayReady = true; bcRelaySubs = {}; bcRelaySubRegion = null;
         bcRelayDown = false; bcRelayRetryMs = 0; clearTimeout(bcRelayRetryT); bcRelayRetryT = null;
-        c.db.enemy_location.onInsert(() => bcRelayScheduleRedraw());
-        c.db.enemy_location.onUpdate(() => bcRelayScheduleRedraw());
-        c.db.enemy_location.onDelete(() => bcRelayScheduleRedraw());
         c.db.resource_location.onInsert(() => bcRelayScheduleRedraw());
         c.db.resource_location.onUpdate(() => bcRelayScheduleRedraw());
         c.db.resource_location.onDelete(() => bcRelayScheduleRedraw());
@@ -9336,6 +9326,151 @@ function bcRelayFallback(){
   bcRelayRetryMs = bcRelayRetryMs ? Math.min(BC_RELAY_RETRY_MAX, bcRelayRetryMs * 2) : BC_RELAY_RETRY_MIN;
   bcRelayArmRetry(bcRelayRetryMs);
   bcRenderTrackedResList(); bcUpdateResStatus();
+}
+
+// ── Creatures via the bitcraftsync relay: roster → ids → positions ─────────────────────────────────
+// Creatures used to come from prism's enemy_location, which keeps rows for herds that died and misses
+// some spawns (measured r13, 2026-09-16: 13 ghosts of 6,515, clustered by herd; one type had 139 rows
+// against 177 alive). The game's own mirror on the bitcraftsync relay is exact, but it cannot filter
+// creatures by type: the type column is an enum the relay's WHERE silently ignores, and the position
+// table has no type column at all. So the app asks two questions per region, both as NAMED subscription
+// sets (SubscribeMulti) on the live socket the region already holds — the legacy Subscribe and named
+// sets coexist on one socket, measured 2026-09-17:
+//   roster    SELECT * FROM enemy_mob_monitor_state — one row per creature, id → type. 1–2 MB per region
+//             ONCE per socket, then only spawn/death deltas (none in 90 s world-wide). Kept as a compact
+//             Map, never in liveCache (110k rows world-wide as row objects would be ~17 MB).
+//   positions SELECT * FROM mobile_entity_state WHERE entity_id = X — one indexed query per creature of
+//             a tracked type. Swapped (UnsubscribeMulti + SubscribeMulti, ~100 ms) whenever the tracked
+//             types, the region scope or the roster change; the roster set is untouched, so no redial
+//             and no roster re-download. Measured across all 9 live regions: Yagi 5,274 ids → 2 MB
+//             once, ~6 msg/s; Skitch, the most common type, 12,633 ids → 4.5 MB once, ~23 msg/s. The
+//             all-creatures join bitjita's map uses was ~135 msg/s for ONE region.
+// Region scope follows the map's region picker; "All regions" skips the four dead island regions.
+// Positions are only subscribed while the Map tab is showing (the roster stays — it is the expensive
+// part and it barely changes); the sockets stay up while any creature type is tracked, exactly as
+// they do for the "everyone online" layer. Nothing here touches the live layer's roster key.
+const BC_CRE_ROSTER_TABLE = 'enemy_mob_monitor_state', BC_CRE_POS_TABLE = 'mobile_entity_state';
+const BC_CRE_RESUB_DEBOUNCE_MS = 5000;   // spawns come in herds; one position re-subscribe per burst
+const bcCre = { roster: {}, pos: {}, redrawT: null, resubT: {} };   // roster: region -> Map(id -> type); pos: region -> Map(id -> {t,x,z}) for tracked types only
+function bcCreWanted(){ return bcRelayEnemyTypes().length > 0; }             // roster + sockets
+function bcCrePosWanted(){ return bcCreWanted() && currentTab === 'map'; }    // positions only while the map shows
+function bcCreRegions(){ return bcMapRegion ? [+bcMapRegion] : BC_REGIONS.filter(r => !DEAD_REGIONS.has(r)); }
+function bcCreRegionWanted(rg){ return bcCreWanted() && bcCreRegions().includes(+rg); }
+const bcCreTypeOf = r => { const e = r.enemy_type; return Array.isArray(e) ? +e[0] : (e && typeof e === 'object') ? +Object.keys(e)[0] : +e; };   // enum wire shape: [idx, {}]
+const bcCreSend = (c, msg) => { try { c.ws.send(JSON.stringify(msg)); return true; } catch(e){ return false; } };
+function bcCreHash(ids){ let h = 0; for (const id of ids){ for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0; } return h; }
+// Is this delta row one of OUR creatures? (liveApplyDelta diverts those from the row cache.)
+function bcCreOwns(c, table, r){ return table === BC_CRE_POS_TABLE && !!(c.cre && c.cre.posIds && c.cre.posIds.has(String(r.entity_id))); }
+// A socket just (re)opened: fresh per-socket state, then reconcile. Positions from the previous socket
+// stay on the map until this one's snapshot replaces them (stale beats blank, like the live cache).
+function bcCreOnOpen(c){
+  c.cre = { qid: 0, rosterQid: 0, posQid: 0, rosterReady: false, posReady: false, posKey: '', posIds: new Set() };
+  bcCreSyncSocket(c);
+}
+// Reconcile one socket with what the map wants: the roster set is present iff the region is wanted; the
+// position set is the roster's ids of the tracked types (while the Map tab shows), replaced only when
+// that id list actually changes. request_ids sit at 1000+ so they never collide with the legacy set's.
+function bcCreSyncSocket(c){
+  if (!c || c.closed || !c.cre || !c.ws || c.ws.readyState !== 1) return;
+  const s = c.cre, rg = c.region;
+  if (!bcCreRegionWanted(rg)){
+    if (s.posQid){ bcCreSend(c, { UnsubscribeMulti: { request_id: 1000 + (++s.qid), query_id: { id: s.posQid } } }); s.posQid = 0; s.posReady = false; s.posKey = ''; s.posIds = new Set(); }
+    if (s.rosterQid){ bcCreSend(c, { UnsubscribeMulti: { request_id: 1000 + (++s.qid), query_id: { id: s.rosterQid } } }); s.rosterQid = 0; s.rosterReady = false; }
+    if (bcCre.roster[rg] || (bcCre.pos[rg] && bcCre.pos[rg].size)){ delete bcCre.roster[rg]; bcCre.pos[rg] = new Map(); bcCreScheduleRedraw(); }
+    return;
+  }
+  if (!s.rosterQid){   // positions follow once the roster lands (bcCreOnApplied)
+    s.rosterQid = ++s.qid; s.rosterReady = false;
+    bcCreSend(c, { SubscribeMulti: { request_id: 1000 + s.rosterQid, query_id: { id: s.rosterQid }, query_strings: [`SELECT * FROM ${BC_CRE_ROSTER_TABLE}`] } });
+    return;
+  }
+  if (!s.rosterReady) return;
+  const types = new Set(bcRelayEnemyTypes().map(t => +t.id));
+  const ids = [];
+  if (bcCrePosWanted()){ const ro = bcCre.roster[rg]; if (ro) ro.forEach((t, id) => { if (types.has(t)) ids.push(id); }); }
+  ids.sort();
+  const key = ids.length + ':' + [...types].sort().join(',') + ':' + bcCreHash(ids);
+  if (key === s.posKey) return;
+  if (s.posQid){ bcCreSend(c, { UnsubscribeMulti: { request_id: 1000 + (++s.qid), query_id: { id: s.posQid } } }); s.posQid = 0; }
+  s.posKey = key; s.posReady = false; s.posIds = new Set(ids);
+  if (!ids.length){ bcCre.pos[rg] = new Map(); s.posReady = true; bcCreScheduleRedraw(); return; }   // none of the tracked types live here
+  s.posQid = ++s.qid;
+  bcCreSend(c, { SubscribeMulti: { request_id: 1000 + s.posQid, query_id: { id: s.posQid }, query_strings: ids.map(id => `SELECT * FROM ${BC_CRE_POS_TABLE} WHERE entity_id = ${id}`) } });
+}
+// Every socket, then make sure the sockets exist at all (or go away): liveStart is idempotent for an
+// unchanged roster key and stops everything once nothing needs the sockets any more.
+function bcCreSync(){
+  if (!bcCreWanted()){
+    let had = false;
+    Object.values(liveConns).forEach(c => { if (c.cre && (c.cre.rosterQid || c.cre.posQid)) had = true; bcCreSyncSocket(c); });
+    bcCre.roster = {}; bcCre.pos = {};
+    Object.keys(bcCre.resubT).forEach(rg => { clearTimeout(bcCre.resubT[rg]); delete bcCre.resubT[rg]; });
+    if (had) bcCreScheduleRedraw();
+    if (liveOn() && !trackedPlayers.length && !bcPlayersOn) liveStart();   // → liveStopAll
+    return;
+  }
+  if (!liveOn()) liveStart();
+  Object.values(liveConns).forEach(c => bcCreSyncSocket(c));
+}
+// A named set answered. Roster → compact id→type map, then ask for positions. Positions → this
+// region's dots, whole: a replaced set arrives as a full snapshot, so there is no merge bookkeeping.
+// Overworld rows only (dimension 1): an instance interior has its own coordinate space.
+function bcCreOnApplied(c, a){
+  const s = c.cre; if (!s) return;
+  const qid = a.query_id && a.query_id.id;
+  const rows = {};
+  ((a.update && a.update.tables) || []).forEach(t => { const l = rows[t.table_name] || (rows[t.table_name] = []); (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) l.push(r); })); });
+  if (qid === s.rosterQid){
+    const ro = new Map(); (rows[BC_CRE_ROSTER_TABLE] || []).forEach(r => ro.set(String(r.entity_id), bcCreTypeOf(r)));
+    bcCre.roster[c.region] = ro; s.rosterReady = true;
+    bcCreSyncSocket(c);
+  } else if (qid === s.posQid){
+    const ro = bcCre.roster[c.region] || new Map(), m = new Map();
+    (rows[BC_CRE_POS_TABLE] || []).forEach(r => { const id = String(r.entity_id), t = ro.get(id); if (t != null && +r.dimension === 1) m.set(id, { t, x: r.location_x / 1000, z: r.location_z / 1000 }); });
+    bcCre.pos[c.region] = m; s.posReady = true;
+    bcCreScheduleRedraw();
+  }
+}
+// The relay refused a set: forget it (no automatic retry loop — the next track/region/tab action re-syncs)
+// and count the region as settled so the list doesn't show "…" forever.
+function bcCreOnError(c, err){
+  const s = c.cre, qid = err && err.query_id && err.query_id.id; if (!s || !qid) return;
+  if (qid === s.rosterQid){ s.rosterQid = 0; s.rosterReady = false; }
+  if (qid === s.posQid){ s.posQid = 0; s.posReady = true; s.posKey = ''; s.posIds = new Set(); }
+}
+// Roster deltas (positional rows; LIVE_COLS names them): a spawn of a tracked type earns a debounced
+// position re-subscribe, a death drops the dot at once.
+function bcCreOnRosterDelta(c, t){
+  const rg = c.region, ro = bcCre.roster[rg]; if (!ro) return;
+  const types = new Set(bcRelayEnemyTypes().map(x => +x.id));
+  let resub = false, redraw = false;
+  (t.updates || []).forEach(u => {
+    (u.deletes || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const id = String(r.entity_id); ro.delete(id); const p = bcCre.pos[rg]; if (p && p.delete(id)) redraw = true; });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; });
+  });
+  if (redraw) bcCreScheduleRedraw();
+  if (resub && !bcCre.resubT[rg]) bcCre.resubT[rg] = setTimeout(() => { delete bcCre.resubT[rg]; bcCreSyncSocket(liveConns[rg]); }, BC_CRE_RESUB_DEBOUNCE_MS);
+}
+// Position deltas for creatures we asked for: a move is delete(old)+insert(new), a death a bare delete.
+function bcCreOnPosDelta(c, kind, r){
+  const rg = c.region, p = bcCre.pos[rg] || (bcCre.pos[rg] = new Map()), id = String(r.entity_id);
+  if (kind === 'delete') p.delete(id);
+  else { const ro = bcCre.roster[rg], t = ro && ro.get(id); if (t != null && +r.dimension === 1) p.set(id, { t, x: r.location_x / 1000, z: r.location_z / 1000 }); else p.delete(id); }
+  bcCreScheduleRedraw();
+}
+// Points for every tracked creature type from the wanted regions' position maps. Throttled like the
+// prism redraw; repaints only while the Map tab is showing. A region whose socket isn't open isn't
+// "loading" — its dots are simply absent until it reconnects — so it doesn't hold the count at "…".
+function bcCreScheduleRedraw(){ if (bcCre.redrawT) return; bcCre.redrawT = setTimeout(() => { bcCre.redrawT = null; bcCreRebuild(); }, 200); }
+function bcCreRebuild(){
+  const enemies = bcRelayEnemyTypes();
+  if (enemies.length){
+    const byType = {}; enemies.forEach(t => { t.pts = []; byType[+t.id] = t; });
+    const regions = bcCreRegions();
+    regions.forEach(rg => { const p = bcCre.pos[rg]; if (p) p.forEach(v => { const t = byType[v.t]; if (t) t.pts.push([v.x, v.z]); }); });
+    enemies.forEach(t => { t.count = t.pts.length; t.applied = regions.every(rg => { const c = liveConns[rg]; return !(c && c.ws && c.ws.readyState === 1) || !!(c.cre && c.cre.posReady); }); });
+  }
+  if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
