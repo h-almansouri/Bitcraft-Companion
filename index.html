@@ -742,14 +742,34 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .map-legend .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle}
 .map-attrib{font-size:10px;color:var(--text3);margin-top:.4rem;text-align:right}
 .map-attrib a{color:var(--text3)}
-/* Map tab: left sidebar (search/filter) + map */
-.map-wrap{display:flex;gap:.6rem;height:calc(100vh - 130px);min-height:460px}
+/* Map tab: left sidebar (search/filter) + map. The page is capped at 1200px everywhere else; the map tab
+   lifts the cap and the shell carries the width instead — the old 1152px by default, or what the user
+   dragged it to (--map-w: a px width, or 100% = fill the window). max-width keeps it inside small windows. */
+main.map-mode{max-width:none}
+.map-shell{width:var(--map-w,1152px);max-width:100%}
+.map-wrap{position:relative;display:flex;gap:.6rem;height:calc(100vh - 130px);min-height:460px}
 .map-side{width:260px;flex-shrink:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:.6rem;display:flex;flex-direction:column;gap:.6rem;overflow:hidden}
 .map-side-sec{display:flex;flex-direction:column}
 .map-side-grow{flex:1;min-height:0}
 .map-side-hdr{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);margin-bottom:.4rem;display:flex;align-items:center;gap:.3rem}
 .map-side input,.map-side select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 7px;font-size:12px;outline:none}
 .map-side input:focus,.map-side select:focus{border-color:var(--teal)}
+/* Collapsible panel: a header button folds it into a slim rail; the rail brings it back. */
+.map-side-collapse{margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;padding:0 1px;font-size:16px;line-height:1;display:flex}
+.map-side-collapse:hover{color:var(--text)}
+.map-side-rail{display:none}
+.map-wrap.side-collapsed .map-side{width:34px;padding:0}
+.map-wrap.side-collapsed .map-side>:not(.map-side-rail){display:none}
+.map-wrap.side-collapsed .map-side-rail{display:flex;flex-direction:column;align-items:center;gap:.7rem;width:100%;height:100%;padding:.7rem 0;background:none;border:none;border-radius:10px;color:var(--text3);cursor:pointer;font-size:17px;font-family:inherit}
+.map-side-rail:hover{color:var(--text);background:var(--bg3)}
+.map-side-rail span{writing-mode:vertical-rl;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+/* Width handle on the map's right edge. It sits in the page padding just outside the map, so it never
+   competes with Leaflet for the pointer. */
+.map-resize{position:absolute;top:0;bottom:0;right:-13px;width:12px;cursor:ew-resize;touch-action:none;display:flex;align-items:center;justify-content:center}
+.map-resize::before{content:'';width:4px;height:44px;border-radius:2px;background:var(--border2);transition:background .15s}
+.map-resize:hover::before,.map-resize.dragging::before{background:var(--teal)}
+body.bc-resizing{cursor:ew-resize;user-select:none}
+@media(max-width:768px){.map-resize{display:none}}
 .bc-mp-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 9px;font-size:12px;cursor:pointer;white-space:nowrap}
 .bc-mp-btn:hover{background:var(--bg4)}
 .bc-res-row{padding:.3rem .5rem;cursor:pointer;border-radius:4px;font-size:12px}
@@ -1720,7 +1740,9 @@ function switchTab(tab, opts) {
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
   document.getElementById('tab-' + tab).style.display = '';
   document.getElementById('topbar-title').textContent = TAB_TITLES[tab] || tab;
-  document.querySelector('main').classList.toggle('planner-mode', tab === 'planner');
+  const mainEl = document.querySelector('main');
+  mainEl.classList.toggle('planner-mode', tab === 'planner');
+  mainEl.classList.toggle('map-mode', tab === 'map');   // the map's own shell sets its width (see .map-shell)
   currentTab = tab;
   if (tab !== 'lookup') safeSetItem('bc_tab', tab);   // a lookup is never the remembered tab
   // URL mirrors the tab. The boot render REPLACES the entry it landed on (no phantom history step); a
@@ -7962,12 +7984,14 @@ function renderMap(){
   }
   if (!bcMapInited){
     host.innerHTML = `
-      <div class="map-wrap">
+      <div class="map-shell"${bcMapW ? ` style="--map-w:${bcMapW}"` : ''}>
+      <div class="map-wrap${bcMapSideCollapsed ? ' side-collapsed' : ''}">
         <div class="map-side">
+          <button class="map-side-rail" onclick="bcMapSideToggle(false)" title="Show the tracking panel"><i class="ti ti-layout-sidebar-left-expand"></i><span>Tracking</span></button>
           <div class="map-side-sec">
-            <div class="map-side-hdr"><i class="ti ti-users"></i> Live players</div>
+            <div class="map-side-hdr"><i class="ti ti-users"></i> Live players<button class="map-side-collapse" onclick="bcMapSideToggle(true)" title="Hide this panel to give the map more room"><i class="ti ti-layout-sidebar-left-collapse"></i></button></div>
             <div style="display:flex;gap:4px">
-              <input id="bc-player-inp" placeholder="Search player…" autocomplete="off" oninput="bcPlayerSearch(this.value)">
+              <input type="search" id="bc-player-inp" placeholder="Search player…" autocomplete="off" oninput="bcPlayerSearch(this.value)">
               <button class="bc-mp-btn" id="bc-track-me" onclick="bcTrackMe()" title="Track yourself">Me</button>
             </div>
             <div id="bc-player-results"></div>
@@ -7979,7 +8003,7 @@ function renderMap(){
             <button class="bc-mp-btn bc-pip-btn" id="bc-pip-btn" onclick="bcMapPip()" title="Pop the map into a floating, always-on-top window (Chrome/Edge). It stays fully interactive — zoom &amp; pan work." style="display:none;width:100%;margin-bottom:5px"><i class="ti ti-picture-in-picture-on"></i> Pop out map</button>
             <select id="bc-region-sel" style="margin-bottom:4px" onchange="bcSetMapRegion(this.value)" title="Limit tracked resources to one region"></select>
             <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin-bottom:5px;cursor:pointer" title="Show depleted resource nodes and their live respawn countdown (live via prism-relay)"><input type="checkbox" id="bc-growth-toggle" style="width:auto" onchange="bcGrowthToggle(this.checked)"><i class="ti ti-hourglass-low" style="color:var(--teal-light)"></i> Respawn timers</label>
-            <input id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
+            <input type="search" id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
             <div style="display:flex;gap:4px;margin-top:4px">
               <select id="bc-res-tier" onchange="bcResTier=this.value;bcRenderResourceList()"></select>
               <select id="bc-res-tag" onchange="bcResTag=this.value;bcRenderResourceList()"></select>
@@ -7994,14 +8018,64 @@ function renderMap(){
           </div>
         </div>
         <div id="map-el"></div>
+        <div class="map-resize" onpointerdown="bcMapResizeDown(event)" ondblclick="bcMapResizeReset()" title="Drag to resize the map · double-click to reset"></div>
       </div>
-      <div class="map-attrib">Map data: <a href="https://github.com/BitCraftToolBox/prism" target="_blank">prism</a> · <a href="https://github.com/BitCraftToolBox/bitcraftmap" target="_blank">bitcraftmap</a> (BSD-2) · <a href="https://bitjita.com" target="_blank">bitjita</a></div>`;
+      <div class="map-attrib">Map data: <a href="https://github.com/BitCraftToolBox/prism" target="_blank">prism</a> · <a href="https://github.com/BitCraftToolBox/bitcraftmap" target="_blank">bitcraftmap</a> (BSD-2) · <a href="https://bitjita.com" target="_blank">bitjita</a></div>
+      </div>`;
     bcMapInited = true;
     bcMapInitPromise = bcInitMap();
   } else if (bcMap){
     setTimeout(() => bcMap.invalidateSize(), 60);
   }
   const pb = document.getElementById('bc-pip-btn'); if (pb) pb.style.display = bcPipSupported() ? '' : 'none';
+}
+
+// ===== Map layout: collapsible tracking panel + drag-to-resize width (both remembered per browser) =====
+// Collapsing moves the map's LEFT edge. Leaflet would keep the top-left corner anchored and the whole view
+// would jump sideways, so the view is shifted back by exactly the edge's movement: the map content stays
+// still on screen and the freed strip simply shows more of the world.
+let bcMapSideCollapsed = (() => { try { return localStorage.getItem('bc_map_side_collapsed') === '1'; } catch(e){ return false; } })();
+function bcMapSideToggle(collapse){
+  const wrap = document.querySelector('#map-content .map-wrap'); if (!wrap) return;
+  bcMapSideCollapsed = !!collapse;
+  safeSetItem('bc_map_side_collapsed', bcMapSideCollapsed ? '1' : '0');
+  const mapEl = document.getElementById('map-el');   // null while popped out — the map lives in the PiP document then
+  const live = !!(bcMap && mapEl && !bcPipWin);
+  const before = live ? mapEl.getBoundingClientRect() : null;
+  wrap.classList.toggle('side-collapsed', bcMapSideCollapsed);
+  if (!live) return;
+  const dx = Math.round(mapEl.getBoundingClientRect().left - before.left);
+  try { bcMap.invalidateSize({ pan: false }); if (dx) bcMap.panBy([dx, 0], { animate: false }); } catch(e){}
+}
+// Width: --map-w on the shell. A px value, or 100% when dragged all the way to the right ("fill": follows
+// the window from then on). Nothing saved = the old fixed width. The ResizeObserver in bcInitMap keeps
+// Leaflet's size in step while dragging.
+const BC_MAP_MIN_W = 640;
+let bcMapW = (() => { try { const v = localStorage.getItem('bc_map_w') || ''; return (v === '100%' || /^\d+px$/.test(v)) ? v : ''; } catch(e){ return ''; } })();
+function bcMapResizeDown(e){
+  if (e.button !== 0) return;
+  const handle = e.currentTarget, shell = handle.closest('.map-shell'); if (!shell) return;
+  e.preventDefault();
+  const startX = e.clientX, startW = shell.getBoundingClientRect().width;
+  const maxW = shell.parentElement.clientWidth;   // all the room the tab has (main is uncapped on the map tab)
+  const minW = Math.min(BC_MAP_MIN_W, maxW);
+  try { handle.setPointerCapture(e.pointerId); } catch(err){}
+  handle.classList.add('dragging'); document.body.classList.add('bc-resizing');
+  const move = ev => {
+    const w = Math.round(Math.max(minW, Math.min(maxW, startW + ev.clientX - startX)));
+    shell.style.setProperty('--map-w', w >= maxW - 2 ? '100%' : w + 'px');
+  };
+  const up = () => {
+    handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+    handle.classList.remove('dragging'); document.body.classList.remove('bc-resizing');
+    bcMapW = shell.style.getPropertyValue('--map-w').trim();
+    if (bcMapW) safeSetItem('bc_map_w', bcMapW);
+  };
+  handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+}
+function bcMapResizeReset(){
+  bcMapW = ''; try { localStorage.removeItem('bc_map_w'); } catch(e){}
+  const shell = document.querySelector('#map-content .map-shell'); if (shell) shell.style.removeProperty('--map-w');
 }
 
 // ===== Picture-in-Picture: pop the Leaflet map into a floating, always-on-top window (Document PiP API,
@@ -8133,6 +8207,20 @@ async function bcInitMap(){
     crs: bcMapCRS(), preferCanvas:true, attributionControl:false,
     minZoom:-5, maxZoom:5, zoomSnap:0.1, zoomAnimation:true, boxZoom:false
   });
+  // Leaflet only watches the WINDOW, but the map box also changes size when the panel collapses or the
+  // width handle is dragged. Follow the box itself (ResizeObserver already batches to one call per frame),
+  // keeping the left edge anchored so a drag of the right edge just reveals more map. Skipped while the tab
+  // is hidden (0×0) and while the map is popped out (the PiP window has its own handler). If Leaflet's
+  // cached size is 0×0 — the window was resized while another tab was showing — pan normally instead,
+  // which undoes the shift that caused. On a window resize Leaflet's own handler has already run by now
+  // (animation frames precede resize observations), so this finds nothing left to do.
+  if (window.ResizeObserver){
+    new ResizeObserver(entries => {
+      const r = entries[0] && entries[0].contentRect;
+      if (!r || !r.width || !r.height || bcPipWin) return;
+      try { const cached = bcMap.getSize(); bcMap.invalidateSize({ pan: !(cached.x && cached.y), debounceMoveend: true }); } catch(e){}
+    }).observe(document.getElementById('map-el'));
+  }
 
   // Base terrain — tiled pyramid (apothem handled entirely by the CRS).
   // No `bounds` option: with the negative-Y hex projection it wrongly rejects every tile;
