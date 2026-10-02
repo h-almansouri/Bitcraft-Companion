@@ -719,7 +719,11 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 }
 
 /* ── MAP TAB ── */
-#map-el{flex:1;min-width:0;height:100%;border-radius:10px;overflow:hidden;background:#0a0c10;border:1px solid var(--border)}
+/* isolation: Leaflet stacks its panes and corner controls with z-index up to 1000, and without a stacking
+   context of its own those numbers compete with the whole page — a widened map's layer checklist drew
+   over the notifications panel (also z-index 1000; the map comes later in the DOM, so it won the tie) and
+   its panes over the lookup results (z-index 100). Isolated, everything Leaflet draws stays inside the map. */
+#map-el{flex:1;min-width:0;height:100%;border-radius:10px;overflow:hidden;background:#0a0c10;border:1px solid var(--border);isolation:isolate}
 .leaflet-container{background:#0a0c10;font-family:inherit;outline:none}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--bg2);color:var(--text);border:1px solid var(--border2)}
 .leaflet-popup-content{font-size:12px;line-height:1.55;margin:.6rem .8rem}
