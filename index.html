@@ -5249,16 +5249,21 @@ async function renderCraftingTab(silent, force) {
   startCraftActiveTick();   // expires the Active chip; cheap enough to leave running for both sub-tabs
 }
 
-// Completion time (unix seconds) of a passive craft: start timestamp + recipe duration.
-// ⚠️ Only a PROCESSING craft has a knowable completion. A QUEUED craft (station slots all busy)
-// carries its QUEUE-ENTRY time in `timestamp` — the server re-stamps it and schedules the real
-// completion timer only when a slot frees (BitCraftPublic: passive_craft_state.rs
-// process_oldest_queued → passive_craft_timer). queueTime + duration made the craft-done alert
-// fire early by exactly the queue wait. Return 0 for queued — every consumer treats 0 as
-// "no known completion", and the craft enters the watch/countdown when it flips to processing
-// (≤1s later via the predecessor's own completion wake, or the next ~15s alerts poll).
+// Completion time (unix seconds) of a passive craft. What `timestamp` means depends on the status —
+// the server re-stamps the row at each step (BitCraftPublic):
+//   queued      queue-entry time. Nothing knowable yet: the real timer is only scheduled when a slot
+//               frees (passive_craft_state.rs process_oldest_queued → passive_craft_timer), so
+//               queueTime + duration fired the craft-done alert early by the queue wait. → 0, which
+//               every consumer treats as "no known completion"; the craft enters the watch/countdown
+//               when it flips to processing (≤1s via the predecessor's completion wake, or ~15s poll).
+//   processing  start time → start + recipe duration.
+//   complete    the COMPLETION moment (passive_craft_process: timestamp = now, status = Complete), and
+//               the row then sits unchanged until someone collects it. Adding the duration here gave
+//               every uncollected craft a phantom second completion one full craft-time later — and
+//               the craft-done alert pinged again for it. → the timestamp itself.
 function passiveCompletionTs(c) {
-  if (String(c.status || '').toLowerCase() === 'queued') return 0;
+  const status = String(c.status || '').toLowerCase();
+  if (status === 'queued') return 0;
   let start = 0;
   if (c.timestamp) { const p = new Date(c.timestamp); if (!isNaN(p)) start = Math.floor(p.getTime()/1000); }
   if (!start) {
@@ -5267,6 +5272,7 @@ function passiveCompletionTs(c) {
     if (t > 1e12) t = Math.floor(t/1000);
     start = t;
   }
+  if (status === 'complete' || status === 'completed' || status === 'done' || c.completed || c.isCompleted) return start;   // already the finish time
   const dur = passiveCraftDuration(c.recipeId);
   if (start && dur != null) return start + dur;
   return start || 0; // fallback: unknown duration → treat start as the only reference
