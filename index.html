@@ -780,6 +780,12 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-players-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin:6px 0 2px}
 .bc-players-count{color:var(--text3);font-size:11px}
 .bc-ppop{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.bc-players-sub{display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin:2px 0 2px 1.3rem;cursor:pointer;width:fit-content}
+.bc-players-sub.off{opacity:.45}
+/* Hover name tag (online-player dots, claims): readable, theme-coloured, never takes the pointer. */
+.leaflet-tooltip.bc-hover-tip{background:var(--bg2);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:2px 7px;font-size:12px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.45);white-space:nowrap}
+.leaflet-tooltip-top.bc-hover-tip::before{border-top-color:var(--border2)}
+.leaflet-container.bc-dot-hover{cursor:pointer}
 .bc-pl-col{width:13px!important;height:13px!important;min-width:0;padding:0!important;margin:0;border:1px solid var(--border)!important;border-radius:50%!important;background:none;cursor:pointer;flex:0 0 13px}   /* !important: the sidebar's generic input rule sets width:100% (same fix as .bc-trk-col) */
 .bc-pl-col::-webkit-color-swatch{border:none;border-radius:50%}
 .bc-pl-col::-webkit-color-swatch-wrapper{padding:0}
@@ -7956,6 +7962,12 @@ function bcMapCRS() {
   });
 }
 
+// Name tag on hover for a claim marker. Leaflet also opens a bound tooltip on click; this click handler is
+// registered after it, so a click leaves only the claim's popup showing.
+function bcClaimHoverTip(m, name){
+  m.bindTooltip(escHtml(name), { direction: 'top', offset: [0, -16], className: 'bc-hover-tip', opacity: 1 });
+  m.on('click', () => m.closeTooltip());
+}
 async function bcLoadGeo(name){
   // Marker lists (claims, caves, dungeons, temples, ruins, wonders) from the map export host via /bcexports/ —
   // prism.brico.app, regenerated every 15 minutes, with bitjita's older copy as the proxy's fallback.
@@ -7996,6 +8008,7 @@ function renderMap(){
             </div>
             <div id="bc-player-results"></div>
             <div class="bc-players-row"><label style="display:flex;align-items:center;gap:.4rem;flex:1;cursor:pointer" title="Every signed-in player in the overworld, streamed from the bitcraftsync relay as they move. Follows the region selector — all regions is heavier."><input type="checkbox" id="bc-players-toggle" style="width:auto" onchange="bcPlayersToggle(this.checked)"> <i class="ti ti-users"></i> Everyone online <span id="bc-players-count" class="bc-players-count"></span></label><input type="color" class="bc-pl-col" id="bc-players-color" value="#f8fafc" oninput="bcPlayersSetColor(this.value)" title="Dot colour"></div>
+            <label class="bc-players-sub" id="bc-players-names-row" title="Draw each player's name next to their dot. When off, hover a dot to see who it is; clicking still opens their name and profile."><input type="checkbox" id="bc-players-names" style="width:auto" onchange="bcPlayersSetNames(this.checked)"> <i class="ti ti-tag"></i> Show names</label>
             <div id="bc-players-list" class="bc-mp-list"></div>
           </div>
           <div class="map-side-sec map-side-grow">
@@ -8272,8 +8285,11 @@ async function bcInitMap(){
     const tier = (p.tier >= 0 && p.tier <= 10) ? p.tier : 0;
     if (!claimTierLayers[tier]) { claimTierLayers[tier] = L.layerGroup(); claimTierCount[tier] = 0; }
     claimTierCount[tier]++;
-    const m = L.marker(ll, { icon: claimIcon(p.tier), title: p.name || '' });
+    // Hover name tag (bcClaimHoverTip) instead of the marker's `title`: the browser only shows a title after
+    // a second's pause, in the system style. leaflet-search reads properties.name, not the title.
+    const m = L.marker(ll, { icon: claimIcon(p.tier), alt: p.name || 'Claim' });
     m.feature = f; // lets leaflet-search read properties.name
+    bcClaimHoverTip(m, p.name || 'Claim');
     const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ') || '—';
     m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
     allClaimMarkers.push(m);
@@ -8281,7 +8297,8 @@ async function bcInitMap(){
     // Waystone claims also get a distinct marker on the independent Waystones layer.
     if (p.has_waystone){
       bcWaystoneCount++;
-      const wm = L.marker(ll, { icon: claimIcon(p.tier), title: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
+      const wm = L.marker(ll, { icon: claimIcon(p.tier), alt: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
+      bcClaimHoverTip(wm, (p.name||'Claim')+' · Waystone');
       wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--teal-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
       bcCullClaims.push({ m: wm, ll, group: bcWaystoneLayer });
     }
@@ -8395,7 +8412,9 @@ async function bcInitMap(){
 
   // ----- Resource canvas overlay + sidebar wiring -----
   bcResourceLayer = new (bcPointLayerClass())({ radius:3 }).addTo(bcMap);
-  bcMap.on('click', bcPlayersClick);   // a dot on the "everyone online" layer → that player's lookup page
+  bcMap.on('click', bcPlayersClick);   // a dot on the "everyone online" layer → name + "View profile" popup
+  bcMap.on('mousemove', bcPlayersHover);   // …and hovering one: pointer cursor, plus the name when labels are off
+  bcMap.on('mouseout', bcPlayersHoverOff);
   await bcLoadIndexes();
   bcLoadHidden();
   bcLoadMapRegion();
@@ -8795,6 +8814,13 @@ function bcToggleFollow(id){
 let bcPlayersOn = (() => { try { return localStorage.getItem('bc_map_players_on') === '1'; } catch(e){ return false; } })();
 let bcPlayersColor = (() => { try { return localStorage.getItem('bc_map_players_color') || '#f8fafc'; } catch(e){ return '#f8fafc'; } })();
 let bcPlayersLayer = null, bcPlayersT = null, bcPlayersLast = { pts: [], ids: [], names: [] };
+// Name labels next to the dots (default on). Off: the dots stay clickable and hovering one shows the name.
+let bcPlayersNames = (() => { try { return localStorage.getItem('bc_map_players_names') !== '0'; } catch(e){ return true; } })();
+function bcPlayersSetNames(on){
+  bcPlayersNames = !!on; safeSetItem('bc_map_players_names', bcPlayersNames ? '1' : '0');
+  bcPlayersHoverOff();
+  bcPlayersRebuild();   // repaint now, with or without the labels
+}
 function bcPlayersKey(){ return bcPlayersOn ? (bcMapRegion || 'all') : ''; }
 function bcPlayersWanted(region){ return bcPlayersOn && !DEAD_REGIONS.has(+region) && (!bcMapRegion || +bcMapRegion === +region); }
 function bcPlayersToggle(on){
@@ -8808,8 +8834,10 @@ function bcPlayersApply(){
   if (!bcMap) return;
   if (!bcPlayersLayer) bcPlayersLayer = new (bcPointLayerClass())({ radius: 5.5 });
   if (bcPlayersOn){ if (!bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.addTo(bcMap); }
-  else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [], names: [] }; }
+  else { if (bcMap.hasLayer(bcPlayersLayer)) bcPlayersLayer.remove(); bcPlayersLast = { pts: [], ids: [], names: [] }; bcPlayersHoverOff(); }
   const chk = document.getElementById('bc-players-toggle'); if (chk) chk.checked = bcPlayersOn;
+  const nm = document.getElementById('bc-players-names'); if (nm) nm.checked = bcPlayersNames;
+  const nmRow = document.getElementById('bc-players-names-row'); if (nmRow) nmRow.classList.toggle('off', !bcPlayersOn);
   const col = document.getElementById('bc-players-color'); if (col) col.value = bcPlayersColor;
   const ct = document.getElementById('bc-players-count'); if (ct && !bcPlayersOn) ct.textContent = '';
 }
@@ -8825,24 +8853,70 @@ function bcPlayersRebuild(){
   });
   bcPlayersLast = { pts, ids, names: labels };
   const ct = document.getElementById('bc-players-count'); if (ct) ct.textContent = pts.length ? `(${pts.length})` : '';
-  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels, color: bcPlayersColor, count: pts.length, radius: 5.5, labelMinZoom: -1 }]);   // 11px dots: still smaller than a tracked player's 16px marker
+  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels: bcPlayersNames ? labels : null, color: bcPlayersColor, count: pts.length, radius: 5.5, labelMinZoom: -1 }]);   // 11px dots: still smaller than a tracked player's 16px marker
+  // An open hover tag stays on its player as they walk (or goes when they sign out); the next mouse move
+  // re-picks whatever dot is actually under the pointer.
+  if (bcPlayersHoverId && bcPlayersTip && bcPlayersTip.isOpen()){
+    const k = ids.indexOf(bcPlayersHoverId);
+    if (k < 0) bcPlayersHoverOff(); else bcPlayersTip.setLatLng(L.latLng(pts[k][1], pts[k][0]));
+  }
 }
 // Click on a dot → a small popup with the player's name and a "View profile" button (nearest dot within a few
 // pixels; clicks on markers, popups and controls are left alone). Jumping straight to the profile on a click
 // was too abrupt on a layer with hundreds of dots.
+// Index of the online dot nearest a container point, within maxPx — or null. Straight from the layer's cached
+// projection (no LatLng objects), so it is cheap enough to run on every mouse move.
+function bcPlayersNearest(cp, maxPx){
+  const pts = bcPlayersLast.pts; if (!pts.length || !bcPlayersLayer || !bcPlayersLayer._map) return null;
+  const proj = bcPlayersLayer._project(pts), scale = bcMap.options.crs.scale(bcMap.getZoom());
+  const o = bcMap.getPixelOrigin(), pane = bcMap._getMapPanePos(), ox = pane.x - o.x, oy = pane.y - o.y;
+  let best = null, bestD = maxPx * maxPx;
+  for (let i = 0, j = 0; i < pts.length; i++, j += 2){
+    const dx = proj[j] * scale + ox - cp.x, dy = proj[j + 1] * scale + oy - cp.y, d = dx*dx + dy*dy;
+    if (d < bestD){ bestD = d; best = i; }
+  }
+  return best;
+}
+let bcPlayersPopup = null;
 function bcPlayersClick(e){
   if (!bcPlayersOn || !bcPlayersLast.pts.length) return;
   const tgt = e.originalEvent && e.originalEvent.target;
   if (tgt && tgt.closest && tgt.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control')) return;
-  const cp = e.containerPoint; let best = null, bestD = 14 * 14;
-  bcPlayersLast.pts.forEach((p, i) => { const q = bcMap.latLngToContainerPoint(L.latLng(p[1], p[0])); const dx = q.x - cp.x, dy = q.y - cp.y, d = dx*dx + dy*dy; if (d < bestD){ bestD = d; best = i; } });
+  const best = bcPlayersNearest(e.containerPoint, 14);
   if (best == null) return;
   const id = bcPlayersLast.ids[best], name = bcPlayersLast.names[best] || ('Player ' + id), p = bcPlayersLast.pts[best];
-  bcMap.closePopup();
-  L.popup({ offset: [0, -6], autoPan: false })
+  bcMap.closePopup(); bcPlayersHoverOff();
+  bcPlayersPopup = L.popup({ offset: [0, -6], autoPan: false })
     .setLatLng(L.latLng(p[1], p[0]))
     .setContent(`<div class="bc-ppop"><b>${escHtml(name)}</b><button class="btn ctrl-btn" onclick="bcMap.closePopup();openLookup('${id}')"><i class="ti ti-user-search"></i> View profile</button></div>`)
     .openOn(bcMap);
+}
+// Hover over a dot: pointer cursor (it's clickable), and — when names are off — a small tag with the name.
+// The dots are canvas pixels, not elements, so this is a nearest-dot test on the map's mousemove (which the
+// browser already delivers at most once per frame). Skipped while a button is held (panning), during a zoom
+// animation, over markers/controls/popups, and while that layer's click popup is open.
+let bcPlayersTip = null, bcPlayersHoverId = null;
+function bcPlayersHover(e){
+  const oe = e.originalEvent;
+  if (!bcPlayersOn || !bcPlayersLast.pts.length || (oe && oe.buttons) || bcMap._animatingZoom) return bcPlayersHoverOff();
+  const tgt = oe && oe.target;
+  if (tgt && tgt.closest && tgt.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control')) return bcPlayersHoverOff();
+  const i = bcPlayersNearest(e.containerPoint, 9);
+  if (i == null) return bcPlayersHoverOff();
+  bcMap.getContainer().classList.add('bc-dot-hover');
+  const id = bcPlayersLast.ids[i];
+  if (bcPlayersNames || (bcPlayersPopup && bcPlayersPopup.isOpen())){ if (bcPlayersTip) bcPlayersTip.close(); bcPlayersHoverId = null; return; }
+  if (id === bcPlayersHoverId && bcPlayersTip && bcPlayersTip.isOpen()) return;
+  bcPlayersHoverId = id;
+  const p = bcPlayersLast.pts[i];
+  if (!bcPlayersTip) bcPlayersTip = L.tooltip({ direction: 'top', offset: [0, -7], className: 'bc-hover-tip', opacity: 1 });
+  bcPlayersTip.setLatLng(L.latLng(p[1], p[0])).setContent(escHtml(bcPlayersLast.names[i] || ('Player ' + id)));
+  if (!bcPlayersTip.isOpen()) bcPlayersTip.openOn(bcMap);
+}
+function bcPlayersHoverOff(){
+  bcPlayersHoverId = null;
+  if (bcPlayersTip) bcPlayersTip.close();
+  if (bcMap) bcMap.getContainer().classList.remove('bc-dot-hover');
 }
 onLiveChange(evs => { if (bcPlayersOn && evs.some(e => e.table === 'mobile_entity_state' || e.table === 'signed_in_player_state' || e.table === 'player_username_state')) bcPlayersSchedule(); });
 // Colour picker on a tracked player's row (the circle next to the name). Live, while dragging in the
