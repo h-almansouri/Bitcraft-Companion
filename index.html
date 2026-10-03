@@ -1712,7 +1712,7 @@ function lookupRender(){
   const sub = lookupState.sub, d = lookupState.data[sub], id = lookupState.id;
   if (!d){ body.innerHTML = lookupState.busy[sub] ? loading() : ''; return; }
   if (d._error){ body.innerHTML = errBox(new Error(d._error)); return; }
-  if (sub === 'skills'){ body.innerHTML = skillsSectionHtml(d.pData, d.ranks, id); return; }
+  if (sub === 'skills'){ body.innerHTML = skillsSectionHtml(d.pData, d.ranks, id); if (openJourney[String(id)]) renderJourney(id); return; }   // re-open a calculator the rebuild just cleared
   if (sub === 'inventory'){
     body.innerHTML = '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap"><span style="flex:1"></span>' +
       '<div class="inv-toggle" style="margin:0"><button class="' + (invViewMode === 'grouped' ? 'active' : '') + '" onclick="invViewMode=\'grouped\';lookupRender()"><i class="ti ti-layout-list"></i> Grouped</button><button class="' + (invViewMode === 'flat' ? 'active' : '') + '" onclick="invViewMode=\'flat\';lookupRender()"><i class="ti ti-layout-grid"></i> Flat</button></div>' +
@@ -2265,8 +2265,13 @@ function updateSkillSession(entityId, skills){
     if (!e){ s[sk.skillId] = {startXp:sk.xp, startTs:now, curXp:sk.xp, curTs:now, active:false, lastGainTs:0, gainSeq:0, gaps:[]}; return; }
     if (sk.xp < e.curXp) return;   // a staler read than what the stream already showed (cached REST behind a live delta): XP never goes down — don't rewind the baseline into a fake "gain"
     if (sk.xp > e.curXp){
-      // first gain of a grinding window: start the rate clock at the prior snapshot for an accurate rate
-      if (e.curXp === e.startXp){ e.startXp = e.curXp; e.startTs = e.curTs; }
+      // First gain of a grinding window: start the rate clock at the prior snapshot — if that's recent. After a
+      // quiet spell nothing refreshes it (it can be hours old), and anchoring there spread this gain over all the
+      // idle time (XP/hr many times too low); then the window starts at this gain and the next one sets the rate.
+      if (e.curXp === e.startXp){
+        if (now - e.curTs <= SKILL_GAP_MAX) e.startTs = e.curTs;
+        else { e.startXp = sk.xp; e.startTs = now; }
+      }
       if (e.lastGainTs){
         const gap = now - e.lastGainTs;
         if (gap <= SKILL_GAP_MAX){ (e.gaps = e.gaps || []).push(gap); if (e.gaps.length > 5) e.gaps.shift(); }
@@ -2333,19 +2338,25 @@ function saveSkillCalcPrefs(){ safeSetItem('bc_skill_calc', JSON.stringify(skill
 // Velcruza's Smithing) doesn't leak onto another player's same skill (Vel's Smithing).
 function calcKey(entityId, skillId){ return String(entityId) + ':' + skillId; }
 
+// The Player Lookup page renders the same section HTML as the Experience and Orders tabs, and those tabs'
+// own (hidden) copies stay in the page — so a tracked player's element ids exist twice, and getElementById
+// handed back the hidden copy (the calculator opened in the hidden tab; Orders buttons acted on it). These
+// look in the view that's showing first.
+function viewEl(id){ const root = document.getElementById('tab-' + currentTab); return (root && root.querySelector('[id="' + id + '"]')) || document.getElementById(id); }
+function viewQuery(sel){ const root = document.getElementById('tab-' + currentTab); return (root && root.querySelector(sel)) || document.querySelector(sel); }
 // ── SKILL CALCULATOR ("journey") PANEL ──
 function openSkillJourney(entityId, skillId){
   entityId = String(entityId);
   if (openJourney[entityId] === skillId){ closeSkillJourney(entityId); return; } // click same skill again = close
   openJourney[entityId] = skillId;
   renderJourney(entityId);
-  const el = document.getElementById('sj-' + entityId);
+  const el = viewEl('sj-' + entityId);
   if (el) el.scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 function closeSkillJourney(entityId){ entityId = String(entityId); delete openJourney[entityId]; renderJourney(entityId); }
 function renderJourney(entityId){
   entityId = String(entityId);
-  const host = document.getElementById('sj-' + entityId);
+  const host = viewEl('sj-' + entityId);
   if (!host) return;
   const skillId = openJourney[entityId];
   const data = skillsByPlayer[entityId];
@@ -2416,7 +2427,7 @@ function adjustTarget(entityId, d){
   const skillId = openJourney[entityId]; if (!skillId) return;
   const data = skillsByPlayer[entityId]; const sk = data && data.skills.find(x => x.skillId === skillId); if (!sk) return;
   const maxLevel = xpThresholds.length || 100;
-  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  const el = viewEl('sj-target-' + entityId); if (!el) return;
   let t = Math.max(sk.level+1, Math.min(maxLevel, (parseInt(el.value,10)||sk.level+1) + d));
   el.value = t;
   const p = skillCalcPrefs[calcKey(entityId, skillId)] || (skillCalcPrefs[calcKey(entityId, skillId)] = {}); p.target = t; saveSkillCalcPrefs();
@@ -2426,7 +2437,7 @@ function adjustTarget(entityId, d){
 function onTargetInput(entityId){
   entityId = String(entityId);
   const skillId = openJourney[entityId]; if (!skillId) return;
-  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  const el = viewEl('sj-target-' + entityId); if (!el) return;
   const v = parseInt(el.value, 10);
   if (!isNaN(v)){ const p = skillCalcPrefs[calcKey(entityId, skillId)] || (skillCalcPrefs[calcKey(entityId, skillId)] = {}); p.target = v; saveSkillCalcPrefs(); }
   recalcJourney(entityId);
@@ -2437,7 +2448,7 @@ function clampTarget(entityId){
   const skillId = openJourney[entityId]; if (!skillId) return;
   const data = skillsByPlayer[entityId]; const sk = data && data.skills.find(x => x.skillId === skillId); if (!sk) return;
   const maxLevel = xpThresholds.length || 100;
-  const el = document.getElementById('sj-target-' + entityId); if (!el) return;
+  const el = viewEl('sj-target-' + entityId); if (!el) return;
   let t = Math.max(sk.level+1, Math.min(maxLevel, parseInt(el.value,10) || (sk.level+1)));
   el.value = t;
   const p = skillCalcPrefs[calcKey(entityId, skillId)] || (skillCalcPrefs[calcKey(entityId, skillId)] = {}); p.target = t; saveSkillCalcPrefs();
@@ -2447,9 +2458,9 @@ function setJourneyMode(entityId, mode){
   entityId = String(entityId);
   const skillId = openJourney[entityId]; if (!skillId) return;
   const p = skillCalcPrefs[calcKey(entityId, skillId)] || (skillCalcPrefs[calcKey(entityId, skillId)] = {}); p.mode = mode; saveSkillCalcPrefs();
-  const lb = document.getElementById('sj-mode-live-' + entityId), mb = document.getElementById('sj-mode-manual-' + entityId);
+  const lb = viewEl('sj-mode-live-' + entityId), mb = viewEl('sj-mode-manual-' + entityId);
   if (lb) lb.classList.toggle('on', mode==='live'); if (mb) mb.classList.toggle('on', mode==='manual');
-  const lv = document.getElementById('sj-live-' + entityId), mv = document.getElementById('sj-manual-' + entityId);
+  const lv = viewEl('sj-live-' + entityId), mv = viewEl('sj-manual-' + entityId);
   if (lv) lv.style.display = mode==='live'?'':'none'; if (mv) mv.style.display = mode==='manual'?'':'none';
   recalcJourney(entityId);
 }
@@ -2458,25 +2469,25 @@ function recalcJourney(entityId){
   const skillId = openJourney[entityId]; if (!skillId) return;
   const data = skillsByPlayer[entityId]; if (!data) return;
   const sk = data.skills.find(x => x.skillId === skillId); if (!sk) return;
-  const tEl = document.getElementById('sj-target-' + entityId); if (!tEl) return;
+  const tEl = viewEl('sj-target-' + entityId); if (!tEl) return;
   const target = parseInt(tEl.value,10) || (sk.level+1);
-  const etalvl = document.getElementById('sj-etalvl-' + entityId); if (etalvl) etalvl.textContent = target;
+  const etalvl = viewEl('sj-etalvl-' + entityId); if (etalvl) etalvl.textContent = target;
   const targetFloor = xpThresholds[target-1] || 0;
   const need = Math.max(0, targetFloor - sk.xp);
-  const needEl = document.getElementById('sj-need-' + entityId); if (needEl) needEl.textContent = fmtNum(need);
+  const needEl = viewEl('sj-need-' + entityId); if (needEl) needEl.textContent = fmtNum(need);
   const p = skillCalcPrefs[calcKey(entityId, skillId)] || {};
   const mode = p.mode || 'live';
   let rate = 0;
   if (mode === 'manual'){
-    const xpa = parseFloat((document.getElementById('sj-xpa-' + entityId)||{}).value) || 0;
-    const spa = parseFloat((document.getElementById('sj-spa-' + entityId)||{}).value) || 0;
+    const xpa = parseFloat((viewEl('sj-xpa-' + entityId)||{}).value) || 0;
+    const spa = parseFloat((viewEl('sj-spa-' + entityId)||{}).value) || 0;
     rate = (xpa>0 && spa>0) ? xpa * (3600/spa) : 0;
-    const mr = document.getElementById('sj-manrate-' + entityId); if (mr) mr.textContent = rate>0?fmtNum(Math.round(rate)):'—';
+    const mr = viewEl('sj-manrate-' + entityId); if (mr) mr.textContent = rate>0?fmtNum(Math.round(rate)):'—';
     p.xpPerAction = xpa || ''; p.secPerAction = spa || ''; skillCalcPrefs[calcKey(entityId, skillId)] = p; saveSkillCalcPrefs();
   } else {
     rate = sessionRate(entityId, skillId).xpHr;
   }
-  const etaEl = document.getElementById('sj-eta-' + entityId);
+  const etaEl = viewEl('sj-eta-' + entityId);
   if (etaEl){
     if (need <= 0) etaEl.textContent = 'Reached ✓';
     else if (rate > 0) etaEl.textContent = fmtDuration(need / rate * 3600);
@@ -2819,7 +2830,7 @@ function toggleTabLive(tab) {
     tabLiveIds[tab] = setInterval(() => {
       if (document.hidden) return;
       if (tab === 'shopping') fetchAllShoppingPrices();
-      else if (tab === 'jsn') renderJsnTab(true);
+      else if (tab === 'jsn'){ invalidateMergedInv(); renderJsnTab(true, true); }   // fresh quantities, and re-price what changed (see jsnValue)
     }, TAB_LIVE_MS[tab] || 120000);
   }
   updateLiveBtns();
@@ -3208,7 +3219,7 @@ let ordersHistoryOpen = new Set();  // playerIds whose completed-trade history p
 // state, and held outside the render so a refresh doesn't reopen what you closed. Absent = expanded.
 let ordCollapsed = new Set();
 function ordToggle(key){
-  const body = document.getElementById('ord-body-' + key), chev = document.getElementById('ord-chev-' + key);
+  const body = viewEl('ord-body-' + key), chev = viewEl('ord-chev-' + key);
   if (!body) return;
   const shut = !ordCollapsed.has(key);
   if (shut) ordCollapsed.add(key); else ordCollapsed.delete(key);
@@ -3418,12 +3429,12 @@ function ordersHistoryBlock(pid){
 }
 function ordersToggleHistory(pid){
   pid = String(pid);
-  const btn = document.getElementById('ord-hist-btn-'+pid);
+  const btn = viewEl('ord-hist-btn-'+pid);
   const setChev = up => { const c = btn && btn.querySelector('.ti-chevron-up,.ti-chevron-down'); if (c){ c.classList.remove('ti-chevron-up','ti-chevron-down'); c.classList.add(up?'ti-chevron-up':'ti-chevron-down'); } };
   if (ordersHistoryOpen.has(pid)){
     ordersHistoryOpen.delete(pid);
     clearTimeout(ordersHistTimer[pid]); delete ordersHistTimer[pid];
-    const panel = document.getElementById('ord-hist-'+pid); if (panel) panel.innerHTML = '';
+    const panel = viewEl('ord-hist-'+pid); if (panel) panel.innerHTML = '';
     setChev(false);
     return;
   }
@@ -3433,7 +3444,7 @@ function ordersToggleHistory(pid){
 }
 async function ordersRenderHistory(pid, silent){
   pid = String(pid);
-  const panel = document.getElementById('ord-hist-'+pid); if (!panel) return;
+  const panel = viewEl('ord-hist-'+pid); if (!panel) return;
   const cached = ordersHistCache[pid];
   if (cached && !panel.firstElementChild) panel.innerHTML = cached.html;   // never blank a panel we can fill
   if (silent && cached){
@@ -3449,14 +3460,14 @@ async function ordersRenderHistory(pid, silent){
     const trades = res.trades || (res.data && res.data.trades) || [];
     const html = ordersHistoryHtml(trades, pid, res.total), prev = ordersHistCache[pid];
     ordersHistCache[pid] = { html, at: Date.now() };
-    const p2 = document.getElementById('ord-hist-'+pid);
+    const p2 = viewEl('ord-hist-'+pid);
     if (!p2 || !ordersHistoryOpen.has(pid)) return;
     if (prev && prev.html === html && p2.firstElementChild) return;   // unchanged → leave the table (and its scroll) alone
     const sc = p2.querySelector('.ord-hist-scroll'), keepTop = sc ? sc.scrollTop : 0;
     p2.innerHTML = html;
     if (keepTop){ const sc2 = p2.querySelector('.ord-hist-scroll'); if (sc2) sc2.scrollTop = keepTop; }
   } catch(e){
-    const p2 = document.getElementById('ord-hist-'+pid);
+    const p2 = viewEl('ord-hist-'+pid);
     if (p2 && !ordersHistCache[pid]) p2.innerHTML = `<div style="padding:.75rem;color:var(--red-light,#e06666);font-size:12px">Couldn't load trade history.</div>`;   // a cached table stays up
   }
 }
@@ -3517,8 +3528,8 @@ async function ordersCheckUndercuts(sectionEl){
   }
 }
 function ordersToggleExpand(oid){
-  const cont = document.getElementById('ord-exp-'+oid); if (!cont) return;
-  const row = document.querySelector(`.ord-row[data-oid="${oid}"]`);
+  const cont = viewEl('ord-exp-'+oid); if (!cont) return;
+  const row = viewQuery(`.ord-row[data-oid="${oid}"]`);
   const chev = row && row.querySelector('.ord-chev');
   if (ordersExpanded.has(oid)){
     ordersExpanded.delete(oid); cont.innerHTML = '';
@@ -3530,7 +3541,7 @@ function ordersToggleExpand(oid){
   if (row) ordersRenderExpand(oid, row);
 }
 async function ordersRenderExpand(oid, row){
-  const cont = document.getElementById('ord-exp-'+oid); if (!cont) return;
+  const cont = viewEl('ord-exp-'+oid); if (!cont) return;
   cont.innerHTML = `<div class="ord-exp-inner" style="color:var(--text3)"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.35rem"></i>Loading market…</div>`;
   const itemId = row.getAttribute('data-item-id');
   const type = row.getAttribute('data-item-type') === '1' ? 'cargo' : 'item';
@@ -3623,7 +3634,12 @@ async function renderOrdersTab(silent, force){
 // number): (1) "Sellable now" — value if you filled existing BUY orders, walking highest buy price first
 // (region-filterable); (2) "7-day average value" — quantity × the item's 7d average traded price.
 // Uses the shared merged inventory (invData, same as Planner/Tools) with a per-location selector.
-let jsnMarket = {};              // "type:id" -> { buyOrders:[], avg7d:number|null }
+// "type:id" -> { buyOrders:[], avg7d:number|null, sig, t, ta, failed }. sig = the bulk summary's buy side
+// (count|best price|total quantity) when the book was read, so a Live tick can tell which books changed;
+// t / ta = when the book / the 7-day average was read.
+let jsnMarket = {};
+const JSN_AVG_TTL = 30 * 60 * 1000;   // Live re-reads a 7-day average at most this often (it moves slowly)
+const JSN_RETRY_MS = 60 * 1000;       // an item whose first read failed is tried again after this
 let jsnRegionFilter = (() => { try { return localStorage.getItem('bc_jsn_region') || ''; } catch(e){ return ''; } })();
 let jsnClaimFilter = (() => { try { const v = JSON.parse(localStorage.getItem('bc_jsn_claims') || '[]'); return Array.isArray(v) ? v : []; } catch(e){ return []; } })();  // [{entityId,name,regionId}]
 let jsnClaimTimer = null;
@@ -3762,10 +3778,15 @@ async function jsnBulkSummary(items){
   }));
   return out;
 }
-async function jsnValue(){
+function jsnSig(s){ return (s.buyOrderCount || 0) + '|' + (s.highestBuyPrice || 0) + '|' + (s.totalBuyQuantity || 0); }
+// reprice = a Live tick: besides valuing new items, re-check every priced one (see Phase 2).
+async function jsnValue(reprice){
   const myRun = ++jsnRunId;
   jsnRenderResults();                                   // instant paint with whatever's already cached
-  const pending = jsnAggregate().filter(it => !jsnMarket[it.key]);
+  const now = Date.now(), agg = jsnAggregate();
+  // Never read yet, or a first read that failed (once its wait is up). Items that have prices keep them —
+  // before, they kept them for the whole session, so Live never changed a number.
+  const pending = agg.filter(it => { const m = jsnMarket[it.key]; return !m || (m.failed && now - m.t > JSN_RETRY_MS); });
   const setProg = (txt) => { if (myRun !== jsnRunId) return; const e = document.getElementById('jsn-progress'); if (e) e.textContent = txt; };
 
   // ── Phase 1: one bulk request per 100 items ──
@@ -3773,7 +3794,8 @@ async function jsnValue(){
   // which for ~560 items meant ~1,120 round-trips at 6 concurrent, about 31s. The bulk endpoint replaces
   // the price-history half outright and tells us which items even HAVE buy orders.
   setProg(pending.length ? 'Valuing items…' : '');
-  const summary = pending.length ? await jsnBulkSummary(pending) : {};
+  const toSum = reprice ? agg : pending;                 // Live summarises everything: that's how it spots what changed
+  const summary = toSum.length ? await jsnBulkSummary(toSum) : {};
   if (myRun !== jsnRunId) return;
 
   // ── Phase 2: order books, but only where there's something to sell into ──
@@ -3794,18 +3816,44 @@ async function jsnValue(){
     if (s && !(s.buyOrderCount > 0)) needBook.push({ it, skipBook: true });
     else needBook.push({ it, skipBook: false });
   });
+  // Live: re-read only the books whose buy side moved — a fill, a new order or a new best price changes the
+  // summary's count, best price or total quantity — plus 7-day averages older than JSN_AVG_TTL. A moved book
+  // skips the 5-minute market cache, which would hand back the copy we already have.
+  if (reprice){
+    const isPending = new Set(pending.map(it => it.key));
+    agg.forEach(it => {
+      const m = jsnMarket[it.key], s = summary[it.key];
+      if (isPending.has(it.key) || !m || m.failed) return;
+      const moved = !!s && jsnSig(s) !== m.sig, avgOld = now - (m.ta || 0) > JSN_AVG_TTL;
+      if (moved) needBook.push({ it, skipBook: !(s.buyOrderCount > 0), fresh: true, avg: avgOld });
+      else if (avgOld) needBook.push({ it, keepBook: true, avg: true });
+    });
+  }
   let idx = 0, done = 0;
-  const prog = () => setProg(needBook.length ? `Valuing items… ${done}/${needBook.length}` : '');
+  const label = pending.length ? 'Valuing items…' : 'Updating prices…';
+  const prog = () => setProg(needBook.length ? `${label} ${done}/${needBook.length}` : '');
   prog();
   async function worker(){
     while (idx < needBook.length){
       if (myRun !== jsnRunId) return;                   // superseded — stop fetching
-      const { it, skipBook } = needBook[idx++];
-      const type = it.itemType === 1 ? 'cargo' : 'item';
-      let buyOrders = [], avg7d = null;
-      if (!skipBook){ try { const d = await fetchWithCache(type, it.id, 12000); buyOrders = d.buyOrders || []; } catch(e){} }
-      try { avg7d = await fetchShoppingAvg7d(it.id, it.itemType === 1); } catch(e){}
-      jsnMarket[it.key] = { buyOrders, avg7d };          // keep the fetched result even if superseded
+      const { it, skipBook, keepBook, fresh, avg } = needBook[idx++];
+      const type = it.itemType === 1 ? 'cargo' : 'item', s = summary[it.key], prev = jsnMarket[it.key];
+      const good = !!prev && !prev.failed;
+      const next = good ? { ...prev } : { buyOrders: [], avg7d: null, sig: '', t: 0, ta: 0 };
+      let failed = false;
+      if (!keepBook){
+        if (skipBook) next.buyOrders = [];
+        else {
+          if (fresh) _mktCache.delete(`${type}_${it.id}`);
+          try { const d = await fetchWithCache(type, it.id, 12000); next.buyOrders = d.buyOrders || []; } catch(e){ failed = true; }
+        }
+        if (!failed){ next.sig = s ? jsnSig(s) : ''; next.t = Date.now(); }
+      }
+      if (!good || avg){ const a = await fetchShoppingAvg7d(it.id, it.itemType === 1); if (a != null || !good) next.avg7d = a; next.ta = Date.now(); }
+      // A failed first read shows nothing yet and is retried after JSN_RETRY_MS; a failed re-read keeps the
+      // last good book (and its old sig, so the next Live tick tries again).
+      if (failed && !good){ next.failed = true; next.t = Date.now(); } else delete next.failed;
+      jsnMarket[it.key] = next;                          // keep the fetched result even if superseded
       done++; prog();
     }
   }
@@ -3939,7 +3987,7 @@ function jsnRenderResults(){
   host.innerHTML = `<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:stretch">${sellCard}${avgCard}</div>`;
 }
 
-async function renderJsnTab(silent){
+async function renderJsnTab(silent, reprice){
   const el = document.getElementById('tab-jsn'); if (!el) return;
   if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
   if (!silent || !document.getElementById('jsn-toolbar')){
@@ -3964,9 +4012,9 @@ async function renderJsnTab(silent){
   if (savedNames === null){ if (jsnTrackedInvs === null) jsnTrackedInvs = new Set((invData.inventories||[]).map((_,i)=>i)); }
   else jsnTrackedInvs = _resolveTrackedByName(invData.inventories||[], savedNames);
   jsnRenderSelector();
-  await jsnValue();
+  await jsnValue(reprice);
 }
-function jsnRefresh(){ jsnMarket = {}; invData = null; renderJsnTab(); }
+function jsnRefresh(){ jsnMarket = {}; invalidateMergedInv(); renderJsnTab(); }   // the merged view is rebuilt from per-player data, so clearing invData alone kept the old quantities
 
 // ── CRAFTING ──
 let craftData = null;
@@ -5225,8 +5273,9 @@ function syncCraftActiveChips(){
 // quantizes the sub-minute range, since this is only ever a rough estimate.
 function fmtEtaLeft(secs){
   secs = Math.round(secs);
-  if (secs >= 3600){ const h = Math.floor(secs/3600), m = Math.round((secs%3600)/60); return m ? `${h}h ${m}m` : `${h}h`; }
-  if (secs >= 60){ return `${Math.round(secs/60)}m`; }
+  const mins = Math.round(secs/60);   // round to whole minutes BEFORE splitting into hours: 7170s printed "1h 60m"
+  if (mins >= 60){ const h = Math.floor(mins/60), m = mins % 60; return m ? `${h}h ${m}m` : `${h}h`; }
+  if (secs >= 60){ return `${mins}m`; }
   return `${Math.max(5, Math.round(secs/5)*5)}s`;
 }
 // ── ACTIVE-CRAFT ETA ──
@@ -6001,11 +6050,15 @@ function toggleOpenCraftLive(){
 //      nothing; we list the player's deployables first, then fetch inventories owned by them.
 // Item names/icons come from /itemdefs (raw game ids) — no bitjita call anywhere in this path.
 const RELAY_HTTP = 'https://relay.bitcraftsync.app';
-let gameItemDefs = null, _gameItemDefsP = null;
+let gameItemDefs = null, _gameItemDefsP = null, _gameItemDefsFailAt = 0;
 async function loadGameItemDefs(){
   if (gameItemDefs) return gameItemDefs;
   if (_gameItemDefsP) return _gameItemDefsP;
-  _gameItemDefsP = (async () => {
+  // A failed load must not stick. It used to stay cached as a rejected promise, so one hiccup at startup sent
+  // Inventory, Crafts and Orders to bitjita for the rest of the session. Now a later caller retries — but not
+  // within 30s of a failure, so a server that's down isn't asked again on every inventory refresh.
+  if (Date.now() - _gameItemDefsFailAt < 30000) throw new Error('item definitions unavailable');
+  _gameItemDefsP = (async () => { try {
     // ?v busts the 24h browser cache when the payload gains fields. rout2, not rout1: a dev server
     // briefly served rout1 WITHOUT recipeOuts (the route dropped the field), and that empty payload
     // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh.
@@ -6014,7 +6067,7 @@ async function loadGameItemDefs(){
     gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
       recipeOuts: d.recipeOuts || {} };   // recipeId -> [headlineItemId, qty] — the game's own crafted_item_stacks[0]
     _gameItemDefsP = null; return gameItemDefs;
-  })();
+  } catch(e){ _gameItemDefsP = null; _gameItemDefsFailAt = Date.now(); throw e; } })();
   return _gameItemDefsP;
 }
 // BitCraft packs the region into the top byte of every entity id (verified against bitjita: 13/13).
@@ -8062,20 +8115,32 @@ async function fetchShoppingPrice(id, isCargo, allowResolve) {
   _refreshShoppingRow(id);
 }
 
-function _refreshShoppingRow(id) {
-  // Re-render just the list to show new prices
-  const listEl = document.getElementById('shopping-list-el');
-  if (listEl) listEl.innerHTML = renderShoppingListHtml();
+function _refreshShoppingRow(id) { shoppingRepaintList(); }   // a price arrived
+// Repaint the list as prices arrive — unless a quantity box in it has focus: rebuilding the table threw away
+// whatever was being typed (the box only commits on change). The repaint then waits for focus to leave it.
+let _shopRepaintWait = null;   // the focused box a repaint is waiting on
+function shoppingRepaintList(){
+  const listEl = document.getElementById('shopping-list-el'); if (!listEl) return;
+  const ae = document.activeElement;
+  if (ae && ae.tagName === 'INPUT' && listEl.contains(ae)){
+    if (_shopRepaintWait !== ae){ _shopRepaintWait = ae; ae.addEventListener('blur', () => { if (_shopRepaintWait === ae) _shopRepaintWait = null; setTimeout(shoppingRepaintList, 0); }, { once: true }); }
+    return;
+  }
+  listEl.innerHTML = renderShoppingListHtml();
 }
 
-async function fetchAllShoppingPrices() {
-  if (shoppingPricingActive) return;
+// One pricing pass at a time. A call that lands mid-pass (switching lists, changing region or claims) used to
+// be dropped, leaving the new rows blank until the next refresh; now it's remembered, and when the pass ends
+// the rows still without a price get theirs.
+let shoppingPricingRerun = false;
+async function fetchAllShoppingPrices(onlyMissing) {
+  if (shoppingPricingActive){ shoppingPricingRerun = true; return; }
   shoppingPricingActive = true;
   // Ensure market regions are loaded for region name lookup
   if (!marketRegions.length) {
     try { const d = await apiFetch('/api/regions'); marketRegions = Array.isArray(d)?d:(d.regions||[]); } catch(e){}
   }
-  const items = [...shoppingItems];
+  const items = onlyMissing ? shoppingItems.filter(it => !shoppingPrices[it.id]) : [...shoppingItems];
   // A concurrency pool rather than one-at-a-time. Each item needs two calls (its order book, then the
   // 7d average), and awaiting them in sequence meant a 20-item list spent 7.4s almost entirely waiting
   // — median 169ms between calls with nothing ever overlapping. Six at a time matches the Networth tab
@@ -8092,8 +8157,8 @@ async function fetchAllShoppingPrices() {
   };
   await Promise.all(Array.from({ length: Math.min(6, items.length) }, worker));
   shoppingPricingActive = false;
-  const listEl = document.getElementById('shopping-list-el');
-  if (listEl) listEl.innerHTML = renderShoppingListHtml();
+  if (shoppingPricingRerun){ shoppingPricingRerun = false; fetchAllShoppingPrices(true); return; }
+  shoppingRepaintList();
 }
 
 function shoppingInvalidatePrices() {
@@ -8277,6 +8342,11 @@ function bcMapResizeReset(){
 // Chrome/Edge 116+). We physically move #map-el into the PiP document, so it stays the same live map —
 // zoom/pan and everything tracked keep working — then move it back when the window closes.
 let bcPipWin = null;
+// Is the map on screen? Its tab is open — or it's popped out: the pop-out stays visible (e.g. on top of the
+// game) whatever the main window shows, even minimised. Streams and redraws used to check only the tab, so
+// switching the main window to another tab froze the pop-out.
+function bcMapActive(){ return currentTab === 'map' || !!bcPipWin; }                         // keep the data flowing
+function bcMapShowing(){ return !!bcPipWin || (currentTab === 'map' && !document.hidden); }   // worth redrawing now
 function bcPipSupported(){ return 'documentPictureInPicture' in window; }
 function bcCopyStylesToPip(win){
   for (const ss of document.styleSheets){
@@ -8392,6 +8462,7 @@ async function bcMapPip(){
     const ph2 = document.getElementById('bc-pip-ph');
     if (ph2 && ph2.parentNode){ ph2.parentNode.insertBefore(mapEl, ph2); ph2.remove(); }
     bcPipWin = null;
+    bcRelaySync();   // back in the page: if its Map tab isn't open, stop the streams the pop-out was keeping alive
     const b = document.getElementById('bc-pip-btn'); if (b) b.innerHTML = '<i class="ti ti-picture-in-picture-on"></i> Pop out map';
     setTimeout(() => { try { if (bcMap) bcMap.invalidateSize(); } catch(e){} }, 60);
   }, { once:true });
@@ -8782,7 +8853,7 @@ function bcStartPlayerPoll(){
   if (bcPlayerPollTimer) return;
   // Fallback refresh so stationary/just-logged-in players still update even without ws movement events.
   bcPlayerPollTimer = setInterval(() => {
-    if (document.hidden) return;
+    if (document.hidden && !bcPipWin) return;
     Object.keys(bcTracked).forEach(id => bcFetchPlayerPos(id).then(r => { if (r && r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z); }));
   }, 15000);
 }
@@ -8824,7 +8895,7 @@ document.addEventListener('visibilitychange', () => {
   // Alerts run on every tab, so heal their fallback stream BEFORE the map-only guard below — a socket
   // dropped while backgrounded would otherwise stay dead until the next 15s tick.
   if (!document.hidden) bcSyncAlertFeed();
-  if (document.hidden || currentTab !== 'map') return;
+  if (!bcMapShowing()) return;
   bcPlayersSchedule();   // the layer's repaint is skipped while hidden — catch up now
   if (Object.keys(bcTracked).length){
     const stale = !bcPlayerSocket || bcPlayerSocket.readyState !== 1 || (bcLastWsMsg && Date.now() - bcLastWsMsg > 90000);
@@ -9035,7 +9106,7 @@ function bcPlayersRebuild(){
   });
   bcPlayersLast = { pts, ids, names: labels };
   const ct = document.getElementById('bc-players-count'); if (ct) ct.textContent = pts.length ? `(${pts.length})` : '';
-  if (currentTab === 'map' && !document.hidden) bcPlayersLayer.setDatasets([{ pts, labels: bcPlayersNames ? labels : null, color: bcPlayersColor, count: pts.length, radius: 5.5, labelMinZoom: -1 }]);   // 11px dots: still smaller than a tracked player's 16px marker
+  if (bcMapShowing()) bcPlayersLayer.setDatasets([{ pts, labels: bcPlayersNames ? labels : null, color: bcPlayersColor, count: pts.length, radius: 5.5, labelMinZoom: -1 }]);   // 11px dots: still smaller than a tracked player's 16px marker
   // An open hover tag stays on its player as they walk (or goes when they sign out); the next mouse move
   // re-picks whatever dot is actually under the pointer.
   if (bcPlayersHoverId && bcPlayersTip && bcPlayersTip.isOpen()){
@@ -9580,7 +9651,7 @@ function bcRelayRebuild(){
   try { if (resTypes.length){ for (const r of bcRelayConn.db.resource_location.iter()){ const t = byRes[r.resourceId]; if (t) t.pts.push([r.x, r.z]); } } }  // plain Small-Hex
   catch(e){ return; }
   resTypes.forEach(t => t.count = t.pts.length);
-  if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
+  if (bcMapShowing()){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 // Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
@@ -9589,7 +9660,7 @@ function bcRelaySync(){
   // Only stream while the Map tab is open and showing tracked types — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
-  const shouldStream = currentTab === 'map' && (bcRelayResourceTypes().length > 0 || bcGrowthOn);
+  const shouldStream = bcMapActive() && (bcRelayResourceTypes().length > 0 || bcGrowthOn);   // the tab, or the pop-out
   if (!shouldStream){ bcRelayDisconnect(); bcGrowthApply(); return; }   // also hides the overlay layer + stops its tick
   if (!bcRelayConn){                                            // onConnect re-invokes bcRelaySync
     if (bcRelayDown && Date.now() < bcRelayNextTry){ if (!bcRelayRetryT) bcRelayArmRetry(bcRelayNextTry - Date.now()); return; }   // known down: wait for the backoff timer
@@ -9719,7 +9790,7 @@ const BC_CRE_ROSTER_TABLE = 'enemy_mob_monitor_state', BC_CRE_POS_TABLE = 'mobil
 const BC_CRE_RESUB_DEBOUNCE_MS = 5000;   // spawns come in herds; one position re-subscribe per burst
 const bcCre = { roster: {}, pos: {}, redrawT: null, resubT: {} };   // roster: region -> Map(id -> type); pos: region -> Map(id -> {t,x,z}) for tracked types only
 function bcCreWanted(){ return bcRelayEnemyTypes().length > 0; }             // roster + sockets
-function bcCrePosWanted(){ return bcCreWanted() && currentTab === 'map'; }    // positions only while the map shows
+function bcCrePosWanted(){ return bcCreWanted() && bcMapActive(); }    // positions only while the map shows (its tab or the pop-out)
 function bcCreRegions(){ return bcMapRegion ? [+bcMapRegion] : BC_REGIONS.filter(r => !DEAD_REGIONS.has(r)); }
 function bcCreRegionWanted(rg){ return bcCreWanted() && bcCreRegions().includes(+rg); }
 const bcCreTypeOf = r => { const e = r.enemy_type; return Array.isArray(e) ? +e[0] : (e && typeof e === 'object') ? +Object.keys(e)[0] : +e; };   // enum wire shape: [idx, {}]
@@ -9836,7 +9907,7 @@ function bcCreRebuild(){
     regions.forEach(rg => { const p = bcCre.pos[rg]; if (p) p.forEach(v => { const t = byType[v.t]; if (t) t.pts.push([v.x, v.z]); }); });
     enemies.forEach(t => { t.count = t.pts.length; t.applied = regions.every(rg => { const c = liveConns[rg]; return !(c && c.ws && c.ws.readyState === 1) || !!(c.cre && c.cre.posReady); }); });
   }
-  if (currentTab === 'map' && !document.hidden){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
+  if (bcMapShowing()){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
@@ -9873,17 +9944,17 @@ function bcGrowthUpdateTooltips(){
   for (const key in bcGrowthMarkers){
     const m = bcGrowthMarkers[key]; const ms = m.endMs - now;
     m.marker.setTooltipContent(ms > 0
-      ? `<b>${escHtml(m.name)}</b><br><span style="color:var(--teal-light)">respawns in ${bcFmtDur(ms)}</span>`
+      ? `<b>${escHtml(m.name)}</b><br><span style="color:var(--teal-light)">respawns in ${fmtDuration(ms / 1000)}</span>`
       : `<b>${escHtml(m.name)}</b><br><span style="color:var(--amber-light)">ready</span>`);
   }
 }
 function bcGrowthClear(){ if (bcGrowthLayer) bcGrowthLayer.clearLayers(); bcGrowthMarkers = {}; }
-// Layer visibility + countdown ticker follow (overlay on × Map tab).
+// Layer visibility + countdown ticker follow (overlay on × map showing — its tab or the pop-out).
 function bcGrowthApply(){
   if (!bcMap) return;
   if (!bcGrowthLayer) bcGrowthLayer = L.layerGroup();
-  const show = bcGrowthOn && currentTab === 'map';
-  if (show){ if (!bcMap.hasLayer(bcGrowthLayer)) bcGrowthLayer.addTo(bcMap); if (!bcGrowthTick) bcGrowthTick = setInterval(() => { if (currentTab === 'map' && !document.hidden) bcGrowthUpdateTooltips(); }, 1000); }
+  const show = bcGrowthOn && bcMapActive();
+  if (show){ if (!bcMap.hasLayer(bcGrowthLayer)) bcGrowthLayer.addTo(bcMap); if (!bcGrowthTick) bcGrowthTick = setInterval(() => { if (bcMapShowing()) bcGrowthUpdateTooltips(); }, 1000); }
   else { if (bcMap.hasLayer(bcGrowthLayer)) bcMap.removeLayer(bcGrowthLayer); if (bcGrowthTick){ clearInterval(bcGrowthTick); bcGrowthTick = null; } }
 }
 function bcGrowthToggle(on){
@@ -10155,8 +10226,49 @@ function plannerBestRecipe(itemId, preferredId) {
   if (!real.length) return null;
   if (preferredId) { const f = real.find(r => r.id === preferredId); if (f) return f; }
   if (plannerSelRecipe[itemId]) { const f = real.find(r => r.id === plannerSelRecipe[itemId]); if (f) return f; }
-  // Sort by fewest inputs, then by id (most basic first)
-  return real.slice().sort((a,b) => a.inputs.length - b.inputs.length || a.id - b.id)[0];
+  // Default: a recipe that doesn't loop back to the item, then one that's sure to give it, then fewest inputs,
+  // then lowest id (most basic first). Fewest-inputs alone picked loops — Rough Leather ← "Split Refined Rough
+  // Leather", which takes Rough Leather to make; 656 items — and chance drops over the real recipe (Basic Crop
+  // Oil ← husking a Starbulb Plant, 0–1 per craft, instead of "Press Basic Crop Oil").
+  const comp = plannerSccMap(), mine = comp.get(String(itemId));
+  const loops = r => mine != null && r.inputs.some(inp => comp.get(String(inp.itemId)) === mine);
+  const chance = r => { const o = r.outputs.find(o => String(o.itemId) === String(itemId)); return !!(o && o.quantityMin === 0); };
+  return real.slice().sort((a,b) => (loops(a) - loops(b)) || (chance(a) - chance(b)) || a.inputs.length - b.inputs.length || a.id - b.id)[0];
+}
+// Which items can only be made from each other: the strongly connected components of the recipe graph (an
+// edge from each item to the inputs of every real recipe for it). A recipe "loops back" when one of its
+// inputs shares the item's component — that input can't be made without the item itself. Tarjan's
+// algorithm, iterative (~9k items, ~25ms); rebuilt only when the crafting data or the seasonal filter changes.
+let _plannerScc = null;
+function plannerSccMap(){
+  const key = plannerHideSeasonal ? 'hide' : 'all';
+  if (_plannerScc && _plannerScc.data === craftingData && _plannerScc.key === key) return _plannerScc.comp;
+  const adj = new Map();
+  for (const id of Object.keys(craftingData.recipesByOutput)){
+    const out = new Set(); plannerRealRecipes(id).forEach(r => r.inputs.forEach(inp => out.add(String(inp.itemId))));
+    adj.set(String(id), [...out]);
+  }
+  const comp = new Map(), idx = new Map(), low = new Map(), onStack = new Set(), stack = [];
+  let n = 0, c = 0;
+  for (const start of adj.keys()){
+    if (idx.has(start)) continue;
+    idx.set(start, n); low.set(start, n); n++; stack.push(start); onStack.add(start);
+    const work = [[start, 0]];   // [node, next edge to visit]
+    while (work.length){
+      const top = work[work.length - 1], v = top[0], edges = adj.get(v) || [];
+      if (top[1] < edges.length){
+        const w = edges[top[1]++];
+        if (!idx.has(w)){ idx.set(w, n); low.set(w, n); n++; stack.push(w); onStack.add(w); work.push([w, 0]); }
+        else if (onStack.has(w)) low.set(v, Math.min(low.get(v), idx.get(w)));
+      } else {
+        work.pop();
+        if (work.length){ const u = work[work.length - 1][0]; low.set(u, Math.min(low.get(u), low.get(v))); }
+        if (low.get(v) === idx.get(v)){ let w; do { w = stack.pop(); onStack.delete(w); comp.set(w, c); } while (w !== v); c++; }
+      }
+    }
+  }
+  _plannerScc = { data: craftingData, key, comp };
+  return comp;
 }
 
 function renderRecipePanel(itemId) {
@@ -10419,6 +10531,7 @@ function flattenToRawMaterials(itemId, qty, visited) {
 // CRAFT it (sum of cheapest sell prices of its raw/leaf materials, from flattenToRawMaterials).
 // Prices come from the in-memory _mktCache (fetchWithCache), so repeated renders are instant.
 let _cvbTypeHint = {};   // itemId -> 'item' | 'cargo' (resolved market-detail type, cached)
+const _cvbMissAt = {}, CVB_MISS_MS = 10 * 60 * 1000;   // itemId -> when its lookup last failed (asked again after 10 min, not on every edit)
 let _cvbRunToken = 0;    // guards against overlapping runs when the plan is edited mid-fetch
 
 function cheapestSell(detail, region){
@@ -10432,8 +10545,16 @@ function cheapestSell(detail, region){
 // or a prior resolve); otherwise try item then cargo. Caches the resolved type to avoid re-probing.
 async function fetchItemDetailSafe(id){
   id = String(id);
+  if (_cvbMissAt[id] && Date.now() - _cvbMissAt[id] < CVB_MISS_MS) return null;
+  // Crafting data numbers cargo as the game id + GAME_CARGO_ID_BASE; the market knows it by the bare game id
+  // under /cargo/. Sent as-is, /cargo/4000001000 is an error (measured: 500, vs 200 for /cargo/1000), so a
+  // plan's logs, trunks, chunks and animals never got a price.
+  if (+id >= GAME_CARGO_ID_BASE){
+    try { return await fetchWithCache('cargo', String(+id - GAME_CARGO_ID_BASE)); }
+    catch(e){ _cvbMissAt[id] = Date.now(); return null; }
+  }
   let order = ['item','cargo'];
-  if (_cvbTypeHint[id] && _cvbTypeHint[id] !== 'none') order = [_cvbTypeHint[id]];
+  if (_cvbTypeHint[id]) order = [_cvbTypeHint[id]];
   else {
     const m = marketRawItems.find(it => String(it.id||it.itemId) === id);
     if (m) order = (m.itemType===1 || m.isCargo || m.type==='cargo') ? ['cargo','item'] : ['item','cargo'];
@@ -10444,6 +10565,7 @@ async function fetchItemDetailSafe(id){
       if (d && (Array.isArray(d.sellOrders) || Array.isArray(d.buyOrders))){ _cvbTypeHint[id] = t; return d; }
     } catch(e){}
   }
+  _cvbMissAt[id] = Date.now();
   return null;
 }
 
@@ -11263,7 +11385,7 @@ function regionOptionsHtml(selected){
   return '<option value=""'+(sel===''?' selected':'')+'>All regions</option>'+
     regionsSorted().map(r=>{const id=String(r.id||r.regionId||r.entityId||'');return `<option value="${id}"${id===sel?' selected':''}>${regionOptLabel(r)}</option>`;}).join('');
 }
-function fmtNum(n){if(n===null||n===undefined)return'—';n=Number(n);if(isNaN(n))return'—';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return Math.round(n).toLocaleString();}
+function fmtNum(n){if(n===null||n===undefined)return'—';n=Number(n);if(isNaN(n))return'—';if(n>=999950000)return(n/1e9).toFixed(1)+'B';if(n>=999950)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return Math.round(n).toLocaleString();}   // each step starts where the one below would round to "1000.0" (999,950 → "1.0M", not "1000.0K")
 function fmtCount(n){if(n===null||n===undefined)return'—';n=Number(n);if(isNaN(n))return'—';return Math.round(n).toLocaleString();}
 // Rarity may arrive as a number (0-6, market API) or a string ("Rare", crafting data). Normalize both.
 const RARITY_NAMES = ['', 'Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic'];
@@ -11987,7 +12109,7 @@ function updateSkillCardLive(id, sk){
 // same guard loadSkillsInto uses for the background REST refresh.
 function updateSkillJourneyLive(entityId){
   entityId = String(entityId);
-  if (!openJourney[entityId] || !document.getElementById('sj-' + entityId)) return;
+  if (!openJourney[entityId] || !viewEl('sj-' + entityId)) return;
   const ae = document.activeElement;
   if (ae && ae.closest && ae.closest('#sj-' + entityId)) return;
   renderJourney(entityId);
@@ -12615,7 +12737,7 @@ async function renderGroupCraft(){
   }
   el.innerHTML = gcSetupHtml()
     + `<div class="gc-setup">`
-    +   `<div class="gc-setup-hd" onclick="gcToggleMC()"><i class="ti ti-chevron-down gc-setup-chev" id="gc-mc-chev"${gcState.mcCollapsed?' style="transform:rotate(-90deg)"':''}"></i><span class="gc-setup-title">Materials &amp; Contributions</span></div>`
+    +   `<div class="gc-setup-hd" onclick="gcToggleMC()"><i class="ti ti-chevron-down gc-setup-chev" id="gc-mc-chev"${gcState.mcCollapsed?' style="transform:rotate(-90deg)"':''}></i><span class="gc-setup-title">Materials &amp; Contributions</span></div>`
     +   `<div id="gc-mc-body" style="margin-top:.7rem${gcState.mcCollapsed?';display:none':''}"><div id="gc-plan"></div><div class="gc-cols"><div id="gc-results" class="gc-col"></div><div id="gc-contrib" class="gc-col"></div></div></div>`
     + `</div>`
     + '<div class="gc-setup" id="gc-alloc" style="margin-bottom:3rem"></div>';
