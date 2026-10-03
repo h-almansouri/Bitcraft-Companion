@@ -8439,7 +8439,7 @@ async function bcInitMap(){
 
   // Restore tracked resources/enemies (refetch their points)
   const savedRes = bcLoadTrackedRes();
-  savedRes.forEach(t => { bcTrackedRes[bcResKey(t.kind,t.id)] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, count:0, pts:[] }; });
+  savedRes.forEach(t => { const k = bcResKey(t.kind,t.id); bcTrackedRes[k] = { kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color, count:0, pts:[] }; if (t.color && !bcResColorMap[k]) bcSaveResColor(k, t.color); });   // seeds the colour memory for types tracked before it existed
   if (savedRes.length){ bcRenderTrackedResList(); bcRenderResourceList(); }   // bcRelaySync below subscribes them
   // Restore the respawn-timers overlay toggle + start the relay (covers restored enemies and the overlay)
   const growthChk = document.getElementById('bc-growth-toggle'); if (growthChk) growthChk.checked = bcGrowthOn;
@@ -9194,7 +9194,7 @@ function bcRenderResourceList(){
   listEl.innerHTML = entries.length ? entries.map(v => {
     const key = bcResKey(v.kind, v.id);
     const trk = bcTrackedRes[key];
-    const col = (trk && trk.color) || v.color || (v.kind==='enemy' ? '#e0556e' : '#5fd0ff');
+    const col = bcResDotColor(key, v.kind, v);
     return `<div class="bc-li${trk?' on':''}" data-k="${key}" onclick="bcToggleMapItem('${v.kind}','${v.id}')">
       <span class="bc-li-dot" style="background:${col}"></span>
       ${gameIconImg(v.icon,18)}
@@ -9220,7 +9220,7 @@ function bcSetResRowState(key){
   if (dot){
     const ci = key.indexOf(':'), kind = key.slice(0, ci), id = key.slice(ci+1);
     const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {};
-    dot.style.background = (trk && trk.color) || meta.color || (kind==='enemy' ? '#e0556e' : '#5fd0ff');
+    dot.style.background = bcResDotColor(key, kind, meta);
   }
 }
 
@@ -9267,6 +9267,26 @@ function bcToggleHiddenPanel(){
 let bcTrackedRes = {};                 // "kind:id" -> {kind,id,name,color,count,pts}
 const bcResColors = ['#5fd0ff','#ff7b7b','#7CFF7B','#ffd166','#c77dff','#5ce1e6','#ff9f45','#f178b6'];
 let bcResColorIdx = 0;
+// A type's colour sticks to it. Picked in the tracked list, or handed out from the palette the first time
+// it's tracked, it is remembered per type (bc_map_res_colors_v1): untracking and re-tracking brings back
+// the same colour, and the type's circle in the resource list shows it whether or not it's tracked.
+// (Before, untracking threw the colour away and re-tracking took the NEXT palette colour from a counter.)
+let bcResColorMap = (() => { try { const v = JSON.parse(localStorage.getItem('bc_map_res_colors_v1') || '{}'); return (v && typeof v === 'object') ? v : {}; } catch(e){ return {}; } })();
+function bcSaveResColor(key, color){
+  if (!color || bcResColorMap[key] === color) return;
+  bcResColorMap[key] = color; safeSetItem('bc_map_res_colors_v1', JSON.stringify(bcResColorMap));
+}
+// The colour a type shows in the list: its live colour while tracked (follows the picker as you drag),
+// else its remembered colour, else the index's, else the kind's default.
+function bcResDotColor(key, kind, meta){
+  const t = bcTrackedRes[key];
+  return (t && t.color) || bcResColorMap[key] || (meta && meta.color) || (kind === 'enemy' ? '#e0556e' : '#5fd0ff');
+}
+// A first-time colour: the first palette colour no tracked type is using right now (cycling once all are).
+function bcNextResColor(){
+  const used = new Set(Object.values(bcTrackedRes).map(t => String(t.color || '').toLowerCase()));
+  return bcResColors.find(c => !used.has(c.toLowerCase())) || bcResColors[bcResColorIdx++ % bcResColors.length];
+}
 function bcResKey(kind,id){ return kind + ':' + id; }
 function bcSaveTrackedRes(){ safeSetItem('bc_map_tracked_res_v1', JSON.stringify(Object.values(bcTrackedRes).map(t => ({ kind:t.kind, id:t.id, name:t.name, tier:t.tier, tag:t.tag, color:t.color })))); }
 function bcLoadTrackedRes(){ try { const v = localStorage.getItem('bc_map_tracked_res_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
@@ -9290,7 +9310,8 @@ function bcToggleMapItem(kind, id){
   const key = bcResKey(kind, id);
   if (bcTrackedRes[key]){ bcUntrackRes(key); return; }
   const meta = (kind==='enemy'?bcCreatureIndex:bcResourceIndex)[id] || {};
-  const color = meta.color || bcResColors[bcResColorIdx++ % bcResColors.length];
+  const color = bcResColorMap[key] || meta.color || bcNextResColor();
+  bcSaveResColor(key, color);
   bcTrackedRes[key] = { kind, id, name: meta.name || ('#'+id), tier: meta.tier||0, tag: meta.tag||'', color, count:0, pts:[] };
   bcSetResRowState(key); bcRenderTrackedResList();
   const status = document.getElementById('bc-res-status');
@@ -9311,12 +9332,13 @@ function bcSetResColorLive(key, color){
   const t = bcTrackedRes[key]; if (!t) return;
   t.color = color;
   bcRedrawTracked();
+  bcSetResRowState(key);   // the list circle is a plain span — repainting it doesn't touch the open picker
 }
 // Committed (picker closed): persist and re-render lists so swatches/dots sync everywhere.
 function bcSetResColor(key, color){
   const t = bcTrackedRes[key]; if (!t) return;
   t.color = color;
-  bcSaveTrackedRes();
+  bcSaveTrackedRes(); bcSaveResColor(key, color);
   bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList();
 }
 function bcRenderTrackedResList(){
