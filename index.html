@@ -760,6 +760,7 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
    lifts the cap and the shell carries the width instead — the old 1152px by default, or what the user
    dragged it to (--map-w: a px width, or 100% = fill the window). max-width keeps it inside small windows. */
 main.map-mode{max-width:none}
+main.skills-mode{max-width:none}   /* Experience: windows default to the old 1152px (PSEC_DEFAULT_MAX) but can be dragged wider */
 .map-shell{width:var(--map-w,1152px);max-width:100%}
 .map-wrap{position:relative;display:flex;gap:.6rem;height:calc(100vh - 130px);min-height:460px}
 .map-side{width:260px;flex-shrink:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:.6rem;display:flex;flex-direction:column;gap:.6rem;overflow:hidden}
@@ -1763,6 +1764,7 @@ function switchTab(tab, opts) {
   const mainEl = document.querySelector('main');
   mainEl.classList.toggle('planner-mode', tab === 'planner');
   mainEl.classList.toggle('map-mode', tab === 'map');   // the map's own shell sets its width (see .map-shell)
+  mainEl.classList.toggle('skills-mode', tab === 'skills');   // Experience windows set their own widths (see psecApplySize)
   currentTab = tab;
   if (tab !== 'lookup') safeSetItem('bc_tab', tab);   // a lookup is never the remembered tab
   // URL mirrors the tab. The boot render REPLACES the entry it landed on (no phantom history step); a
@@ -2009,7 +2011,7 @@ function playerSection(p, innerHtml, bodyId, tab){
     ? `<i class="ti ti-chevron-up psec-move psec-up${idx <= 0 ? ' off' : ''}" title="Move this window up" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',-1)"></i><i class="ti ti-chevron-down psec-move psec-dn${idx >= order.length - 1 ? ' off' : ''}" title="Move this window down" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',1)"></i>`
     : '';
   const resizable = tab === 'skills', sz = resizable ? (psecSizes[id] || {}) : {};
-  const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : 'flex:1 1 100%') : 'margin-bottom:1.1rem';
+  const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : `flex:1 1 100%;max-width:${PSEC_DEFAULT_MAX}px`) : 'margin-bottom:1.1rem';
   const bodyExtra = sz.h ? `;height:${sz.h}px;overflow:auto` : '';
   const grip = resizable ? `<div class="psec-grip" onpointerdown="psecResizeDown(event,'${id}')" ondblclick="psecResizeReset('${id}',this)" title="Drag to resize this window · double-click to reset"></div>` : '';
   return `<div class="player-section" data-pid="${id}" style="${secStyle};position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden">
@@ -2061,12 +2063,17 @@ function movePlayerSection(btn, tab, dir){
 // Height: shorter than the content scrolls inside; back at the content's own height it's automatic again.
 // Double-click resets.
 const PSEC_SIZE_KEY = 'bc_skills_size_v1', PSEC_MIN_W = 300, PSEC_MIN_H = 140, PSEC_GAP_REM = 1.1;
+// The page is capped at 1200px everywhere else, which also capped these windows ("can't make it any wider
+// than default"). The Experience tab lifts that cap (main.skills-mode); a window left at its default keeps
+// the old width — 1152px, the cap minus the page padding — so nothing moves until someone drags. Dragging
+// can go past it, snapping back to it within 24px, and all the way to the full row (f = 1).
+const PSEC_DEFAULT_MAX = 1152;
 const PSEC_SNAPS = [1/4, 1/3, 1/2, 2/3, 3/4];
 function psecWidthCss(f){ return `calc(${(f * 100).toFixed(4)}% - ${((1 - f) * PSEC_GAP_REM).toFixed(4)}rem)`; }
 let psecSizes = (() => { try { const v = JSON.parse(localStorage.getItem(PSEC_SIZE_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch(e){ return {}; } })();
 function psecApplySize(sec, body, sz){
   if (sz.f){ sec.style.flex = '0 0 auto'; sec.style.width = psecWidthCss(sz.f); sec.style.maxWidth = '100%'; }
-  else { sec.style.flex = '1 1 100%'; sec.style.width = ''; sec.style.maxWidth = ''; }
+  else { sec.style.flex = '1 1 100%'; sec.style.width = ''; sec.style.maxWidth = PSEC_DEFAULT_MAX + 'px'; }
   if (sz.h){ body.style.height = sz.h + 'px'; body.style.overflow = 'auto'; }
   else { body.style.height = ''; body.style.overflow = ''; }
 }
@@ -2088,9 +2095,15 @@ function psecResizeDown(e, id){
   document.body.classList.add('bc-resizing-both');
   const move = ev => {
     const nw = Math.round(startW + ev.clientX - x0), nh = Math.round(startH + ev.clientY - y0);
-    let f = (Math.max(minW, Math.min(maxW, nw)) + gap) / span;
-    const snap = PSEC_SNAPS.find(s => Math.abs(f - s) * span <= 24); if (snap) f = snap;
-    sz = { f: nw >= maxW - 24 ? null : f, h: collapsed ? sz.h : (nh >= natural - 4 ? null : Math.max(PSEC_MIN_H, nh)) };
+    const defW = Math.min(PSEC_DEFAULT_MAX, maxW);   // what an unsized window measures
+    let f;
+    if (nw >= maxW - 24) f = defW >= maxW - 24 ? null : 1;   // full row (on a screen no wider than the default, that IS the default)
+    else if (Math.abs(nw - defW) <= 24) f = null;            // back to the default width
+    else {
+      f = (Math.max(minW, Math.min(maxW, nw)) + gap) / span;
+      const snap = PSEC_SNAPS.find(s => Math.abs(f - s) * span <= 24); if (snap) f = snap;
+    }
+    sz = { f, h: collapsed ? sz.h : (nh >= natural - 4 ? null : Math.max(PSEC_MIN_H, nh)) };
     psecApplySize(sec, body, sz);
   };
   const up = () => {
