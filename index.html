@@ -2010,10 +2010,10 @@ function playerSection(p, innerHtml, bodyId, tab){
   const arrows = order.length > 1
     ? `<i class="ti ti-chevron-up psec-move psec-up${idx <= 0 ? ' off' : ''}" title="Move this window up" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',-1)"></i><i class="ti ti-chevron-down psec-move psec-dn${idx >= order.length - 1 ? ' off' : ''}" title="Move this window down" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',1)"></i>`
     : '';
-  const resizable = tab === 'skills', sz = resizable ? (psecSizes[id] || {}) : {};
+  const resizable = tab === 'skills', sz = resizable ? psecSize : {};   // one size shared by every player's window
   const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : `flex:1 1 100%;max-width:${PSEC_DEFAULT_MAX}px`) : 'margin-bottom:1.1rem';
   const bodyExtra = sz.h ? `;height:${sz.h}px;overflow:auto` : '';
-  const grip = resizable ? `<div class="psec-grip" onpointerdown="psecResizeDown(event,'${id}')" ondblclick="psecResizeReset('${id}',this)" title="Drag to resize this window · double-click to reset"></div>` : '';
+  const grip = resizable ? `<div class="psec-grip" onpointerdown="psecResizeDown(event)" ondblclick="psecResizeReset(this)" title="Drag to resize every player's window · double-click to reset"></div>` : '';
   return `<div class="player-section" data-pid="${id}" style="${secStyle};position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden">
     <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
       <i class="ti ti-chevron-${collapsed?'right':'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
@@ -2055,14 +2055,16 @@ function movePlayerSection(btn, tab, dir){
     if (up) up.classList.toggle('off', i === 0); if (dn) dn.classList.toggle('off', i === now.length - 1);
   });
 }
-// ── Experience tab: resizable player windows (remembered per player) ──
+// ── Experience tab: resizable player windows — ONE size shared by every player's window ──
+// Dragging any window's grip resizes them all together, live, so they always match (and two half-width
+// windows always pair up side by side). Remembered per browser.
 // Drag the corner grip. Width is stored as a SHARE of the row (f) and snaps to a quarter, third, half,
 // two thirds or three quarters within 24px — windows sit side by side in a wrapping row, and sizing with
 // calc(f·100% − (1−f)·gap) makes shares that add up to 1 fill one row exactly, gaps included. (Plain pixel
 // widths dragged to "about half" overshot by the gap and wrapped.) Near full width it snaps back to full.
 // Height: shorter than the content scrolls inside; back at the content's own height it's automatic again.
 // Double-click resets.
-const PSEC_SIZE_KEY = 'bc_skills_size_v1', PSEC_MIN_W = 300, PSEC_MIN_H = 140, PSEC_GAP_REM = 1.1;
+const PSEC_SIZE_KEY = 'bc_skills_size_v2', PSEC_MIN_W = 300, PSEC_MIN_H = 140, PSEC_GAP_REM = 1.1;   // v1 was one size per player
 // The page is capped at 1200px everywhere else, which also capped these windows ("can't make it any wider
 // than default"). The Experience tab lifts that cap (main.skills-mode); a window left at its default keeps
 // the old width — 1152px, the cap minus the page padding — so nothing moves until someone drags. Dragging
@@ -2070,16 +2072,28 @@ const PSEC_SIZE_KEY = 'bc_skills_size_v1', PSEC_MIN_W = 300, PSEC_MIN_H = 140, P
 const PSEC_DEFAULT_MAX = 1152;
 const PSEC_SNAPS = [1/4, 1/3, 1/2, 2/3, 3/4];
 function psecWidthCss(f){ return `calc(${(f * 100).toFixed(4)}% - ${((1 - f) * PSEC_GAP_REM).toFixed(4)}rem)`; }
-let psecSizes = (() => { try { const v = JSON.parse(localStorage.getItem(PSEC_SIZE_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch(e){ return {}; } })();
+let psecSize = (() => { try {
+  const v = JSON.parse(localStorage.getItem(PSEC_SIZE_KEY) || 'null');
+  if (v && typeof v === 'object') return { f: v.f || null, h: v.h || null };
+  const old = JSON.parse(localStorage.getItem('bc_skills_size_v1') || 'null');   // per-player sizes: the first becomes the shared size
+  const first = old && typeof old === 'object' ? Object.values(old)[0] : null;
+  return first && typeof first === 'object' ? { f: first.f || null, h: first.h || null } : { f: null, h: null };
+} catch(e){ return { f: null, h: null }; } })();
+// Apply one size to every player window in the Experience tab's row.
+function psecApplyAll(flow, sz){
+  if (!flow) return;
+  [...flow.children].filter(c => c.classList.contains('player-section')).forEach(s => {
+    const b = s.querySelector('.player-section-hdr + div'); if (b) psecApplySize(s, b, sz);
+  });
+}
 function psecApplySize(sec, body, sz){
   if (sz.f){ sec.style.flex = '0 0 auto'; sec.style.width = psecWidthCss(sz.f); sec.style.maxWidth = '100%'; }
   else { sec.style.flex = '1 1 100%'; sec.style.width = ''; sec.style.maxWidth = PSEC_DEFAULT_MAX + 'px'; }
   if (sz.h){ body.style.height = sz.h + 'px'; body.style.overflow = 'auto'; }
   else { body.style.height = ''; body.style.overflow = ''; }
 }
-function psecResizeDown(e, id){
+function psecResizeDown(e){
   if (e.button !== 0) return;
-  id = String(id);
   const grip = e.currentTarget, sec = grip.closest('.player-section'), body = sec && sec.querySelector('.player-section-hdr + div');
   if (!body || !sec.parentNode) return;
   e.preventDefault(); e.stopPropagation();
@@ -2090,7 +2104,8 @@ function psecResizeDown(e, id){
   const natural = body.getBoundingClientRect().height;   // the content's own height
   body.style.height = keepH;
   const startH = body.getBoundingClientRect().height, x0 = e.clientX, y0 = e.clientY;
-  let sz = { f: (psecSizes[id] || {}).f || null, h: (psecSizes[id] || {}).h || null };
+  const flow = sec.parentNode;
+  let sz = { f: psecSize.f || null, h: psecSize.h || null };
   try { grip.setPointerCapture(e.pointerId); } catch(err){}
   document.body.classList.add('bc-resizing-both');
   const move = ev => {
@@ -2103,21 +2118,23 @@ function psecResizeDown(e, id){
       f = (Math.max(minW, Math.min(maxW, nw)) + gap) / span;
       const snap = PSEC_SNAPS.find(s => Math.abs(f - s) * span <= 24); if (snap) f = snap;
     }
-    sz = { f, h: collapsed ? sz.h : (nh >= natural - 4 ? null : Math.max(PSEC_MIN_H, nh)) };
-    psecApplySize(sec, body, sz);
+    sz = { f, h: collapsed ? sz.h : (nh >= natural - 4 ? null : Math.max(PSEC_MIN_H, nh)) };   // "the content's own height" is the window being dragged
+    psecApplyAll(flow, sz);   // every player's window follows the drag
   };
   const up = () => {
     grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
     document.body.classList.remove('bc-resizing-both');
-    if (sz.f || sz.h) psecSizes[id] = sz; else delete psecSizes[id];
-    safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSizes));
+    psecSize = { f: sz.f || null, h: sz.h || null };
+    safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSize));
+    try { localStorage.removeItem('bc_skills_size_v1'); } catch(err){}
   };
   grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
 }
-function psecResizeReset(id, grip){
-  delete psecSizes[String(id)]; safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSizes));
-  const sec = grip && grip.closest('.player-section'), body = sec && sec.querySelector('.player-section-hdr + div');
-  if (sec && body) psecApplySize(sec, body, {});
+function psecResizeReset(grip){
+  psecSize = { f: null, h: null }; safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSize));
+  try { localStorage.removeItem('bc_skills_size_v1'); } catch(e){}
+  const sec = grip && grip.closest('.player-section');
+  if (sec) psecApplyAll(sec.parentNode, psecSize);
 }
 // Element-relative (not by id): the same player renders on multiple tabs with identical markup, so
 // we operate on the section that was actually clicked rather than the first id match in the DOM.
