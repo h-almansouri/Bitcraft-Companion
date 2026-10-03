@@ -172,6 +172,16 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 
 /* ── SKILLS ── */
 .skills-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.75rem}
+/* Player windows: move arrows in the header; the Experience tab's windows resize from a corner grip and
+   flow in a wrapping row so narrowed windows sit side by side. */
+.psec-move{color:var(--text3);font-size:15px;cursor:pointer;padding:0 1px}
+.psec-move:hover{color:var(--text)}
+.psec-move.off{opacity:.25;pointer-events:none}
+.psec-flow{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:flex-start}
+.psec-grip{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 0 50%,var(--border2) 50% 58%,transparent 58% 70%,var(--border2) 70% 78%,transparent 78%)}
+.psec-grip:hover{background:linear-gradient(135deg,transparent 0 50%,var(--teal) 50% 58%,transparent 58% 70%,var(--teal) 70% 78%,transparent 78%)}
+body.bc-resizing-both{cursor:nwse-resize;user-select:none}
+@media(max-width:768px){.psec-grip{display:none}}
 .skill-card{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;cursor:pointer;transition:border-color .15s}
 .skill-card:hover{border-color:var(--border2)}
 .skill-card.active{border-color:var(--teal)}
@@ -1989,20 +1999,112 @@ function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.en
 
 // Wrap a player's tab content in a collapsible section with a header (name + collapse + pause toggle).
 // `bodyId` lets callers fill the body asynchronously (e.g. `psec-skills-<id>`).
-function playerSection(p, innerHtml, bodyId){
-  const id = p.entityId, collapsed = isPlayerCollapsed(id), paused = isPlayerPaused(id), muted = isPlayerAlertsMuted(id);
-  return `<div class="player-section" style="margin-bottom:1.1rem;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+// tab: 'skills' | 'inventory' | 'crafting' | 'orders' — each tab keeps its own order of player windows
+// (playersFor), and the Experience tab's windows can be resized (psecResize*).
+function playerSection(p, innerHtml, bodyId, tab){
+  const id = String(p.entityId), collapsed = isPlayerCollapsed(id), paused = isPlayerPaused(id), muted = isPlayerAlertsMuted(id);
+  const order = tab ? playersFor(tab).map(x => String(x.entityId)) : [];
+  const idx = order.indexOf(id);
+  const arrows = order.length > 1
+    ? `<i class="ti ti-chevron-up psec-move psec-up${idx <= 0 ? ' off' : ''}" title="Move this window up" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',-1)"></i><i class="ti ti-chevron-down psec-move psec-dn${idx >= order.length - 1 ? ' off' : ''}" title="Move this window down" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',1)"></i>`
+    : '';
+  const resizable = tab === 'skills', sz = resizable ? (psecSizes[id] || {}) : {};
+  const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : 'flex:1 1 100%') : 'margin-bottom:1.1rem';
+  const bodyExtra = sz.h ? `;height:${sz.h}px;overflow:auto` : '';
+  const grip = resizable ? `<div class="psec-grip" onpointerdown="psecResizeDown(event,'${id}')" ondblclick="psecResizeReset('${id}',this)" title="Drag to resize this window · double-click to reset"></div>` : '';
+  return `<div class="player-section" data-pid="${id}" style="${secStyle};position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden">
     <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
       <i class="ti ti-chevron-${collapsed?'right':'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
       <i class="ti ti-user" data-online-icon="${id}" title="${(()=>{const o=playerIsOnline(p);return o===true?'Online':o===false?'Offline':'';})()}" style="color:${(()=>{const o=playerIsOnline(p);return o===true?'var(--green-light)':o===false?'var(--text3)':'var(--teal-light)';})()};font-size:14px"></i>
       <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
       <span class="badge psec-paused" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
       <span style="flex:1"></span>
+      ${arrows}
       <i class="ti ti-${muted?'bell-off':'bell'} psec-alerts" data-alerts-bell="${id}" title="${muted?'Alerts muted — click to enable':'Mute alerts for this player'}" onclick="event.stopPropagation();togglePlayerAlerts('${id}')" style="color:${muted?'var(--amber-light)':'var(--text3)'};font-size:15px;cursor:pointer"></i>
       <i class="ti ti-${paused?'player-play':'player-pause'} psec-mon" title="${paused?'Resume monitoring':'Stop monitoring (pause live refresh)'}" onclick="event.stopPropagation();togglePlayerMonitor('${id}', this)" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
     </div>
-    <div id="${bodyId}" style="display:${collapsed?'none':''};padding:.65rem .75rem">${innerHtml}</div>
+    <div id="${bodyId}" style="display:${collapsed?'none':''};padding:.65rem .75rem${bodyExtra}">${innerHtml}</div>
+    ${grip}
   </div>`;
+}
+// ── Per-tab order of the player windows (remembered per browser) ──
+// Each tab keeps its own order, so e.g. Vel's inventory can lead while Velcruza's experience still does.
+// Players missing from a tab's saved order (newly tracked) follow in tracking order.
+const PLAYER_ORDER_KEY = 'bc_player_order_v1';
+let playerOrder = (() => { try { const v = JSON.parse(localStorage.getItem(PLAYER_ORDER_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch(e){ return {}; } })();
+function playersFor(tab){
+  const saved = (playerOrder[tab] || []).map(String), pos = new Map(saved.map((id, i) => [id, i]));
+  return trackedPlayers
+    .map((p, i) => ({ p, k: pos.has(String(p.entityId)) ? pos.get(String(p.entityId)) : saved.length + i }))
+    .sort((a, b) => a.k - b.k).map(x => x.p);
+}
+// Move a window one place up (dir -1) or down (+1). The window itself moves — no re-render, so nothing
+// reloads or flashes — and the tab's new order is read back off the page and saved.
+function movePlayerSection(btn, tab, dir){
+  const sec = btn && btn.closest('.player-section'), host = sec && sec.parentNode; if (!host) return;
+  const sibs = [...host.children].filter(c => c.classList.contains('player-section'));
+  const other = sibs[sibs.indexOf(sec) + dir]; if (!other) return;
+  if (dir < 0) host.insertBefore(sec, other); else host.insertBefore(other, sec);
+  const now = [...host.children].filter(c => c.classList.contains('player-section'));
+  playerOrder[tab] = now.map(s => s.dataset.pid);
+  safeSetItem(PLAYER_ORDER_KEY, JSON.stringify(playerOrder));
+  now.forEach((s, i) => {
+    const up = s.querySelector('.player-section-hdr .psec-up'), dn = s.querySelector('.player-section-hdr .psec-dn');
+    if (up) up.classList.toggle('off', i === 0); if (dn) dn.classList.toggle('off', i === now.length - 1);
+  });
+}
+// ── Experience tab: resizable player windows (remembered per player) ──
+// Drag the corner grip. Width is stored as a SHARE of the row (f) and snaps to a quarter, third, half,
+// two thirds or three quarters within 24px — windows sit side by side in a wrapping row, and sizing with
+// calc(f·100% − (1−f)·gap) makes shares that add up to 1 fill one row exactly, gaps included. (Plain pixel
+// widths dragged to "about half" overshot by the gap and wrapped.) Near full width it snaps back to full.
+// Height: shorter than the content scrolls inside; back at the content's own height it's automatic again.
+// Double-click resets.
+const PSEC_SIZE_KEY = 'bc_skills_size_v1', PSEC_MIN_W = 300, PSEC_MIN_H = 140, PSEC_GAP_REM = 1.1;
+const PSEC_SNAPS = [1/4, 1/3, 1/2, 2/3, 3/4];
+function psecWidthCss(f){ return `calc(${(f * 100).toFixed(4)}% - ${((1 - f) * PSEC_GAP_REM).toFixed(4)}rem)`; }
+let psecSizes = (() => { try { const v = JSON.parse(localStorage.getItem(PSEC_SIZE_KEY) || '{}'); return (v && typeof v === 'object') ? v : {}; } catch(e){ return {}; } })();
+function psecApplySize(sec, body, sz){
+  if (sz.f){ sec.style.flex = '0 0 auto'; sec.style.width = psecWidthCss(sz.f); sec.style.maxWidth = '100%'; }
+  else { sec.style.flex = '1 1 100%'; sec.style.width = ''; sec.style.maxWidth = ''; }
+  if (sz.h){ body.style.height = sz.h + 'px'; body.style.overflow = 'auto'; }
+  else { body.style.height = ''; body.style.overflow = ''; }
+}
+function psecResizeDown(e, id){
+  if (e.button !== 0) return;
+  id = String(id);
+  const grip = e.currentTarget, sec = grip.closest('.player-section'), body = sec && sec.querySelector('.player-section-hdr + div');
+  if (!body || !sec.parentNode) return;
+  e.preventDefault(); e.stopPropagation();
+  const maxW = sec.parentNode.clientWidth, minW = Math.min(PSEC_MIN_W, maxW);
+  const gap = parseFloat(getComputedStyle(sec.parentNode).columnGap) || 17.6, span = maxW + gap;   // f = (width + gap) / (row + gap)
+  const startW = sec.getBoundingClientRect().width, collapsed = body.style.display === 'none';
+  const keepH = body.style.height; body.style.height = 'auto';
+  const natural = body.getBoundingClientRect().height;   // the content's own height
+  body.style.height = keepH;
+  const startH = body.getBoundingClientRect().height, x0 = e.clientX, y0 = e.clientY;
+  let sz = { f: (psecSizes[id] || {}).f || null, h: (psecSizes[id] || {}).h || null };
+  try { grip.setPointerCapture(e.pointerId); } catch(err){}
+  document.body.classList.add('bc-resizing-both');
+  const move = ev => {
+    const nw = Math.round(startW + ev.clientX - x0), nh = Math.round(startH + ev.clientY - y0);
+    let f = (Math.max(minW, Math.min(maxW, nw)) + gap) / span;
+    const snap = PSEC_SNAPS.find(s => Math.abs(f - s) * span <= 24); if (snap) f = snap;
+    sz = { f: nw >= maxW - 24 ? null : f, h: collapsed ? sz.h : (nh >= natural - 4 ? null : Math.max(PSEC_MIN_H, nh)) };
+    psecApplySize(sec, body, sz);
+  };
+  const up = () => {
+    grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
+    document.body.classList.remove('bc-resizing-both');
+    if (sz.f || sz.h) psecSizes[id] = sz; else delete psecSizes[id];
+    safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSizes));
+  };
+  grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+}
+function psecResizeReset(id, grip){
+  delete psecSizes[String(id)]; safeSetItem(PSEC_SIZE_KEY, JSON.stringify(psecSizes));
+  const sec = grip && grip.closest('.player-section'), body = sec && sec.querySelector('.player-section-hdr + div');
+  if (sec && body) psecApplySize(sec, body, {});
 }
 // Element-relative (not by id): the same player renders on multiple tabs with identical markup, so
 // we operate on the section that was actually clicked rather than the first id match in the DOM.
@@ -2361,7 +2463,7 @@ async function renderExperienceTab() {
   // Paint the skeleton BEFORE awaiting anything. loadSkillsInto bails when a player's container is
   // missing, so if the live cache completed while this function was parked on ensureThresholds(), the
   // completion kick would fire into an empty document and the tab would sit on "Loading…" forever.
-  el.innerHTML = trackedPlayers.map(p => playerSection(p, loading(), 'psec-skills-' + p.entityId)).join('');
+  el.innerHTML = '<div class="psec-flow">' + playersFor('skills').map(p => playerSection(p, loading(), 'psec-skills-' + p.entityId, 'skills')).join('') + '</div>';   // wrapping row: resized windows can sit side by side
   try { await ensureThresholds(); } catch(e) {}   // needed for xpToLevel etc, not for the skeleton
   trackedPlayers.forEach(p => loadSkillsInto(p));
 }
@@ -2452,7 +2554,9 @@ async function loadSkillsInto(p, silent=false) {
     // rankings call is ~557ms cold (971 bytes — it's latency, not size), and blocking on it made the
     // whole tab five times slower to appear for one small "#12" beside each XP figure. Passing {} here
     // means skillsSectionHtml falls back to any ranks already cached, so a revisit shows them at once.
+    const keepTop = body.scrollTop;   // a resized (shorter) window scrolls inside — don't snap it to the top on every refresh
     body.innerHTML = skillsSectionHtml(pData, {}, eid);
+    if (keepTop) body.scrollTop = keepTop;
     renderJourney(eid);   // re-open the calculator panel (if one was open) with fresh level/rate
     // …then fill the ranks in when they land. Patched in place, because re-rendering the section would
     // close the open calculator panel and flicker every card for the sake of a suffix.
@@ -2997,7 +3101,7 @@ async function renderInventoryTab(silent) {
         </div>
         <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="search" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
       </div>
-      <div id="inv-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId)).join('')}</div>`;
+      <div id="inv-sections">${playersFor('inventory').map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId, 'inventory')).join('')}</div>`;
     const inp = document.getElementById('inv-search-input');
     inp.addEventListener('input', () => { invSearch = inp.value; if (!invSearch.trim()) invLocHidden = {}; renderAllInvBodies(); });
     updateLiveBtns();
@@ -3244,14 +3348,19 @@ function ordersContentHtml(data, playerId){
 }
 function fillPlayerOrdersCached(id){
   const b = document.getElementById('psec-orders-' + id);
-  if (b){ b.innerHTML = ordersContentHtml(ordersByPlayer[id], id) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>'; ordersAfterRender(b, id); }
+  if (b){
+    const sc = b.querySelector('.ord-hist-scroll'), keepTop = sc ? sc.scrollTop : 0;   // the trade history's own scroll survives the rebuild
+    b.innerHTML = ordersContentHtml(ordersByPlayer[id], id) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No orders</span></div>';
+    if (keepTop){ const sc2 = b.querySelector('.ord-hist-scroll'); if (sc2) sc2.scrollTop = keepTop; }
+    ordersAfterRender(b, id);
+  }
 }
 // After (re)rendering a player's orders: flag undercut sells, re-open expanded rows, re-open trade history.
 function ordersAfterRender(sectionEl, pid){
   if (!sectionEl) return;
   ordersCheckUndercuts(sectionEl);
   ordersExpanded.forEach(oid => { const row = sectionEl.querySelector(`.ord-row[data-oid="${oid}"]`); if (row) ordersRenderExpand(oid, row); });
-  if (pid && ordersHistoryOpen.has(String(pid))) ordersRenderHistory(String(pid));
+  if (pid && ordersHistoryOpen.has(String(pid))) ordersRenderHistory(String(pid), true);   // background refresh, never a blank panel
 }
 // ── Trade history (completed sales/purchases) — toggled per player under their orders ──
 function fmtTradeWhen(s){
@@ -3260,11 +3369,21 @@ function fmtTradeWhen(s){
   if (isNaN(d)) return escHtml(String(s));
   return d.toLocaleString(undefined, { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
 }
+// Trade history is fetched from bitjita and cached per player. Every orders refresh rebuilds the player's
+// orders area, which used to empty this panel, flash "Loading…", refetch and rebuild the table — the page
+// shrank and snapped back, and the table's scroll went to the top. Now the rebuilt block paints the cached
+// table straight away (fillPlayerOrdersCached carries its scroll over), and a background refetch swaps the
+// table only when it actually changed: at most every ORD_HIST_MIN_MS per player, plus one deferred catch-up
+// so a trade that lands inside that window still shows.
+const ORD_HIST_MIN_MS = 20000;
+let ordersHistCache = {};   // pid -> { html, at }
+let ordersHistTimer = {};   // pid -> deferred refetch
 function ordersHistoryBlock(pid){
-  const open = ordersHistoryOpen.has(String(pid));
+  pid = String(pid);
+  const open = ordersHistoryOpen.has(pid), cached = open ? ordersHistCache[pid] : null;
   return `<div style="margin-bottom:.7rem">
     <button id="ord-hist-btn-${pid}" class="btn" style="font-size:12px" onclick="ordersToggleHistory('${pid}')"><i class="ti ti-history"></i> Trade history <i class="ti ti-chevron-${open?'up':'down'}" style="font-size:12px;margin-left:.1rem"></i></button>
-    <div id="ord-hist-${pid}" style="margin-top:.55rem"></div>
+    <div id="ord-hist-${pid}" style="margin-top:.55rem">${cached ? cached.html : ''}</div>
   </div>`;
 }
 function ordersToggleHistory(pid){
@@ -3273,6 +3392,7 @@ function ordersToggleHistory(pid){
   const setChev = up => { const c = btn && btn.querySelector('.ti-chevron-up,.ti-chevron-down'); if (c){ c.classList.remove('ti-chevron-up','ti-chevron-down'); c.classList.add(up?'ti-chevron-up':'ti-chevron-down'); } };
   if (ordersHistoryOpen.has(pid)){
     ordersHistoryOpen.delete(pid);
+    clearTimeout(ordersHistTimer[pid]); delete ordersHistTimer[pid];
     const panel = document.getElementById('ord-hist-'+pid); if (panel) panel.innerHTML = '';
     setChev(false);
     return;
@@ -3281,15 +3401,33 @@ function ordersToggleHistory(pid){
   setChev(true);
   ordersRenderHistory(pid);
 }
-async function ordersRenderHistory(pid){
+async function ordersRenderHistory(pid, silent){
+  pid = String(pid);
   const panel = document.getElementById('ord-hist-'+pid); if (!panel) return;
-  panel.innerHTML = `<div style="padding:.75rem;color:var(--text3);font-size:12px"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.35rem"></i>Loading trade history…</div>`;
+  const cached = ordersHistCache[pid];
+  if (cached && !panel.firstElementChild) panel.innerHTML = cached.html;   // never blank a panel we can fill
+  if (silent && cached){
+    const wait = ORD_HIST_MIN_MS - (Date.now() - cached.at);
+    if (wait > 0){
+      if (!ordersHistTimer[pid]) ordersHistTimer[pid] = setTimeout(() => { delete ordersHistTimer[pid]; if (ordersHistoryOpen.has(pid)) ordersRenderHistory(pid, true); }, wait);
+      return;
+    }
+  }
+  if (!cached) panel.innerHTML = `<div style="padding:.75rem;color:var(--text3);font-size:12px"><i class="ti ti-loader-2" style="animation:spin 1s linear infinite;display:inline-block;margin-right:.35rem"></i>Loading trade history…</div>`;
   try {
     const res = await apiFetch(`/api/market/player/${pid}/trades?limit=100`);
     const trades = res.trades || (res.data && res.data.trades) || [];
-    panel.innerHTML = ordersHistoryHtml(trades, pid, res.total);
+    const html = ordersHistoryHtml(trades, pid, res.total), prev = ordersHistCache[pid];
+    ordersHistCache[pid] = { html, at: Date.now() };
+    const p2 = document.getElementById('ord-hist-'+pid);
+    if (!p2 || !ordersHistoryOpen.has(pid)) return;
+    if (prev && prev.html === html && p2.firstElementChild) return;   // unchanged → leave the table (and its scroll) alone
+    const sc = p2.querySelector('.ord-hist-scroll'), keepTop = sc ? sc.scrollTop : 0;
+    p2.innerHTML = html;
+    if (keepTop){ const sc2 = p2.querySelector('.ord-hist-scroll'); if (sc2) sc2.scrollTop = keepTop; }
   } catch(e){
-    panel.innerHTML = `<div style="padding:.75rem;color:var(--red-light,#e06666);font-size:12px">Couldn't load trade history.</div>`;
+    const p2 = document.getElementById('ord-hist-'+pid);
+    if (p2 && !ordersHistCache[pid]) p2.innerHTML = `<div style="padding:.75rem;color:var(--red-light,#e06666);font-size:12px">Couldn't load trade history.</div>`;   // a cached table stays up
   }
 }
 function ordersHistoryHtml(trades, pid, total){
@@ -3309,7 +3447,7 @@ function ordersHistoryHtml(trades, pid, total){
   }).join('');
   const more = (total && total > trades.length) ? `<div style="padding:.4rem .6rem;font-size:11px;color:var(--text3);border-top:1px solid var(--border)">Showing the latest ${trades.length} of ${fmtCount(total)} trades.</div>` : '';
   return `<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
-    <div style="max-height:52vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <div class="ord-hist-scroll" style="max-height:52vh;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)">
         <th style="padding:.35rem .6rem;text-align:left;font-weight:600">When</th>
         <th style="padding:.35rem .6rem;text-align:left;font-weight:600">Item</th>
@@ -3406,7 +3544,7 @@ async function renderOrdersTab(silent, force){
         <button class="btn ctrl-btn" onclick="renderOrdersTab(false,true)"><i class="ti ti-refresh"></i> Refresh</button>
         ${tabBusyHtml('orders')}
       </div>
-      <div id="orders-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-orders-' + p.entityId)).join('')}</div>`;
+      <div id="orders-sections">${playersFor('orders').map(p => playerSection(p, loading(), 'psec-orders-' + p.entityId, 'orders')).join('')}</div>`;
     updateLiveBtns();
     // Re-entering the tab: paint what we already have instead of a spinner. Only a first-ever
     // visit (or a newly tracked player) waits on the network.
@@ -5193,7 +5331,7 @@ async function renderCraftingTab(silent, force) {
           <div class="craft-tab ${craftTabActive==='passive'?'active':''}" onclick="setCraftTab('passive')"><i class="ti ti-clock"></i> Passive</div>
         </div>
       </div>
-      <div id="craft-sections">${trackedPlayers.map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId)).join('')}</div>`;
+      <div id="craft-sections">${playersFor('crafting').map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId, 'crafting')).join('')}</div>`;
     updateLiveBtns();
     // Re-entering the tab: paint what we already have instead of a spinner. Crafts pay TWO sequential
     // round-trips (region scan, then building/claim resolve), so this is the biggest felt win.
@@ -5520,6 +5658,10 @@ function ocGroups(){
   const groups = Object.values(byClaim);
   if (ocSortMode==='distance' && ocHome) groups.sort((a,b)=> ocClaimDist(a) - ocClaimDist(b));  // nearest home first
   else groups.sort((a,b)=> b.crafts.length - a.crafts.length);                                    // most total crafts first
+  // Pinned claims always lead, in the chosen order among themselves (Array.sort is stable). Before, a pin
+  // only reached the top by also being the home claim under "Nearest home" — distance zero.
+  const pins = new Set(openCraftClaims.map(c => String(c.entityId)));
+  groups.sort((a,b)=> (pins.has(b.id) ? 1 : 0) - (pins.has(a.id) ? 1 : 0));
   ocGroupsById = {}; groups.forEach(g=>ocGroupsById[g.id]=g);
   return groups;
 }
@@ -5699,7 +5841,7 @@ function ocRemoveCustom(id){ id=String(id); ocCustomClaims=ocCustomClaims.filter
 function ocTogglePin(raw){ const o=JSON.parse(raw); const id=String(o.id);
   if (ocIsPinned(id)) openCraftClaims=openCraftClaims.filter(c=>String(c.entityId)!==id);
   else openCraftClaims.push({entityId:id, name:o.name, regionId:o.regionId});
-  saveOpenCraftClaims(); ocRerenderCard(id); if (ocScope==='pinned') ocRenderBrowse();
+  saveOpenCraftClaims(); ocRenderBrowse();   // a pin moves the claim to the top (an unpin sends it back to its place)
 }
 function ocToggleHome(raw){ const o=JSON.parse(raw); const id=String(o.entityId);
   if (ocHome && String(ocHome.entityId)===id){ ocHome=null; ocSortMode='crafts'; }        // clicking the home claim clears it
