@@ -177,6 +177,16 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .psec-move{color:var(--text3);font-size:15px;cursor:pointer;padding:0 1px}
 .psec-move:hover{color:var(--text)}
 .psec-move.off{opacity:.25;pointer-events:none}
+/* Player banner vitals: HP + stamina bars (same size) and the food-buff countdown — see playerVitalsHtml */
+.pv{display:inline-flex;align-items:center;gap:.4rem;min-width:0;overflow:hidden;margin-left:.3rem}
+.pv-bar{position:relative;flex:0 1 112px;min-width:58px;height:16px;border-radius:4px;background:var(--bg);border:1px solid var(--border2);overflow:hidden}
+.pv-fill{position:absolute;left:0;top:0;bottom:0;width:0;transition:width .35s ease}
+.pv-hp .pv-fill{background:linear-gradient(90deg,#3d7a1a,#6fae2e)}
+.pv-st .pv-fill{background:linear-gradient(90deg,#a87a12,#d9a92a)}
+.pv-txt{position:relative;display:block;text-align:center;font-size:10px;font-weight:600;line-height:14px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.85);white-space:nowrap;font-variant-numeric:tabular-nums}
+.pv-food{display:inline-flex;align-items:center;gap:.2rem;font-size:11px;font-weight:600;color:var(--amber-light);white-space:nowrap;font-variant-numeric:tabular-nums}
+.pv-food .ti{font-size:14px}
+.pv-food.off{color:var(--text3);font-weight:400}
 .psec-flow{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:flex-start}
 .psec-grip{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 0 50%,var(--border2) 50% 58%,transparent 58% 70%,var(--border2) 70% 78%,transparent 78%)}
 .psec-grip:hover{background:linear-gradient(135deg,transparent 0 50%,var(--teal) 50% 58%,transparent 58% 70%,var(--teal) 70% 78%,transparent 78%)}
@@ -2020,6 +2030,7 @@ function playerSection(p, innerHtml, bodyId, tab){
       <i class="ti ti-user" data-online-icon="${id}" title="${(()=>{const o=playerIsOnline(p);return o===true?'Online':o===false?'Offline':'';})()}" style="color:${(()=>{const o=playerIsOnline(p);return o===true?'var(--green-light)':o===false?'var(--text3)':'var(--teal-light)';})()};font-size:14px"></i>
       <span style="font-weight:600;color:var(--text)">${escHtml(playerName(p))}</span>
       <span class="badge psec-paused" style="background:var(--bg);color:var(--text3);font-size:10px;display:${paused?'':'none'}">paused</span>
+      ${playerVitalsHtml(id)}
       <span style="flex:1"></span>
       ${arrows}
       <i class="ti ti-${muted?'bell-off':'bell'} psec-alerts" data-alerts-bell="${id}" title="${muted?'Alerts muted — click to enable':'Mute alerts for this player'}" onclick="event.stopPropagation();togglePlayerAlerts('${id}')" style="color:${muted?'var(--amber-light)':'var(--text3)'};font-size:15px;cursor:pointer"></i>
@@ -2029,6 +2040,99 @@ function playerSection(p, innerHtml, bodyId, tab){
     ${grip}
   </div>`;
 }
+// ── Player banner vitals: HP + stamina bars and the food-buff timer, in every tab's player header ──
+// Everything is read straight from the live cache: health_state (current HP), stamina_state (current
+// stamina), character_stats_state (max HP / max stamina at STAT_IDX), active_buff_state (food). Without the
+// relay (bitjita fallback) stamina can still come from the alert feed's liveStamina; anything unknown shows
+// "—". Several tabs keep their own copy of a player's banner, so live changes repaint every copy in place.
+function playerVitals(id){
+  id = String(id);
+  const one = t => liveRows(t, r => String(r.entity_id) === id)[0];
+  const hs = one('health_state'), ss = one('stamina_state'), cs = one('character_stats_state');
+  const vals = (cs && cs.values) || [], ls = liveStamina[id], lm = liveStaminaMax[id];
+  return {
+    hp: hs ? +hs.health : null,
+    hpMax: vals.length > STAT_IDX.health ? +vals[STAT_IDX.health] : null,
+    st: ss ? +ss.stamina : (ls ? ls.current : null),
+    stMax: vals.length > STAT_IDX.stamina ? +vals[STAT_IDX.stamina] : (lm ? lm.max : null),
+    foodEnd: playerFoodEnd(id)
+  };
+}
+// When the food buff runs out (ms). One meal puts on "Food Buffs" and "Food Regen" together with the same
+// duration (measured: both 3600s), so the later of the two ends is the time to eat again. 0 = no food buff
+// on; null = can't tell (no buff row yet, or the buff catalogue is still loading — repainted when it lands).
+// Same rule as the food-buff alert: a beneficial buff whose name starts with "Food".
+let _vitalsDescsAt = 0;   // last time the banner asked for the buff catalogue (at most once a minute — every banner render lands here)
+function playerFoodEnd(id){
+  const row = liveRows('active_buff_state', r => String(r.entity_id) === id)[0];
+  if (!row) return null;
+  if (!_buffDescs){
+    if (Date.now() - _vitalsDescsAt > 60000){ _vitalsDescsAt = Date.now(); relayBuffDescs().then(m => { if (m) vitalsPatchAll(); }).catch(() => {}); }
+    return null;
+  }
+  let end = 0;
+  activeBuffsOf(row, _buffDescs).forEach(b => {
+    if (b.dur > 0 && b.beneficial !== false && /^food/i.test(b.name || '')) end = Math.max(end, (b.start + b.dur) * 1000);
+  });
+  return end > Date.now() ? end : 0;
+}
+function vitalsBar(cur, max){
+  const known = cur != null && isFinite(cur) && max > 0;
+  const c = known ? (cur >= max - 0.01 ? max : Math.max(0, Math.floor(cur))) : 0;   // a float a hair under max still reads full
+  return { pct: known ? Math.min(100, c / max * 100) : 0, txt: known ? `${Math.round(c).toLocaleString()}/${Math.round(max).toLocaleString()}` : '—' };
+}
+function vitalsBarHtml(kind, cur, max){
+  const b = vitalsBar(cur, max), label = kind === 'hp' ? 'Health' : 'Stamina';
+  return `<span class="pv-bar pv-${kind}" title="${label}"><span class="pv-fill" style="width:${b.pct}%"></span><span class="pv-txt">${b.txt}</span></span>`;
+}
+function fmtFoodLeft(ms){
+  const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}` : `${m}:${String(r).padStart(2,'0')}`;
+}
+function vitalsFoodHtml(end){
+  if (end == null) return '<span class="pv-food" data-food-end=""></span>';
+  if (!end) return '<span class="pv-food off" data-food-end="0" title="No food buff — time to eat"><i class="ti ti-meat"></i>–</span>';
+  return `<span class="pv-food" data-food-end="${end}" title="Food buff — runs out at ${new Date(end).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' })}"><i class="ti ti-meat"></i><span class="pv-food-t">${fmtFoodLeft(end - Date.now())}</span></span>`;
+}
+function playerVitalsHtml(id){
+  const v = playerVitals(id);
+  return `<span class="pv" data-vitals="${id}">${vitalsBarHtml('hp', v.hp, v.hpMax)}${vitalsBarHtml('st', v.st, v.stMax)}${vitalsFoodHtml(v.foodEnd)}</span>`;
+}
+// Repaint one player's banners in place — the bars' widths and text (so the fill glides), and the food chip
+// only when its end time changed. Coalesced to one pass per frame: stamina and HP each tick about once a
+// second while a player is busy, and several tables can change in the same burst.
+let _vitalsDirty = new Set(), _vitalsRaf = 0;
+function vitalsSchedule(id){ _vitalsDirty.add(String(id)); if (!_vitalsRaf) _vitalsRaf = requestAnimationFrame(vitalsFlush); }
+function vitalsPatchAll(){ trackedPlayers.forEach(p => vitalsSchedule(p.entityId)); }
+function vitalsFlush(){
+  _vitalsRaf = 0;
+  const ids = [..._vitalsDirty]; _vitalsDirty.clear();
+  ids.forEach(id => {
+    const els = document.querySelectorAll(`.pv[data-vitals="${id}"]`); if (!els.length) return;
+    const v = playerVitals(id), hp = vitalsBar(v.hp, v.hpMax), st = vitalsBar(v.st, v.stMax);
+    const food = v.foodEnd == null ? '' : String(v.foodEnd);
+    els.forEach(el => {
+      [['.pv-hp', hp], ['.pv-st', st]].forEach(([sel, b]) => {
+        const bar = el.querySelector(sel); if (!bar) return;
+        bar.querySelector('.pv-fill').style.width = b.pct + '%';
+        bar.querySelector('.pv-txt').textContent = b.txt;
+      });
+      const f = el.querySelector('.pv-food');
+      if (f && f.dataset.foodEnd !== food) f.outerHTML = vitalsFoodHtml(v.foodEnd);
+    });
+  });
+}
+// The food chip counts down locally — its end time is exact (the buff row's start + duration). When it
+// reaches zero the banner is repainted, which turns the chip into "no food".
+setInterval(() => {
+  if (document.hidden) return;
+  document.querySelectorAll('.pv-food[data-food-end]').forEach(el => {
+    const end = +el.dataset.foodEnd; if (!end) return;
+    const left = end - Date.now();
+    if (left <= 0){ const pv = el.closest('.pv'); if (pv) vitalsSchedule(pv.dataset.vitals); return; }
+    const t = el.querySelector('.pv-food-t'); if (t) t.textContent = fmtFoodLeft(left);
+  });
+}, 1000);
 // ── Per-tab order of the player windows (remembered per browser) ──
 // Each tab keeps its own order, so e.g. Vel's inventory can lead while Velcruza's experience still does.
 // Players missing from a tab's saved order (newly tracked) follow in tracking order.
@@ -2541,6 +2645,28 @@ async function relayBuffDescs(){
     } catch(e){ /* try the next mirror */ }
   }
   return null;
+}
+// The buffs actually on a player, from their active_buff_state row (needs the catalogue above for names).
+// ⚠️ active_buffs is a FIXED ~238-slot array covering every buff, NOT a list of what's on you — 236 of
+// those slots read start=0/duration=0. A slot is active only with a real start that hasn't expired.
+// Verified against bitjita for the same player: both said exactly "Food Regen" + "Food Buffs".
+// ⚠️ buff_start_timestamp arrives in SECONDS here (1785571683), unlike the micros every other timestamp
+// column uses — dividing by 1e6 gave 1785 and made every buff look long expired.
+// Returns [{ buffId, name, beneficial, start (s), dur (s; 0 = no expiry), timeRemaining (s) }].
+function activeBuffsOf(row, descs){
+  const nowSec = Math.floor(Date.now() / 1000);
+  return ((row && row.active_buffs) || []).map(b => {
+    const arr = Array.isArray(b);
+    const buffId = arr ? b[0] : b.buff_id;
+    const dur = +(arr ? b[2] : b.buff_duration) || 0;
+    let sv = arr ? b[1] : b.buff_start_timestamp;
+    if (Array.isArray(sv)) sv = sv[0];
+    if (sv && typeof sv === 'object') sv = sv.__timestamp_micros_since_unix_epoch__;
+    let start = Number(sv || 0);
+    if (start > 1e12) start = Math.floor(start / 1e6);   // tolerate micros should the shape ever change
+    const d0 = (descs || {})[buffId] || {};
+    return { buffId, name: d0.name, beneficial: d0.beneficial, start, dur, timeRemaining: dur > 0 ? (start + dur) - nowSec : 1 };
+  }).filter(b => b.name && b.start > 0 && (b.dur <= 0 || b.timeRemaining > 0));
 }
 const SKILL_DESC_KEY = 'bcSkillDescs', SKILL_DESC_TTL = 7*24*60*60*1000;
 let _skillDescs = null;
@@ -4261,6 +4387,7 @@ const LIVE_COLS = {
   buy_order_state: ['entity_id','owner_entity_id','claim_entity_id','item_id','item_type','price_threshold','quantity','timestamp','stored_coins'],
   closed_listing_state: ['entity_id','owner_entity_id','claim_entity_id','item_stack','timestamp'],
   stamina_state: ['entity_id','last_stamina_decrease_timestamp','stamina'],
+  health_state: ['entity_id','last_health_decrease_timestamp','health','died_timestamp'],   // from /schema 2026-10-03
   experience_state: ['entity_id','experience_stacks'],
   character_stats_state: ['entity_id','values'],
   active_buff_state: ['entity_id','active_buffs'],
@@ -4704,11 +4831,15 @@ function liveQuerySet(ids, region){
   // NOT here()-filtered: players roam regions and the row lives in whichever mirror they're standing
   // in, so every region subscribes the id — 12 of the 13 return nothing, for free.
   perId(ids, 'entity_id', 'mobile_entity_state');
+  // Current HP for the player banner (playerVitals). health_state holds EVERY entity with health —
+  // buildings, creatures, players — so the same rule as movement: one indexed query per player, never an
+  // OR-chain, and every region asks (the row lives wherever the player is standing).
+  perId(ids, 'entity_id', 'health_state');
   return {
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
       'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
-      'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state'],
+      'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state', 'health_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -5152,6 +5283,7 @@ function feedKick(){
 // Same semantics the old dedicated feed had, now driven by the held subscriptions. Stamina/XP/max are
 // applied from SNAPSHOTS too (they're current values, so the opening frame seeds the alert baselines);
 // buffs and the crafts/orders doorbells fire only on genuine deltas.
+const VITALS_TABLES = new Set(['health_state', 'stamina_state', 'character_stats_state', 'active_buff_state']);
 function liveBridge(evs){
   // Max stamina FIRST: onLiveStamina compares current against it, and a snapshot delivers both tables
   // in the same burst — applying stats first means the first stamina row already has its ceiling.
@@ -5190,6 +5322,13 @@ function liveBridge(evs){
       if (ev.isDelta) ev.deletes.forEach(r => { const id = String(r.entity_id); playerOnline[id] = false; if (isPlayerTracked(id)) touched = true; });
       if (touched) applyPlayerOnlineDots();
     }
+  });
+  // Player banner vitals: repaint whoever's HP, stamina, maxima or buffs moved (snapshots too — they fill a
+  // banner that was drawn before the cache had the rows).
+  evs.forEach(ev => {
+    if (!VITALS_TABLES.has(ev.table)) return;
+    const touch = r => { if (r && r.entity_id && isPlayerTracked(r.entity_id)) vitalsSchedule(r.entity_id); };
+    ev.rows.forEach(touch); (ev.deletes || []).forEach(touch);
   });
   // Doorbell: did a LIST change? (Progress rows tick 1-2/sec while someone works a station, so only a
   // craft we've never seen counts.) Interim — once the tabs render straight from the cache this whole
@@ -11711,27 +11850,9 @@ async function checkPlayerBuffs(p){
       const descs = await relayBuffDescs();
       const row = liveRows('active_buff_state', r => String(r.entity_id) === id)[0];
       if (descs && row){
-        // ⚠️ active_buffs is a FIXED ~238-slot array covering every buff, NOT a list of what's on you —
-        // 236 of those slots read start=0/duration=0. A slot is active only with a real start that
-        // hasn't expired. Verified against bitjita for the same player: both said exactly
-        // "Food Regen" + "Food Buffs".
-        // ⚠️ buff_start_timestamp arrives in SECONDS here (1785571683), unlike the micros every other
-        // timestamp column uses — dividing by 1e6 gave 1785 and made every buff look long expired.
-        const nowSec = Math.floor(Date.now()/1000);
-        active = (row.active_buffs || []).map(b => {
-          const arr = Array.isArray(b);
-          const buffId = arr ? b[0] : b.buff_id;
-          const dur = +(arr ? b[2] : b.buff_duration) || 0;
-          let sv = arr ? b[1] : b.buff_start_timestamp;
-          if (Array.isArray(sv)) sv = sv[0];
-          if (sv && typeof sv === 'object') sv = sv.__timestamp_micros_since_unix_epoch__;
-          let start = Number(sv || 0);
-          if (start > 1e12) start = Math.floor(start / 1e6);   // tolerate micros should the shape ever change
-          const d0 = descs[buffId] || {};
-          return { buffTypeName: d0.name, buffName: d0.name, beneficial: d0.beneficial,
-                   buffStartTimestamp: start, buffDuration: dur,
-                   timeRemaining: dur > 0 ? (start + dur) - nowSec : 1 };
-        }).filter(b => b.buffTypeName && b.buffStartTimestamp > 0 && (b.buffDuration <= 0 || b.timeRemaining > 0));
+        // The slot-array and seconds-timestamp traps are handled in activeBuffsOf.
+        active = activeBuffsOf(row, descs).map(b => ({ buffTypeName: b.name, buffName: b.name, beneficial: b.beneficial,
+          buffStartTimestamp: b.start, buffDuration: b.dur, timeRemaining: b.timeRemaining }));
       }
     }
     if (active === null){
@@ -12050,6 +12171,7 @@ function onLiveStamina(id, data){
   const prevCur = liveStamina[id] ? liveStamina[id].current : null;
   if (prevCur != null && cur < prevCur - 0.25) liveActivity[String(id)] = Date.now();
   liveStamina[id] = { current: cur, max };
+  if (!usingCache()) vitalsSchedule(id);   // bitjita fallback: the banner's stamina comes from here (the relay path repaints from liveBridge)
   loadAlerts();
   if (!(palOn(id,'stamina') && alertsActive()) || isPlayerPaused(id) || isPlayerAlertsMuted(id) || !isPlayerTracked(id) || max == null) return;
   const st = alertState[id] || (alertState[id] = {});
