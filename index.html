@@ -2707,6 +2707,10 @@ function skillToolHtml(entityId, skillName){
 function patchSkillTools(entityId){
   document.querySelectorAll('.skill-tool[data-entity="' + entityId + '"]').forEach(el => { el.innerHTML = skillToolHtml(entityId, el.dataset.skillname); });
 }
+// The three numbers above the skill cards — shared by the full render and the live patch so they always agree.
+function skillStats(skills){
+  return { max: skills.reduce((m,sk)=>Math.max(m,sk.level),0), total: skills.reduce((s,sk)=>s+sk.level,0), xp: skills.reduce((s,sk)=>s+sk.xp,0) };
+}
 function skillsSectionHtml(pData, rankData, entityId) {
     const player = pData.player || {};
     entityId = String(entityId != null ? entityId : (player.entityId || ''));
@@ -2719,10 +2723,7 @@ function skillsSectionHtml(pData, rankData, entityId) {
     const rankings = Object.keys(freshRankings).length ? freshRankings : prevRankings;
 
     const skills = skillRowsFrom(experience, skillMap);
-
-    const totalXP = skills.reduce((s,sk)=>s+sk.xp,0);
-    const maxLvl = skills.reduce((m,sk)=>Math.max(m,sk.level),0);
-    const totalLvl = skills.reduce((s,sk)=>s+sk.level,0);
+    const st = skillStats(skills);
 
     // Live-track XP + cache for the calculator panel to read.
     updateSkillSession(entityId, skills);
@@ -2759,12 +2760,12 @@ function skillsSectionHtml(pData, rankData, entityId) {
 
     return `
       <div class="stat-row">
-        <div class="stat"><div class="stat-label">Highest level</div><div class="stat-val">${maxLvl}</div></div>
-        <div class="stat"><div class="stat-label">Total levels</div><div class="stat-val">${totalLvl}</div></div>
-        <div class="stat"><div class="stat-label">Total XP</div><div class="stat-val">${fmtNum(totalXP)}</div></div>
+        <div class="stat"><div class="stat-label">Highest level</div><div class="stat-val" data-stat="max">${st.max}</div></div>
+        <div class="stat"><div class="stat-label">Total levels</div><div class="stat-val" data-stat="total">${st.total}</div></div>
+        <div class="stat"><div class="stat-label">Total XP</div><div class="stat-val" data-stat="xp">${fmtNum(st.xp)}</div></div>
       </div>
       ${professions.length?`<div class="category-label"><i class="ti ti-hammer"></i> Professions</div><div class="skills-grid">${renderSkillCards(professions)}</div>`:''}
-      ${adventure.length?`<div class="category-label"><i class="ti ti-sword"></i> Adventure</div><div class="skills-grid">${renderSkillCards(adventure)}</div>`:''}
+      ${adventure.length?`<div class="category-label"><i class="ti ti-sword"></i> Skills</div><div class="skills-grid">${renderSkillCards(adventure)}</div>`:''}
       ${other.length?`<div class="category-label"><i class="ti ti-dots"></i> Other</div><div class="skills-grid">${renderSkillCards(other)}</div>`:''}
       <div class="skill-journey-host" id="sj-${entityId}"></div>`;
 }
@@ -12076,6 +12077,7 @@ function onLiveExperience(id, data){
   lookupPatchSnapshot(id, changed);   // the lookup page re-renders from its REST snapshot — keep it current
   if (skillCardsHost(id)){
     changed.forEach(sk => updateSkillCardLive(id, sk));
+    updateSkillStatsLive(id);
     syncSkillActiveStates(id); // one active skill may have handed off to another — update ALL cards, not just the ones that gained
     // Keep the expanded calculator panel in sync on the SAME tick as the small card — it used to refresh
     // only on the slower REST poll, so its XP (into-level, session XP, XP/hr, ETA) lagged behind the card.
@@ -12103,6 +12105,15 @@ function updateSkillCardLive(id, sk){
   const bar = card.querySelector('.skill-bar'); if (bar) bar.style.width = sk.pct + '%';
   const pctEls = card.querySelectorAll('.skill-card-row span'); if (pctEls[1]) pctEls[1].textContent = sk.pct + '%';
   const xpRow = card.querySelector('.skill-xp-row'); if (xpRow) xpRow.innerHTML = skillXpRowHtml(sk, rank); // keep the #rank suffix
+}
+// Live XP patches the cards in place, so the numbers above them need patching too. Only a full render
+// wrote them, so a level-up (or any XP) left Highest level / Total levels / Total XP stale until a refresh
+// or a tab switch.
+function updateSkillStatsLive(id){
+  const body = skillCardsHost(id), store = skillsByPlayer[id]; if (!body || !store || !store.skills) return;
+  const st = skillStats(store.skills);
+  const set = (k, v) => { const el = body.querySelector(`.stat-val[data-stat="${k}"]`); if (el) el.textContent = v; };
+  set('max', st.max); set('total', st.total); set('xp', fmtNum(st.xp));
 }
 // Live-refresh the open calculator panel (level, into-level, measured XP/hr, session XP, XP needed, ETA).
 // Skip if the user is editing an input in it, so a live tick can't wipe a half-typed target / manual rate —
