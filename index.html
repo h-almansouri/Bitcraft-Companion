@@ -177,16 +177,27 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .psec-move{color:var(--text3);font-size:15px;cursor:pointer;padding:0 1px}
 .psec-move:hover{color:var(--text)}
 .psec-move.off{opacity:.25;pointer-events:none}
-/* Player banner vitals: HP + stamina bars (same size) and the food-buff countdown — see playerVitalsHtml */
-.pv{display:inline-flex;align-items:center;gap:.4rem;min-width:0;overflow:hidden;margin-left:.3rem}
-.pv-bar{position:relative;flex:0 1 112px;min-width:58px;height:16px;border-radius:4px;background:var(--bg);border:1px solid var(--border2);overflow:hidden}
+/* Player banner vitals: HP + stamina bars (same size) and the food-buff countdown — see playerVitalsHtml.
+   Bars are 380px and shrink together when the header runs short (a real width, not a flex-basis: the
+   banner sizes itself from its contents, and a basis alone left the bars at their text's width). A player
+   window narrower than 660px (side-by-side Experience windows) moves them onto their own row under the
+   name, where they share its full width. */
+.psec{container:psec / inline-size}
+.pv{display:inline-flex;align-items:center;gap:.5rem;flex:0 1 auto;min-width:0;overflow:hidden;margin-left:.4rem}
+.pv-bar{position:relative;width:380px;flex:0 1 auto;min-width:70px;height:20px;border-radius:5px;background:var(--bg);border:1px solid var(--border2);overflow:hidden}
 .pv-fill{position:absolute;left:0;top:0;bottom:0;width:0;transition:width .35s ease}
 .pv-hp .pv-fill{background:linear-gradient(90deg,#3d7a1a,#6fae2e)}
 .pv-st .pv-fill{background:linear-gradient(90deg,#a87a12,#d9a92a)}
-.pv-txt{position:relative;display:block;text-align:center;font-size:10px;font-weight:600;line-height:14px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.85);white-space:nowrap;font-variant-numeric:tabular-nums}
-.pv-food{display:inline-flex;align-items:center;gap:.2rem;font-size:11px;font-weight:600;color:var(--amber-light);white-space:nowrap;font-variant-numeric:tabular-nums}
-.pv-food .ti{font-size:14px}
-.pv-food.off{color:var(--text3);font-weight:400}
+.pv-txt{position:relative;display:block;text-align:center;font-size:12px;font-weight:600;line-height:18px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.85);white-space:nowrap;font-variant-numeric:tabular-nums}
+.pv-food{display:inline-flex;align-items:center;gap:.3rem;flex:none;font-size:14px;font-weight:700;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}
+.pv-food .ti{font-size:17px;color:var(--amber-light)}
+.pv-food.off{color:var(--text3);font-weight:500}
+.pv-food.off .ti{color:var(--text3)}
+@container psec (max-width:660px){
+  .player-section-hdr{flex-wrap:wrap}
+  .player-section-hdr .pv{order:9;flex:1 1 100%;margin:.15rem 0 0}
+  .player-section-hdr .pv-bar{flex:1 1 0}
+}
 .psec-flow{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:flex-start}
 .psec-grip{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 0 50%,var(--border2) 50% 58%,transparent 58% 70%,var(--border2) 70% 78%,transparent 78%)}
 .psec-grip:hover{background:linear-gradient(135deg,transparent 0 50%,var(--teal) 50% 58%,transparent 58% 70%,var(--teal) 70% 78%,transparent 78%)}
@@ -2024,7 +2035,7 @@ function playerSection(p, innerHtml, bodyId, tab){
   const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : `flex:1 1 100%;max-width:${PSEC_DEFAULT_MAX}px`) : 'margin-bottom:1.1rem';
   const bodyExtra = sz.h ? `;height:${sz.h}px;overflow:auto` : '';
   const grip = resizable ? `<div class="psec-grip" onpointerdown="psecResizeDown(event)" ondblclick="psecResizeReset(this)" title="Drag to resize every player's window · double-click to reset"></div>` : '';
-  return `<div class="player-section" data-pid="${id}" style="${secStyle};position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+  return `<div class="player-section psec" data-pid="${id}" style="${secStyle};position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden">
     <div class="player-section-hdr" onclick="togglePlayerCollapse('${id}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
       <i class="ti ti-chevron-${collapsed?'right':'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
       <i class="ti ti-user" data-online-icon="${id}" title="${(()=>{const o=playerIsOnline(p);return o===true?'Online':o===false?'Offline':'';})()}" style="color:${(()=>{const o=playerIsOnline(p);return o===true?'var(--green-light)':o===false?'var(--text3)':'var(--teal-light)';})()};font-size:14px"></i>
