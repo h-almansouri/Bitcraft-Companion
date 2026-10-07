@@ -532,11 +532,16 @@ http.createServer((req, res) => {
     const tryHost = (i) => {
       const [hostname, prefix] = BC_EXPORT_HOSTS[i];
       const last = i + 1 >= BC_EXPORT_HOSTS.length;
-      const exReq = https.request({ hostname, path: prefix + rel, method: 'GET', headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, (apiRes) => {
+      // Lists are JSON: ask for gzip and hand it on as-is (claims + caves are ~820 KB raw, a fraction of that
+      // compressed) — the map re-reads them every 15 minutes. Tiles are webp, already compressed.
+      const enc = !isTile && wantsGzip(req) ? 'gzip' : 'identity';
+      const exReq = https.request({ hostname, path: prefix + rel, method: 'GET', headers: { 'User-Agent': 'BitcraftCompanion/1.0', 'Accept-Encoding': enc } }, (apiRes) => {
         if ((apiRes.statusCode < 200 || apiRes.statusCode >= 300) && !last) { apiRes.resume(); tryHost(i + 1); return; }
+        const ce = apiRes.headers['content-encoding'];
         res.writeHead(apiRes.statusCode, {
           'Content-Type': apiRes.headers['content-type'] || 'application/octet-stream',
-          'Cache-Control': isTile ? 'public, max-age=86400' : 'public, max-age=300'
+          'Cache-Control': isTile ? 'public, max-age=86400' : 'public, max-age=300',
+          ...(ce && ce !== 'identity' ? { 'Content-Encoding': ce, 'Vary': 'Accept-Encoding' } : {})
         });
         apiRes.pipe(res);
       });

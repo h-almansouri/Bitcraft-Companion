@@ -8366,12 +8366,12 @@ function bcClaimHoverTip(m, name){
   m.bindTooltip(escHtml(name), { direction: 'top', offset: [0, -16], className: 'bc-hover-tip', opacity: 1 });
   m.on('click', () => m.closeTooltip());
 }
-async function bcLoadGeo(name){
+async function bcLoadGeo(name, fresh){
   // Marker lists (claims, caves, dungeons, temples, ruins, wonders) from the map export host via /bcexports/ —
   // prism.brico.app, regenerated every 15 minutes, with bitjita's older copy as the proxy's fallback.
-  // Either FeatureCollections or plain arrays.
+  // Either FeatureCollections or plain arrays. `fresh` (the 15-minute refresh) skips the browser's 5-minute copy.
   try {
-    const r = await fetch(`${API}/bcexports/${name}`);
+    const r = await fetch(`${API}/bcexports/${name}`, fresh ? { cache: 'no-cache' } : undefined);
     if (!r.ok) return [];
     const d = await r.json();
     return Array.isArray(d) ? d : (d.features || []);
@@ -8643,13 +8643,6 @@ async function bcInitMap(){
   // No `bounds` option: with the negative-Y hex projection it wrongly rejects every tile;
   // out-of-range tiles simply 404 and render blank via errorTileUrl.
   const de = [[0,0],[BC_MAP_H, BC_MAP_W]];
-  // Terrain/road tiles load straight from the tile host (plain images, CORS-open, CDN-cached) instead of through
-  // our proxy — that's the single biggest bandwidth saving, since map tiles never touch the host.
-  // prism.brico.app (BitCraftToolBox, the same project behind the prism relay) serves the exact tile layout
-  // bitjita's old export host did, but re-rendered from the game: terrain daily, roads hourly. bitjita's copy
-  // (terrain last rendered June 2026) stays as the per-tile fallback for when prism fails to answer.
-  const BC_TILE_BASE = 'https://prism.brico.app';
-  const BC_TILE_FALLBACK = 'https://exports.bitjita.com/bitcraftmap';
   // A tile inside the world that fails on prism is retried once from bitjita's copy. Tiles outside the world 404 on
   // every host and are left blank (errorTileUrl) with no retry, so in normal use the fallback costs nothing.
   const bcTileFallback = (layer, path) => layer.on('tileerror', e => {
@@ -8659,12 +8652,13 @@ async function bcInitMap(){
     t._bcFallback = true;
     t.src = `${BC_TILE_FALLBACK}/${path}/${c.z}/${c.x}/${c.y}.webp`;
   });
-  const terrainLayer = L.tileLayer(`${BC_TILE_BASE}/maps/terrain/tiles/{z}/{x}/{y}.webp`, {
+  // {q} = the layer's version tag (bcTileQ): prism's own stamp for its latest drawing — see bcCheckTileStamps.
+  bcTerrainLayer = L.tileLayer(`${BC_TILE_BASE}/${BC_TILE_PATH.terrain}/{z}/{x}/{y}.webp{q}`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
-    tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true
+    tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true, q: () => bcTileQ('terrain')
   });
-  bcTileFallback(terrainLayer, 'maps/terrain/tiles');
-  terrainLayer.addTo(bcMap);
+  bcTileFallback(bcTerrainLayer, BC_TILE_PATH.terrain);
+  bcTerrainLayer.addTo(bcMap);
   // Restore the last center + zoom (persisted on every pan/zoom); otherwise frame the whole map.
   const savedView = bcLoadMapView();
   if (savedView) bcMap.setView([savedView.lat, savedView.lng], savedView.zoom);
@@ -8673,65 +8667,10 @@ async function bcInitMap(){
   bcMap.on('moveend', bcSaveMapView); // fires on both pan and zoom
   bcMap.on('moveend', bcCullMarkers); // keep only in-view claim/cave markers in the DOM
 
-  // ----- Claims — tier banner icons, split into per-tier toggleable layers -----
-  const claimIconCache = {};
-  const claimIcon = (tier) => {
-    const t = (tier >= 0 && tier <= 10) ? tier : 'X';
-    if (!claimIconCache[t]) claimIconCache[t] = L.icon({ iconUrl: `${API}/mapassets/${t==='X'?'claim':'claimT'+t}.png`, iconSize:[36,36], iconAnchor:[18,18], popupAnchor:[0,-18] });
-    return claimIconCache[t];
-  };
-  const claimTierLayers = {}, claimTierCount = {}, allClaimMarkers = [];
-  bcWaystoneLayer = L.layerGroup(); bcWaystoneCount = 0;
-  const claimsFeats = await bcLoadGeo('claims.geojson');
-  claimsFeats.forEach(f => {
-    const ll = bcFeatLatLng(f); if (!ll) return;
-    const p = f.properties || {};
-    const tier = (p.tier >= 0 && p.tier <= 10) ? p.tier : 0;
-    if (!claimTierLayers[tier]) { claimTierLayers[tier] = L.layerGroup(); claimTierCount[tier] = 0; }
-    claimTierCount[tier]++;
-    // Hover name tag (bcClaimHoverTip) instead of the marker's `title`: the browser only shows a title after
-    // a second's pause, in the system style. leaflet-search reads properties.name, not the title.
-    const m = L.marker(ll, { icon: claimIcon(p.tier), alt: p.name || 'Claim' });
-    m.feature = f; // lets leaflet-search read properties.name
-    bcClaimHoverTip(m, p.name || 'Claim');
-    const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ') || '—';
-    m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
-    allClaimMarkers.push(m);
-    bcCullClaims.push({ m, ll, group: claimTierLayers[tier] });   // added to its group on demand by bcCullMarkers
-    // Waystone claims also get a distinct marker on the independent Waystones layer.
-    if (p.has_waystone){
-      bcWaystoneCount++;
-      const wm = L.marker(ll, { icon: claimIcon(p.tier), alt: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
-      bcClaimHoverTip(wm, (p.name||'Claim')+' · Waystone');
-      wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--teal-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
-      bcCullClaims.push({ m: wm, ll, group: bcWaystoneLayer });
-    }
-  });
-  // Layers are placed on the map by bcApplyLayerState() (respecting saved toggles), not here.
-  const claimSearchLayer = L.featureGroup(allClaimMarkers); // search data source
-
-  // ----- Caves — split into per-tier toggleable layers -----
-  const caveTierLayers = {}, caveTierCount = {};
-  const caveFeats = await bcLoadGeo('caves.geojson');
-  const oreIconCache = {};
-  const oreIcon = (tier) => {
-    const t = Math.min(Math.max(tier||1, 1), 10);
-    if (!oreIconCache[t]) {
-      const sz = Math.round(24 + t * 1.7);   // grow with tier (T1≈26 … T10≈41) so rarer high-tier caves stand out
-      oreIconCache[t] = L.icon({ iconUrl:`${API}/mapassets/ore_t${t}.webp`, iconSize:[sz,sz], iconAnchor:[sz/2,sz/2], popupAnchor:[0,-sz/2] });
-    }
-    return oreIconCache[t];
-  };
-  caveFeats.forEach(f => {
-    const ll = bcFeatLatLng(f); if (!ll) return;
-    const p = f.properties || {};
-    const tier = (p.tier != null) ? p.tier : 0;
-    if (!caveTierLayers[tier]) { caveTierLayers[tier] = L.layerGroup(); caveTierCount[tier] = 0; }
-    caveTierCount[tier]++;
-    const m = L.marker(ll, { icon: oreIcon(tier), title: p.name || 'Cave' });
-    m.bindPopup(`<b>${escHtml(p.name||'Cave')}</b><br><span style="color:var(--text3)">Cave T${p.tier??'?'} · N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
-    bcCullCaves.push({ m, ll, group: caveTierLayers[tier] });   // added to its group on demand by bcCullMarkers
-  });
+  // ----- Claims (tier banner icons in per-tier layers, plus Waystones) and caves (per tier) -----
+  // Built by bcBuildClaims / bcBuildCaves, which bcRefreshLists runs again every 15 minutes while the map shows.
+  bcBuildClaims(await bcLoadGeo('claims.geojson'));
+  bcBuildCaves(await bcLoadGeo('caves.geojson'));
 
   // ----- Other POI overlay layers (icon-based, like bitcraftmap) -----
   const poiLayer = async (file, iconUrl, size, label) => {
@@ -8752,48 +8691,25 @@ async function bcInitMap(){
   const temples  = await poiLayer('temples.geojson',  'temple.svg',       26, 'Temple');
   const ruined   = await poiLayer('ruined.geojson',   'ruinedCity.png',   28, 'Ruined City');
   const wonders  = await poiLayer('trees.geojson',    'travelerTree.svg', 26, 'Wonder');
+  bcPoiCounts = { dungeons: dungeons.count, temples: temples.count, ruined: ruined.count, wonders: wonders.count };
   // ----- Roads (tiled overlay) -----
-  const roadsLayer = L.tileLayer(`${BC_TILE_BASE}/roads/tiles/{z}/{x}/{y}.webp`, {
+  bcRoadsLayer = L.tileLayer(`${BC_TILE_BASE}/${BC_TILE_PATH.roads}/{z}/{x}/{y}.webp{q}`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
-    tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true, opacity:0.9
+    tileSize:256, keepBuffer:2, updateWhenZooming:false, errorTileUrl:'', noWrap:true, opacity:0.9, q: () => bcTileQ('roads')
   });
-  bcTileFallback(roadsLayer, 'roads/tiles');
+  bcTileFallback(bcRoadsLayer, BC_TILE_PATH.roads);
 
   // ----- Custom layer control (Claims/Caves expand to per-tier toggles) -----
   bcLoadLayers();
-  bcLayerReg = { roads:roadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer };
-  Object.keys(claimTierLayers).forEach(t => bcLayerReg['claimT'+t] = claimTierLayers[t]);
-  Object.keys(caveTierLayers).forEach(t => bcLayerReg['caveT'+t] = caveTierLayers[t]);
+  bcLayerReg = { roads:bcRoadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer };
+  bcRegisterTierLayers();
   const lc = L.control({ position:'topright' });
   lc.onAdd = function(){
     const div = L.DomUtil.create('div','bc-layerctrl');
-    const dot = c => `<span class="bc-lsw" style="background:${c}"></span>`;
-    const flat = (k,label,sw) => `<label class="bc-lrow"><input type="checkbox" data-lk="${k}" checked onchange="bcToggleLayer('${k}',this.checked)">${sw}<span>${label}</span></label>`;
-    const group = (prefix,label,total,tierMap,counts,color,extraRows='') => {
-      const tiers = Object.keys(tierMap).map(Number).sort((a,b)=>a-b);
-      return `<div class="bc-lgroup">
-        <div class="bc-lghdr">
-          <input type="checkbox" id="bc-lgm-${prefix}" checked onchange="bcToggleLayerGroup('${prefix}T',this.checked)">
-          ${dot(color)}<span class="bc-lgname" onclick="bcExpandLayerGroup('${prefix}')">${label} (${total})</span>
-          <i class="ti ti-chevron-down bc-lgchev" id="bc-lgchev-${prefix}" onclick="bcExpandLayerGroup('${prefix}')"></i>
-        </div>
-        <div class="bc-lgbody" id="bc-lg-${prefix}" style="display:none">
-          ${tiers.map(t=>`<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="${prefix}T${t}" checked onchange="bcToggleLayer('${prefix}T${t}',this.checked);bcSyncMaster('${prefix}')">T${t} <span class="bc-lcount">(${counts[t]})</span></label>`).join('')}
-          ${extraRows}
-        </div>
-      </div>`;
-    };
-    div.innerHTML =
-      flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
-      group('claim','Claims',claimsFeats.length,claimTierLayers,claimTierCount,'#9aa3ad',
-        `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#9aa3ad')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
-      group('cave','Caves',caveFeats.length,caveTierLayers,caveTierCount,'#b07cc6') +
-      flat('dungeons',`Dungeons (${dungeons.count})`,dot('#e0556e')) +
-      flat('temples',`Temples (${temples.count})`,dot('#ffd580')) +
-      flat('ruined',`Ruined Cities (${ruined.count})`,dot('#c8c8c8')) +
-      flat('wonders',`Wonders (${wonders.count})`,dot('#63c45a'));
+    div.innerHTML = bcLayerControlHtml();
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
+    bcLayerCtrlDiv = div;
     return div;
   };
   lc.addTo(bcMap);
@@ -8802,7 +8718,7 @@ async function bcInitMap(){
   if (L.Control && L.Control.Search){
     try {
       bcMap.addControl(new L.Control.Search({
-        layer: claimSearchLayer, propertyName: 'name',
+        layer: bcClaimSearchLayer, propertyName: 'name',
         initial:false, zoom:2, marker:false, textPlaceholder:'Search claims…',
         moveToLocation: (latlng, title, map) => { map.setView(latlng, 2); }
       }));
@@ -8810,7 +8726,7 @@ async function bcInitMap(){
   }
   // leaflet-search adds its source layer (all claim markers) to the map — remove it so the
   // per-tier toggles fully control claim visibility. Then apply saved toggle state (adds ON layers).
-  if (bcMap.hasLayer(claimSearchLayer)) bcMap.removeLayer(claimSearchLayer);
+  if (bcMap.hasLayer(bcClaimSearchLayer)) bcMap.removeLayer(bcClaimSearchLayer);
   if (bcWaystonesOn && bcWaystoneLayer && !bcMap.hasLayer(bcWaystoneLayer)) bcWaystoneLayer.addTo(bcMap);
   bcApplyLayerState();   // its bcCullMarkers() populates in-view markers, incl. waystones if the layer is on
 
@@ -8844,11 +8760,215 @@ async function bcInitMap(){
   bcLoadTrackedPlayers().forEach(p => bcTrackPlayer(p.id, p.name, p.color, p.follow));
 
   setTimeout(() => bcMap.invalidateSize(), 80);
+  bcListsSlot = BC_LIST_SLOT(Date.now());   // the lists just loaded: the next read is in the next 15-minute slot
+  bcTileCheckAt = Date.now(); bcCheckTileStamps();   // tiles were painted from the remembered version — re-check it now
 }
 
 // ===== Map layer control (expandable Claims/Caves by tier) =====
 let bcLayerReg = {};
 let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to their group only while in view
+// ===== Map freshness: tile versions + the 15-minute claims/caves refresh =====
+// Terrain/road tiles load straight from the tile host (plain images, CORS-open, CDN-cached) instead of through
+// our proxy — that's the single biggest bandwidth saving, since map tiles never touch the host.
+// prism.brico.app (BitCraftToolBox, the same project behind the prism relay) serves the exact tile layout
+// bitjita's old export host did, but re-rendered from the game: terrain daily (~04:00 UTC), roads about hourly.
+// bitjita's copy (terrain last rendered June 2026) stays as the per-tile fallback for when prism fails to answer.
+const BC_TILE_BASE = 'https://prism.brico.app';
+const BC_TILE_FALLBACK = 'https://exports.bitjita.com/bitcraftmap';
+const BC_TILE_PATH = { terrain: 'maps/terrain/tiles', roads: 'roads/tiles' };
+let bcTerrainLayer = null, bcRoadsLayer = null;
+// Tile versions. prism lets a browser reuse a tile for 4 hours (Cache-Control: max-age=14400), so a redraw
+// could take that long to show up. The version tag in the tile address is prism's own Last-Modified for one
+// sentinel tile per layer: when prism redraws, the tag changes, the address is new, and the browser fetches
+// the new picture at once — and only then. Remembered per browser, so a reload paints from cache straight away.
+const BC_TILE_VER_KEY = 'bc_map_tile_ver_v1';
+let bcTileVer = (() => { try { const v = JSON.parse(localStorage.getItem(BC_TILE_VER_KEY) || '{}'); return { terrain: String(v.terrain || ''), roads: String(v.roads || '') }; } catch(e){ return { terrain: '', roads: '' }; } })();
+function bcTileQ(k){ return bcTileVer[k] ? '?v=' + bcTileVer[k] : ''; }
+// One HEAD per layer. ?probe= changes every 10 minutes, so Cloudflare answers everyone else's probe in that
+// window from its edge — prism's own server sees about one probe per layer per 10 minutes, however many watch.
+async function bcTileStamp(k){
+  try {
+    const r = await fetch(`${BC_TILE_BASE}/${BC_TILE_PATH[k]}/-5/1/-3.webp?probe=${Math.floor(Date.now() / 600000)}`, { method: 'HEAD', cache: 'no-store' });
+    const lm = r.ok ? Date.parse(r.headers.get('last-modified') || '') : NaN;
+    return isFinite(lm) ? String(Math.floor(lm / 1000)) : '';
+  } catch(e){ return ''; }
+}
+// Point each loaded tile at the new address in place: the old picture stays up until the new one has loaded,
+// so nothing blanks. (A tile showing bitjita's fallback gets another go at prism.)
+function bcRefreshTiles(layer, k){
+  if (!layer || !layer._map || !layer._tiles) return;
+  Object.values(layer._tiles).forEach(t => {
+    const c = t && t.coords; if (!c || !t.el) return;
+    t.el._bcFallback = false;
+    t.el.src = `${BC_TILE_BASE}/${BC_TILE_PATH[k]}/${c.z}/${c.x}/${c.y}.webp${bcTileQ(k)}`;
+  });
+}
+async function bcCheckTileStamps(){
+  let changed = false;
+  for (const [k, layer] of [['terrain', bcTerrainLayer], ['roads', bcRoadsLayer]]){
+    if (!layer || !bcMap || !bcMap.hasLayer(layer)) continue;   // roads switched off: nothing to keep fresh
+    const v = await bcTileStamp(k);
+    if (v && v !== bcTileVer[k]){ bcTileVer[k] = v; changed = true; bcRefreshTiles(layer, k); }
+  }
+  if (changed) safeSetItem(BC_TILE_VER_KEY, JSON.stringify(bcTileVer));
+}
+// Claims and caves, rebuilt in place. prism regenerates both lists every 15 minutes (:01/:16/:31/:46), and
+// bcMapFreshTick re-reads them in the slot after each (from :03 on) while the map is showing. A claim or cave
+// that didn't change keeps its marker — an open popup stays open — and only new, changed and gone ones are
+// touched. Claims key on entityId; caves carry no id, so position + name + tier is theirs.
+let bcClaimTierLayers = {}, bcClaimTierCount = {}, bcClaimTotal = 0, bcClaimSearchLayer = null, bcClaimMarks = new Map();
+let bcCaveTierLayers = {}, bcCaveTierCount = {}, bcCaveTotal = 0, bcCaveMarks = new Map();
+let bcPoiCounts = {}, bcLayerCtrlDiv = null;
+const _bcClaimIcons = {}, _bcOreIcons = {};
+function bcClaimIcon(tier){
+  const t = (tier >= 0 && tier <= 10) ? tier : 'X';
+  if (!_bcClaimIcons[t]) _bcClaimIcons[t] = L.icon({ iconUrl: `${API}/mapassets/${t==='X'?'claim':'claimT'+t}.png`, iconSize:[36,36], iconAnchor:[18,18], popupAnchor:[0,-18] });
+  return _bcClaimIcons[t];
+}
+function bcOreIcon(tier){
+  const t = Math.min(Math.max(tier||1, 1), 10);
+  if (!_bcOreIcons[t]){
+    const sz = Math.round(24 + t * 1.7);   // grow with tier (T1≈26 … T10≈41) so rarer high-tier caves stand out
+    _bcOreIcons[t] = L.icon({ iconUrl:`${API}/mapassets/ore_t${t}.webp`, iconSize:[sz,sz], iconAnchor:[sz/2,sz/2], popupAnchor:[0,-sz/2] });
+  }
+  return _bcOreIcons[t];
+}
+function bcMakeClaim(f, ll, p, sig){
+  // Hover name tag (bcClaimHoverTip) instead of the marker's `title`: the browser only shows a title after
+  // a second's pause, in the system style. leaflet-search reads properties.name, not the title.
+  const m = L.marker(ll, { icon: bcClaimIcon(p.tier), alt: p.name || 'Claim' });
+  m.feature = f; // lets leaflet-search read properties.name
+  bcClaimHoverTip(m, p.name || 'Claim');
+  const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ') || '—';
+  m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+  // Waystone claims also get a distinct marker on the independent Waystones layer.
+  let wm = null;
+  if (p.has_waystone){
+    wm = L.marker(ll, { icon: bcClaimIcon(p.tier), alt: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
+    bcClaimHoverTip(wm, (p.name||'Claim')+' · Waystone');
+    wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--teal-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+  }
+  return { m, wm, sig };
+}
+function bcDropClaim(e){
+  Object.values(bcClaimTierLayers).forEach(g => g.removeLayer(e.m));
+  if (e.wm && bcWaystoneLayer) bcWaystoneLayer.removeLayer(e.wm);
+}
+function bcBuildClaims(feats){
+  if (!bcWaystoneLayer) bcWaystoneLayer = L.layerGroup();
+  if (!bcClaimSearchLayer) bcClaimSearchLayer = L.featureGroup();
+  const next = new Map(), cull = [], count = {};
+  let waystones = 0;
+  feats.forEach(f => {
+    const ll = bcFeatLatLng(f); if (!ll) return;
+    const p = f.properties || {};
+    const tier = (p.tier >= 0 && p.tier <= 10) ? p.tier : 0;
+    const base = p.entityId != null ? String(p.entityId) : `${p.name}@${ll.lat},${ll.lng}`;
+    let key = base; for (let i = 2; next.has(key); i++) key = base + '#' + i;
+    const sig = [ll.lat, ll.lng, p.name, p.tier, !!p.has_bank, !!p.has_market, !!p.has_waystone].join('|');
+    let e = bcClaimMarks.get(key);
+    if (!e || e.sig !== sig){ if (e) bcDropClaim(e); e = bcMakeClaim(f, ll, p, sig); }
+    next.set(key, e);
+    if (!bcClaimTierLayers[tier]) bcClaimTierLayers[tier] = L.layerGroup();
+    count[tier] = (count[tier] || 0) + 1;
+    cull.push({ m: e.m, ll, group: bcClaimTierLayers[tier] });   // added to its group on demand by bcCullMarkers
+    if (e.wm){ waystones++; cull.push({ m: e.wm, ll, group: bcWaystoneLayer }); }
+  });
+  bcClaimMarks.forEach((e, k) => { if (!next.has(k)) bcDropClaim(e); });   // gone from the list
+  bcClaimMarks = next;
+  bcClaimSearchLayer.clearLayers(); next.forEach(e => bcClaimSearchLayer.addLayer(e.m));   // leaflet-search re-reads this on every keystroke
+  bcClaimTierCount = count; bcClaimTotal = next.size; bcWaystoneCount = waystones; bcCullClaims = cull;
+}
+function bcBuildCaves(feats){
+  const next = new Map(), cull = [], count = {};
+  feats.forEach(f => {
+    const ll = bcFeatLatLng(f); if (!ll) return;
+    const p = f.properties || {};
+    const tier = (p.tier != null) ? p.tier : 0;
+    const base = [ll.lat, ll.lng, p.name, p.tier].join('|');
+    let key = base; for (let i = 2; next.has(key); i++) key = base + '#' + i;
+    let m = bcCaveMarks.get(key);
+    if (!m){
+      m = L.marker(ll, { icon: bcOreIcon(tier), title: p.name || 'Cave' });
+      m.bindPopup(`<b>${escHtml(p.name||'Cave')}</b><br><span style="color:var(--text3)">Cave T${p.tier??'?'} · N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
+    }
+    next.set(key, m);
+    if (!bcCaveTierLayers[tier]) bcCaveTierLayers[tier] = L.layerGroup();
+    count[tier] = (count[tier] || 0) + 1;
+    cull.push({ m, ll, group: bcCaveTierLayers[tier] });   // added to its group on demand by bcCullMarkers
+  });
+  bcCaveMarks.forEach((m, k) => { if (!next.has(k)) Object.values(bcCaveTierLayers).forEach(g => g.removeLayer(m)); });
+  bcCaveMarks = next; bcCaveTierCount = count; bcCaveTotal = next.size; bcCullCaves = cull;
+}
+// Tier layers join the toggle registry; one that appears on a refresh (say a first T10 claim) follows its saved toggle.
+function bcRegisterTierLayers(){
+  [['claimT', bcClaimTierLayers], ['caveT', bcCaveTierLayers]].forEach(([pre, layers]) => Object.keys(layers).forEach(t => {
+    const k = pre + t; if (bcLayerReg[k]) return;
+    bcLayerReg[k] = layers[t];
+    if (bcMap && bcLayersOn.has(k)) layers[t].addTo(bcMap);
+  }));
+}
+function bcLayerControlHtml(){
+  const dot = c => `<span class="bc-lsw" style="background:${c}"></span>`;
+  const flat = (k,label,sw) => `<label class="bc-lrow"><input type="checkbox" data-lk="${k}" checked onchange="bcToggleLayer('${k}',this.checked)">${sw}<span>${label}</span></label>`;
+  const group = (prefix,label,total,tierMap,counts,color,extraRows='') => {
+    const tiers = Object.keys(tierMap).map(Number).filter(t => counts[t] > 0).sort((a,b)=>a-b);
+    return `<div class="bc-lgroup">
+      <div class="bc-lghdr">
+        <input type="checkbox" id="bc-lgm-${prefix}" checked onchange="bcToggleLayerGroup('${prefix}T',this.checked)">
+        ${dot(color)}<span class="bc-lgname" onclick="bcExpandLayerGroup('${prefix}')">${label} (${total})</span>
+        <i class="ti ti-chevron-down bc-lgchev" id="bc-lgchev-${prefix}" onclick="bcExpandLayerGroup('${prefix}')"></i>
+      </div>
+      <div class="bc-lgbody" id="bc-lg-${prefix}" style="display:none">
+        ${tiers.map(t=>`<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="${prefix}T${t}" checked onchange="bcToggleLayer('${prefix}T${t}',this.checked);bcSyncMaster('${prefix}')">T${t} <span class="bc-lcount">(${counts[t]})</span></label>`).join('')}
+        ${extraRows}
+      </div>
+    </div>`;
+  };
+  return flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
+    group('claim','Claims',bcClaimTotal,bcClaimTierLayers,bcClaimTierCount,'#9aa3ad',
+      `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#9aa3ad')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
+    group('cave','Caves',bcCaveTotal,bcCaveTierLayers,bcCaveTierCount,'#b07cc6') +
+    flat('dungeons',`Dungeons (${bcPoiCounts.dungeons || 0})`,dot('#e0556e')) +
+    flat('temples',`Temples (${bcPoiCounts.temples || 0})`,dot('#ffd580')) +
+    flat('ruined',`Ruined Cities (${bcPoiCounts.ruined || 0})`,dot('#c8c8c8')) +
+    flat('wonders',`Wonders (${bcPoiCounts.wonders || 0})`,dot('#63c45a'));
+}
+// Redraw the layer control's counts after a refresh, keeping which groups are expanded and every toggle as it was.
+// Looked up inside the control itself: while the map is popped out, it lives in the pop-out's document.
+function bcRefreshLayerControl(){
+  const div = bcLayerCtrlDiv; if (!div) return;
+  const open = {}; ['claim','cave'].forEach(g => { const b = div.querySelector('#bc-lg-' + g); open[g] = !!(b && b.style.display !== 'none'); });
+  div.innerHTML = bcLayerControlHtml();
+  ['claim','cave'].forEach(g => { if (!open[g]) return; const b = div.querySelector('#bc-lg-' + g), c = div.querySelector('#bc-lgchev-' + g); if (b) b.style.display = ''; if (c) c.style.transform = ''; });
+  div.querySelectorAll('input[data-lk]').forEach(cb => { cb.checked = bcLayersOn.has(cb.dataset.lk); });
+  ['claim','cave'].forEach(g => { const m = div.querySelector('#bc-lgm-' + g); if (m) m.checked = [...div.querySelectorAll(`input[data-lk^="${g}T"]`)].some(cb => cb.checked); });
+}
+async function bcRefreshLists(){
+  const [claims, caves] = await Promise.all([bcLoadGeo('claims.geojson', true), bcLoadGeo('caves.geojson', true)]);
+  if (!bcMap) return;
+  if (claims.length) bcBuildClaims(claims);   // nothing back (prism and bitjita both down): keep what's on the map
+  if (caves.length) bcBuildCaves(caves);
+  bcRegisterTierLayers();
+  bcRefreshLayerControl();
+  bcCullMarkers();
+}
+// Once a minute: while the map is showing (its tab, or the pop-out), re-read the lists when a new 15-minute slot
+// has started since the last read, and re-check the tile stamps every 10 minutes. Coming back to the map after a
+// while catches up within the minute.
+const BC_LIST_SLOT = t => Math.floor((t - 3 * 60000) / (15 * 60000));   // slots start at :03/:18/:33/:48
+let bcListsSlot = -1, bcTileCheckAt = 0, bcFreshBusy = false;
+async function bcMapFreshTick(){
+  if (!bcMap || bcFreshBusy || !bcMapActive() || (document.hidden && !bcPipWin)) return;
+  bcFreshBusy = true;
+  try {
+    const now = Date.now();
+    if (BC_LIST_SLOT(now) !== bcListsSlot){ bcListsSlot = BC_LIST_SLOT(now); await bcRefreshLists(); }
+    if (now - bcTileCheckAt >= 10 * 60000){ bcTileCheckAt = now; await bcCheckTileStamps(); }
+  } catch(e){ /* try again next minute */ }
+  finally { bcFreshBusy = false; }
+}
+setInterval(bcMapFreshTick, 60000);
 // Waystones: a filter layer (under Claims) showing only claims that have a waystone — find teleport points
 // without enabling every claim tier. Independent toggle (persisted), so you can turn all tiers off and keep it.
 let bcWaystoneLayer = null, bcWaystoneCount = 0;
@@ -8868,7 +8988,7 @@ function bcLoadLayers(){ try { const v2 = localStorage.getItem('bc_map_layers_v2
 function bcSaveLayers(){ safeSetItem('bc_map_layers_v2', JSON.stringify([...bcLayersOn])); }
 function bcToggleLayer(k, on){
   const l = bcLayerReg[k]; if (!l || !bcMap) return;
-  if (on){ bcLayersOn.add(k); if (!bcMap.hasLayer(l)) l.addTo(bcMap); }
+  if (on){ bcLayersOn.add(k); if (!bcMap.hasLayer(l)) l.addTo(bcMap); if (k === 'roads') bcTileCheckAt = 0; }   // roads' stamp isn't checked while they're off
   else { bcLayersOn.delete(k); bcMap.removeLayer(l); }
   bcSaveLayers();
   bcCullMarkers();   // populate a freshly-shown claim/cave tier with just its in-view markers
