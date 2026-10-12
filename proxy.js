@@ -299,19 +299,38 @@ function slimRecipeOuts(rows) {
   });
   return out;
 }
-// placeable_desc + placeable_growth_desc → { placeableId: [name, [[chance, nextPlaceableId], …]] } — what a growing
-// placeable (sapling, rice seedling, fishing trap…) turns into, for the Crafts tab's Placeables view. outcomes_v2 is
-// a SATS option, [0, [[probability, placeable_id, radius_min, radius_max], …]]; a next id of 0 means it vanishes
-// (tree seeds and food stashes go after 30s if nobody gathers them). No growth rule → no outcomes.
-function slimPlaceables(descs, growth) {
-  const next = {}, out = {};
+// placeable_desc + placeable_growth_desc + placeable_interaction_desc → everything the Crafts tab's Placeables view
+// shows about a placeable (the relay only says WHICH placeable sits where), keyed by placeable id:
+//   [name, tier, kind (the game's tag: "Tree Seed", "Fishing Trap"…), icon, growth, actions]
+//   growth  — null when it never changes by itself (a mature tree, a full net), else [minSecs, maxSecs, outcomes]
+//             with outcomes [[chance, nextPlaceableId], …]. outcomes_v2 is a SATS option, [0, [[probability,
+//             placeable_id, radius_min, radius_max], …]]; a next id of 0 means it vanishes (tree seeds and food
+//             stashes go after 30s if nobody gathers them).
+//   actions — [[verb, outputs, levels, results], …]: outputs [[itemId, qty, isCargo], …] (a stack is [item_id,
+//             quantity, [typeVariant, []], …] — variant 1 = cargo), levels [[skillId, level], …], results = the
+//             placeable ids doing it turns this one into (on_destroy_outcomes, same option shape as outcomes_v2) —
+//             how the view tells "treat it or it withers" from "treating is optional".
+const slimOutcomes = v => (Array.isArray(v) && v[0] === 0 && Array.isArray(v[1]) ? v[1] : []).filter(Array.isArray);
+function slimPlaceables(descs, growth, acts) {
+  const grow = {}, act = {}, out = {};
   (Array.isArray(growth) ? growth : []).forEach(g => {
-    const v = g && g.outcomes_v2, list = Array.isArray(v) && v[0] === 0 && Array.isArray(v[1]) ? v[1] : [];
-    if (g && g.placeable_id != null) next[g.placeable_id] = list.filter(Array.isArray).map(o => [+o[0] || 0, +o[1] || 0]);
+    if (!g || g.placeable_id == null) return;
+    const t = Array.isArray(g.time) ? g.time : [g.time, g.time];
+    grow[g.placeable_id] = [+t[0] || 0, +t[1] || +t[0] || 0, slimOutcomes(g.outcomes_v2).map(o => [+o[0] || 0, +o[1] || 0])];
   });
-  (Array.isArray(descs) ? descs : []).forEach(p => { if (p && p.id != null) out[p.id] = [p.name || '', next[p.id] || []]; });
+  (Array.isArray(acts) ? acts : []).forEach(a => {
+    if (!a || a.placeable_id == null || !a.verb_phrase) return;
+    const outs = (a.output_item_stacks || []).filter(Array.isArray).map(s => [+s[0] || 0, +s[1] || 0, Array.isArray(s[2]) && s[2][0] === 1 ? 1 : 0]);
+    const lv = (a.level_requirements || []).filter(Array.isArray).map(l => [+l[0] || 0, +l[1] || 0]);
+    const res = [...slimOutcomes(a.on_destroy_outcomes).map(o => +o[1] || 0), +a.on_destroy_spawned_placeable_id || 0].filter(Boolean);
+    (act[a.placeable_id] || (act[a.placeable_id] = [])).push([a.verb_phrase, outs, lv, res]);
+  });
+  (Array.isArray(descs) ? descs : []).forEach(p => {
+    if (p && p.id != null) out[p.id] = [p.name || '', p.tier != null ? p.tier : -1, p.tag || '', p.icon_asset_name || '', grow[p.id] || null, act[p.id] || []];
+  });
   return out;
 }
+const PLACEABLES_FORMAT = 2;   // bump with slimPlaceables' shape, so a disk cache in an older shape is rebuilt
 async function getItemDefs() {
   if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
@@ -319,12 +338,12 @@ async function getItemDefs() {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
       // recipeOuts and placeables must be non-empty — a build whose fetch failed writes {} and must not stick for 7
-      // days (and a cache from before placeables existed is rebuilt once)
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && Object.keys(d.placeables || {}).length) { itemDefs = d; itemDefsBuilding = null; return d; }
+      // days (and a cache from before placeables existed, or with placeables in an older shape, is rebuilt once)
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && Object.keys(d.placeables || {}).length && d.placeablesFormat === PLACEABLES_FORMAT) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
-      const [items, cargos, equip, buildings, recipes, placeDescs, placeGrowth] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => []), ghJson('placeable_desc.json').catch(() => []), ghJson('placeable_growth_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), placeables: slimPlaceables(placeDescs, placeGrowth) };
+      const [items, cargos, equip, buildings, recipes, placeDescs, placeGrowth, placeActs] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => []), ghJson('placeable_desc.json').catch(() => []), ghJson('placeable_growth_desc.json').catch(() => []), ghJson('placeable_interaction_desc.json').catch(() => [])]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), placeables: slimPlaceables(placeDescs, placeGrowth, placeActs), placeablesFormat: placeActs.length ? PLACEABLES_FORMAT : 0 };   // no actions = a failed fetch: don't let the disk copy stick
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
