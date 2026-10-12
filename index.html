@@ -472,6 +472,26 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .pl-f-n{font-size:11px;color:var(--text3);font-weight:400}
 .pl-f-empty{padding:.6rem .75rem;font-size:12px;color:var(--text3)}
 .pl-f-foot{padding:.45rem .75rem;font-size:11px;color:var(--text3);border-top:1px solid var(--border)}
+.csec-meta{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.claim-picker{position:absolute;top:100%;left:0;z-index:50;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.5);width:330px;max-width:calc(100vw - 32px);max-height:440px;overflow-y:auto;margin-top:4px;padding:.6rem}
+.claim-picker input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;outline:none;margin-bottom:.3rem}
+.cp-row{display:flex;align-items:center;gap:.5rem;padding:.4rem .45rem;border-radius:6px;cursor:pointer;font-size:12px}
+.cp-row:hover{background:var(--bg3)}
+.cp-sub{font-size:11px;color:var(--text3)}
+.cp-note{padding:.5rem .45rem;font-size:12px;color:var(--text3)}
+.cp-head{margin-top:.45rem;padding:.45rem .45rem .2rem;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;border-top:1px solid var(--border)}
+.cp-stop{font-size:11px;color:var(--red-light);background:none;border:none;cursor:pointer;padding:0}
+.clog-list{padding:0 .75rem}
+.clog-row{display:flex;align-items:center;gap:.4rem;padding:.32rem 0;font-size:12px;color:var(--text2);border-top:1px solid var(--border);flex-wrap:wrap}
+.clog-row:first-child{border-top:0}
+.clog-t{color:var(--text3);font-size:11px;min-width:64px}
+.clog-who,.clog-q,.clog-item{color:var(--text)}
+.clog-who,.clog-q{font-weight:500}
+.clog-dep{color:var(--green-light)}
+.clog-wd{color:var(--amber-light)}
+.clog-where{color:var(--text3)}
+.clog-empty{padding:.5rem .75rem;font-size:12px;color:var(--text3)}
+.clog-more{margin:.3rem .75rem .5rem;font-size:12px;color:var(--teal-light);background:none;border:none;cursor:pointer;padding:0}
 .status-private{background:rgba(139,92,246,.15);color:var(--purple-light)}
 .craft-tabs{display:flex;gap:4px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:1rem}
 .craft-tab{padding:9px 20px;font-size:14px;font-weight:600;color:var(--text2);cursor:pointer;border-radius:7px;display:flex;align-items:center;gap:7px;transition:background .15s,color .15s,box-shadow .15s;user-select:none;white-space:nowrap}
@@ -1844,6 +1864,7 @@ function switchTab(tab, opts) {
   else if (tab === 'orders') renderOrdersTab();
   else if (tab === 'jsn') renderJsnTab();
   else if (tab === 'skills') renderExperienceTab();
+  else if (tab === 'inventory') renderInventoryTab();   // draws its own empty state — and tracked claims need no player
   else if (currentPlayer) loadTab(tab);
   bcRelaySync();   // connect the live-enemy relay when entering the Map tab, drop it when leaving
   if (tab === 'map' && typeof bcPlayersSchedule === 'function') bcPlayersSchedule();   // repaint the "everyone online" layer from the cache
@@ -3101,7 +3122,7 @@ function selectInvChip(key, lk) {
   // Multi-expand: each chip toggles its own container independently (was a single index = accordion).
   const s = invSelectedChip[key] instanceof Set ? invSelectedChip[key] : (invSelectedChip[key] = new Set());
   if (s.has(lk)) s.delete(lk); else s.add(lk);
-  if (isLookup) lookupRenderInvBody(); else fillPlayerInvCached(pid); // re-render just that section
+  if (isLookup) lookupRenderInvBody(); else if (pid.startsWith('c')) fillClaimInv(pid.slice(1)); else fillPlayerInvCached(pid); // re-render just that section ('c<id>' = a tracked claim's)
 }
 
 // ── Multi-player Inventory (one collapsible section per tracked player) ──────────
@@ -3118,10 +3139,11 @@ function buildSlotsFor(data) {
       const invName = inv.inventoryName || inv.buildingName || 'Unknown';
       const n = invName.toLowerCase();
       let locationType = 'personal';
-      if (inv._isHousing) locationType = 'housing';
+      if (inv._claimStore) locationType = 'claim';   // a tracked claim's shared storage (claimInvData)
+      else if (inv._isHousing) locationType = 'housing';
       else if (inv._isDeployable) locationType = 'personal';   // carts/boats/caches travel with the player
       else if (inv.claimName) locationType = n.includes('bank') ? 'bank' : 'storage';
-      allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, meta });
+      allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, group:inv._group||null, meta });
     });
   });
   return allSlots;
@@ -3226,11 +3248,18 @@ function inventoryContentHtml(data, q, pfx) {
   const invTierCol = m => (m && m.tier > 0) ? TIER_COLORS[Math.min(m.tier, TIER_COLORS.length-1)].c : 'var(--border)';
   const invSort = (a,b) => (invTierKey(a.meta) - invTierKey(b.meta)) || (a.meta?.name||'').localeCompare(b.meta?.name||'') || (b.quantity - a.quantity);
   const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
+  // A claim's Flat view sums each item across all its containers — one card per item ("in 3 containers"). A big
+  // claim holds thousands of stacks, and "how many do we have" is the question there.
+  if (invViewMode === 'flat' && data._claim) {
+    const where = {};
+    filtered.forEach(s => { const k = s.itemId + ':' + (s.itemType ?? 0); (where[k] || (where[k] = new Set())).add(s.inventoryName); });
+    return `<div class="inv-items-grid">${mergeInvSlots(filtered).sort(invSort).map(s => { const w = [...(where[s.itemId + ':' + (s.itemType ?? 0)] || [])]; const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag" title="${escHtml(w.join(', '))}">${w.length > 1 ? `${w.length} containers` : escHtml(w[0] || '')} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
+  }
   if (invViewMode === 'flat') {
     return `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
   }
   const byLocation = {};
-  filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, slots:[]}; byLocation[key].slots.push(s); });
+  filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:'') + (s.group?'|'+s.group:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, group:s.group, slots:[]}; byLocation[key].slots.push(s); });
   const personal = Object.values(byLocation).filter(l => l.locationType==='personal');
   const banks    = Object.values(byLocation).filter(l => l.locationType==='bank');
   const housing  = Object.values(byLocation).filter(l => l.locationType==='housing');
@@ -3242,7 +3271,7 @@ function inventoryContentHtml(data, q, pfx) {
     const collapsed = !!invSectionCollapsed[secKey];
     const sel = invSelectedChip[secKey] instanceof Set ? invSelectedChip[secKey] : new Set();
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocHidden[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing' && loc.locationType!=='claim') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocHidden[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     // Searching expands every container with a hit; otherwise every chip the user has toggled open (any number).
     const expandedLocs = q ? sorted : sorted.filter(loc => sel.has(_invLocId(secKey, loc)));
     const multi = expandedLocs.length > 1;
@@ -3251,7 +3280,7 @@ function inventoryContentHtml(data, q, pfx) {
     // sit in. NORMAL browsing: no bar — the active chip already names the container; when several are
     // open at once a slim non-interactive caption keeps their grids apart.
     const locBlock = (loc) => {
-      const sub = !loc.claimName ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
+      const sub = (!loc.claimName || loc.locationType==='claim') ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
       const lk = _invLocId(secKey, loc);
       const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
       if (!q) return `<div class="inv-chip-content">${multi ? `<div class="inv-locb-cap">${escHtml(loc.name)}${sub?` <span class="inv-locb-sub">${escHtml(sub)}</span>`:''}</div>` : ''}${renderItemGrid(mSlots)}</div>`;
@@ -3269,13 +3298,16 @@ function inventoryContentHtml(data, q, pfx) {
     const content = expandedLocs.length ? expandedLocs.map(locBlock).join('') : '';
     return `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${secKey}')"><span class="inv-group-name"><i class="ti ${icon}"></i>${title}</span><span class="inv-group-meta"></span><i class="ti ti-chevron-down" id="inv-sec-chev-${secKey}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${collapsed?'transform:rotate(-90deg)':''}"></i></div><div id="inv-sec-body-${secKey}"${collapsed?' style="display:none"':''}><div class="inv-chips-row">${chips.join('')}</div>${content}</div></div>`;
   }
-  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage');
+  // A tracked claim's containers: one section per kind (chests, stockpiles, cargo bins, item storage).
+  const claimLocs = Object.values(byLocation).filter(l => l.locationType === 'claim');
+  const claimSecs = claimLocs.length ? CLAIM_STORE_GROUPS.map(([label, , icon], gi) => renderSection(label, icon, claimLocs.filter(l => l.group === label), 'claim' + gi)).join('') : '';
+  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage') + claimSecs;
 }
 function fillPlayerInvCached(entityId) {
   const body = document.getElementById('psec-inv-' + entityId);
   if (body) body.innerHTML = inventoryContentHtml(invByPlayer[entityId], invSearch, String(entityId));
 }
-function renderAllInvBodies() { trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId)); }
+function renderAllInvBodies() { trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId)); fillClaimSections(); }
 function setInvView(mode) {
   invViewMode = mode;
   document.querySelectorAll('#inv-toggle button').forEach((b, i) => b.classList.toggle('active', (i===0) === (mode==='grouped')));
@@ -3284,11 +3316,13 @@ function setInvView(mode) {
 async function renderInventoryTab(silent) {
   const el = document.getElementById('tab-inventory');
   if (!el) return;
-  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
-  if (!silent || !document.getElementById('inv-toolbar')) {
+  // Nothing tracked yet: still offer the Claims picker — a claim's storage can be tracked without any player.
+  if (!trackedPlayers.length && !trackedClaims.length) { el.innerHTML = `<div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem">${claimPickerBtnHtml()}</div><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started — or track a claim's storage with Claims above</span></div>`; return; }
+  if (!silent || !document.getElementById('inv-sections')) {
     el.innerHTML = `
       <div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
         <button class="btn ctrl-btn" onclick="renderInventoryTab()"><i class="ti ti-refresh"></i> Refresh</button>
+        ${claimPickerBtnHtml()}
         <span style="flex:1"></span>
         <div id="inv-toggle" class="inv-toggle" style="margin:0">
           <button class="${invViewMode==='grouped'?'active':''}" onclick="setInvView('grouped')"><i class="ti ti-layout-list"></i> Grouped</button>
@@ -3296,13 +3330,16 @@ async function renderInventoryTab(silent) {
         </div>
         <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="search" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
       </div>
-      <div id="inv-sections">${playersFor('inventory').map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId, 'inventory')).join('')}</div>`;
+      <div id="inv-sections">${playersFor('inventory').map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId, 'inventory')).join('')}</div>
+      <div id="inv-claims"></div>`;
     const inp = document.getElementById('inv-search-input');
     inp.addEventListener('input', () => { invSearch = inp.value; if (!invSearch.trim()) invLocHidden = {}; renderAllInvBodies(); });
     updateLiveBtns();
   }
+  fillClaimSections();   // claims read the live cache directly — paint them before the players' (slower) load
   await loadInventories(silent);
   trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId));
+  fillClaimSections();
 }
 // ── THE single assembled inventory ──
 // invByPlayer is the ONE store; invData (the flat list Planner/Tool crafting/Networth/Tasks select from)
@@ -4818,6 +4855,9 @@ function liveQuerySet(ids, region){
   // Measured r8, 2026-10-11: 15 placeables + their 15 timers = 4.6 KB; bitjita's copy of the same list ~32 KB.
   ids.forEach(i => sqls.push(`SELECT * FROM placeable_state WHERE owner_entity_id = ${i}`,
     `SELECT placeable_growth_timer.* FROM placeable_growth_timer JOIN placeable_state ON placeable_growth_timer.entity_id = placeable_state.entity_id WHERE placeable_state.owner_entity_id = ${i}`));
+  // Tracked claims in THIS region: their shared storage, its containers and names, and its activity log
+  // (claimStorageSqls). Independent of the player roster — a claim can be tracked with nobody tracked at all.
+  trackedClaims.forEach(c => { if (claimRegion(c) === region) sqls.push(...claimStorageSqls(c)); });
   // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
   // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
   sqls.push('SELECT * FROM world_region_name_state', 'SELECT * FROM traveler_task_loop_timer');
@@ -4877,7 +4917,7 @@ function liveQuerySet(ids, region){
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
       'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
       'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state', 'health_state',
-      'placeable_state', 'placeable_growth_timer'],
+      'placeable_state', 'placeable_growth_timer', 'storage_log_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -4891,7 +4931,8 @@ function liveRegionName(rg){
 // only updates pause for the ~1s the redials take.
 function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
-  if (!ids.length && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer or a tracked creature type alone keeps the sockets up
+  const cKey = trackedClaims.map(c => String(c.entityId)).sort().join(',');
+  if (!ids.length && !cKey && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer, a tracked creature type or a tracked claim alone keeps the sockets up
   const pKey = ids.join(',');
   // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
@@ -4906,7 +4947,7 @@ function liveStart(){
   // save-on-change-only path meant a cleared (or never-written) blob stayed empty forever, so every
   // refresh paid a cold discovery round it should have skipped.
   if (!saved || liveRefsKey(saved) !== liveRefsKey(liveRefs)) liveSaveRefs(pKey, liveRefs);
-  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey();   // the layer's on/off + region scope is part of the query set
+  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey() + '#claims:' + cKey;   // the layer's on/off + region scope and the tracked claims are part of the query set
   // roster/ref redial → kick the doorbells again once re-complete, and re-arm the settle gate so the
   // NEXT first-flip (a roster change re-enters the boot path) waits for discovery all over again
   if (key !== liveRosterKey){ _liveCompleteKicked = false; _liveRefsSettled = false; }
@@ -4978,6 +5019,9 @@ function liveAddSubscribe(){
 }
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey) return;
+  // A tracked claim's activity query asks only for log entries newer than the newest one seen — re-derive it on
+  // every (re)connect, or a socket that drops after a busy afternoon would re-download everything since its dial.
+  if (trackedClaims.length){ const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
   let ws;
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
@@ -5277,6 +5321,306 @@ function fillPlayerCraftCached(entityId) {
   if (craftTabActive === 'placeable'){ plRender(b, entityId); return; }
   b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
 }
+// ══════ TRACKED CLAIMS — a claim's shared storage in the Inventory tab ══════
+// A group that keeps its stuff in claim storage (chests, stockpiles, cargo bins) instead of one player's house can
+// track the CLAIM: its containers show under the players, searchable like everything else, with who put in or took
+// what. Everything rides the live layer — four queries per claim on its region's socket (claimStorageSqls):
+//   · contents — inventory_state rows owned by the claim's buildings with player_owner 0. A member's Town Bank
+//                slots are their own, not shared (Gettland: 34 such rows, ~59k items) — that filter drops them.
+//   · which    — those containers' building_state rows (type name via /itemdefs building names)
+//   · names    — building_nickname_state ("Ingots", "Logs T6 up"…)
+//   · activity — storage_log_state (see CLAIM LOG below)
+// Claims are found with the relay's own claim search (relay-cache /claim?name=, partial and case-insensitive), straight
+// from the browser. If the live data hasn't arrived after a while, the relay's HTTP /claim/<id>/inventory stands in.
+// Measured 2026-10-12, Sages Sanctuary (r8): 94 containers, 1,782,478 items; storage queries 143 KB, identical to the
+// relay's own /claim/<id>/inventory view.
+const CLAIMS_KEY = 'bc_claims_v1', CLAIM_COLLAPSED_KEY = 'bc_claims_collapsed_v1';
+let trackedClaims = (() => { try { const v = JSON.parse(localStorage.getItem(CLAIMS_KEY) || '[]'); return Array.isArray(v) ? v.filter(c => c && c.entityId) : []; } catch(e){ return []; } })();
+let claimCollapsed = (() => { try { return new Set((JSON.parse(localStorage.getItem(CLAIM_COLLAPSED_KEY) || '[]') || []).map(String)); } catch(e){ return new Set(); } })();
+const claimSince = {};   // claimId -> when we started waiting for its live data (the HTTP stand-in waits 8s)
+trackedClaims.forEach(c => { claimSince[String(c.entityId)] = Date.now(); });
+function saveClaims(){ safeSetItem(CLAIMS_KEY, JSON.stringify(trackedClaims)); }
+const claimRegion = c => (c.regionId != null && c.regionId !== '') ? +c.regionId : regionOfEntity(c.entityId);
+// Region display names come from the live cache (world_region_name_state); remembered per device so the claim picker
+// can name a region while the live layer isn't up (nothing tracked yet).
+let claimRegionNames = (() => { try { return JSON.parse(localStorage.getItem('bc_region_names_v1') || '{}') || {}; } catch(e){ return {}; } })();
+function claimRegionName(rg){
+  const n = liveRegionName(rg);
+  if (n && claimRegionNames[rg] !== n){ claimRegionNames[rg] = n; safeSetItem('bc_region_names_v1', JSON.stringify(claimRegionNames)); }
+  return n || claimRegionNames[rg] || ('Region ' + rg);
+}
+function claimStorageSqls(c){
+  const C = String(c.entityId), L = claimLogFor(C), today = Math.floor(Date.now() / 86400000);
+  return [
+    `SELECT inventory_state.* FROM inventory_state JOIN building_state ON inventory_state.owner_entity_id = building_state.entity_id WHERE building_state.claim_entity_id = ${C} AND inventory_state.player_owner_entity_id = 0`,
+    `SELECT building_state.* FROM building_state JOIN inventory_state ON building_state.entity_id = inventory_state.owner_entity_id WHERE building_state.claim_entity_id = ${C} AND inventory_state.player_owner_entity_id = 0`,
+    `SELECT building_nickname_state.* FROM building_nickname_state JOIN building_state ON building_nickname_state.entity_id = building_state.entity_id WHERE building_state.claim_entity_id = ${C}`,
+    `SELECT storage_log_state.* FROM storage_log_state JOIN building_state ON storage_log_state.object_entity_id = building_state.entity_id WHERE building_state.claim_entity_id = ${C} AND storage_log_state.days_since_epoch >= ${today} AND storage_log_state.id > ${L.maxId || 0}`,
+  ];
+}
+// Containers sort into sections by kind; the last entry catches anything else.
+const CLAIM_STORE_GROUPS = [['Chests', /chest/i, 'ti-box'], ['Stockpiles', /stockpile/i, 'ti-stack-2'], ['Cargo bins', /cargo/i, 'ti-packages'], ['Item storage', /storage/i, 'ti-archive'], ['Other storage', /./, 'ti-box-multiple']];
+const claimNames = {};   // claimId -> Map(building id -> the container's display name), shared with the activity list
+const claimHttp = {};    // claimId -> { ts, d, busy } — the relay HTTP stand-in
+// One claim's storage as an inventory "data" object (the shape inventoryContentHtml draws). Containers are named by
+// their nickname, else their building type, made unique within a section ("Unused", "Unused #2") because chips and
+// their open/closed state are keyed by name. null while there's nothing to show yet.
+function claimInvData(c){
+  const cid = String(c.entityId), rg = claimRegion(c), defs = gameItemDefs || {}, conn = liveConns[rg];
+  const blds = new Map(liveRows('building_state', r => String(r.claim_entity_id) === cid).map(r => [String(r.entity_id), r]));
+  const rows = liveRows('inventory_state', r => blds.has(String(r.owner_entity_id)) && String(r.player_owner_entity_id) === '0');
+  let list, live = true;
+  if (rows.length || (conn && conn.snapshotTs > 0 && conn.key === liveRosterKey)){
+    const nick = new Map(liveRows('building_nickname_state', r => blds.has(String(r.entity_id))).map(r => [String(r.entity_id), String(r.nickname || '').trim()]));
+    list = rows.map(r => { const b = blds.get(String(r.owner_entity_id)); return { id: String(r.entity_id), bid: String(b.entity_id), type: (defs.buildings || {})[b.building_description_id] || 'Storage', nick: nick.get(String(b.entity_id)) || '', items: livePocketItems(r) }; });
+  } else {
+    const h = claimHttp[cid];
+    if (!h || !h.d) return null;
+    live = false; list = [];
+    ((h.d && h.d.dimensions) || []).forEach(dm => (dm.buildings || []).forEach(b => list.push({ id: String(b.entity_id), bid: String(b.entity_id), type: b.name || 'Storage', nick: String(b.nickname || '').trim(),
+      items: (b.items || []).map(it => ({ itemId: +it.item_id, itemType: /cargo/i.test(String(it.item_type)) ? 1 : 0, quantity: +it.quantity || 0 })).filter(it => it.quantity > 0) })));
+  }
+  list.forEach(x => { x.group = CLAIM_STORE_GROUPS.find(([, re]) => re.test(x.type))[0]; x.name = x.nick || x.type; });
+  list.sort((a, b) => a.group.localeCompare(b.group) || a.name.localeCompare(b.name) || a.bid.localeCompare(b.bid));
+  const seen = {}, names = new Map();
+  list.forEach(x => { const k = x.group + '|' + x.name.toLowerCase(); seen[k] = (seen[k] || 0) + 1; if (seen[k] > 1) x.name += ' #' + seen[k]; names.set(x.bid, x.name); });
+  claimNames[cid] = names;
+  let total = 0; list.forEach(x => x.items.forEach(it => { total += it.quantity; }));
+  return { _claim: true, live, containers: list.length, total, items: defs.items || {}, cargos: defs.cargos || {},
+    inventories: list.map(x => ({ entityId: x.id, inventoryName: x.name, claimName: c.name, regionId: rg, _claimStore: true, _group: x.group,
+      pockets: x.items.map(it => ({ contents: { itemId: it.itemId, itemType: it.itemType, quantity: it.quantity } })) })) };
+}
+function claimHttpFetch(c){
+  const cid = String(c.entityId), h = claimHttp[cid] || (claimHttp[cid] = { ts: 0, d: null, busy: false });
+  if (h.busy || Date.now() - h.ts < 60000) return;
+  h.busy = true; h.ts = Date.now();
+  fetch(`${RELAY_HTTP}/claim/${cid}/inventory`).then(r => r.ok ? r.json() : null).then(d => { if (d && d.dimensions) h.d = d; }).catch(() => {})
+    .finally(() => { h.busy = false; fillClaimInv(cid); });
+}
+// ── The claim sections (under the players in the Inventory tab) ──
+function claimSectionEl(c){
+  const cid = String(c.entityId), shut = claimCollapsed.has(cid), el = document.createElement('div');
+  el.className = 'player-section psec claim-section'; el.dataset.plKey = cid;
+  el.style.cssText = 'margin-bottom:1.1rem;position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden';
+  el.innerHTML = `<div class="player-section-hdr" onclick="toggleClaimCollapse('${escHtml(cid)}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
+      <i class="ti ti-chevron-${shut ? 'right' : 'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
+      <i class="ti ti-building-community" style="color:var(--teal-light);font-size:14px"></i>
+      <span style="font-weight:600;color:var(--text);white-space:nowrap">${escHtml(c.name || 'Claim')}</span>
+      <span class="csec-meta" id="csec-meta-${escHtml(cid)}"></span>
+      <span style="flex:1"></span>
+      <i class="ti ti-x" title="Stop tracking this claim" onclick="event.stopPropagation();untrackClaim('${escHtml(cid)}')" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
+    </div>
+    <div id="csec-body-${escHtml(cid)}" style="display:${shut ? 'none' : ''};padding:.65rem .75rem"><div id="csec-inv-${escHtml(cid)}">${loading()}</div><div id="csec-log-${escHtml(cid)}" style="margin-top:.5rem"></div></div>`;
+  return el;
+}
+function toggleClaimCollapse(cid, hdr){
+  cid = String(cid);
+  const shut = !claimCollapsed.has(cid);
+  if (shut) claimCollapsed.add(cid); else claimCollapsed.delete(cid);
+  safeSetItem(CLAIM_COLLAPSED_KEY, JSON.stringify([...claimCollapsed]));
+  const body = document.getElementById('csec-body-' + cid); if (body) body.style.display = shut ? 'none' : '';
+  const chev = hdr && hdr.querySelector('.psec-chev'); if (chev) chev.className = `ti ti-chevron-${shut ? 'right' : 'down'} psec-chev`;
+}
+// Keep one section per tracked claim (kept, never rebuilt), then fill each one's storage and activity.
+function fillClaimSections(){
+  const host = document.getElementById('inv-claims'); if (!host) return;
+  plSync(host, trackedClaims.map(c => ({ key: String(c.entityId), c })), it => claimSectionEl(it.c), () => {});
+  trackedClaims.forEach(c => { fillClaimInv(c.entityId); claimLogRender(c.entityId); });
+}
+const claimWaitT = {};
+function fillClaimInv(cid){
+  cid = String(cid);
+  const c = trackedClaims.find(x => String(x.entityId) === cid), body = document.getElementById('csec-inv-' + cid);
+  if (!c || !body) return;
+  if (!gameItemDefs) loadGameItemDefs().then(() => { fillClaimInv(cid); claimLogRender(cid); }).catch(() => {});
+  const d = claimInvData(c), rg = claimRegion(c);
+  const where = `${claimRegionName(rg)} · R${rg}${c.tier ? ' · T' + c.tier : ''}`;
+  const meta = document.getElementById('csec-meta-' + cid);
+  if (meta) meta.textContent = d ? `${where} · ${d.containers} container${d.containers !== 1 ? 's' : ''} · ${fmtNum(d.total)} items${d.live ? '' : ' · not live'}` : where;
+  if (!d){
+    // Nothing yet: wait for the live data, and after 8s ask the relay's HTTP copy instead.
+    if (Date.now() - (claimSince[cid] || 0) > 8000) claimHttpFetch(c);
+    else if (!claimWaitT[cid]) claimWaitT[cid] = setTimeout(() => { claimWaitT[cid] = null; fillClaimInv(cid); }, 8500);
+    if (!body.querySelector('.loading')) body.innerHTML = loading();
+    return;
+  }
+  body.innerHTML = d.inventories.length ? inventoryContentHtml(d, invSearch, 'c' + cid)
+    : '<div class="empty" style="padding:1rem"><i class="ti ti-box-off"></i><span>No storage in this claim</span></div>';
+}
+// ── Claims picker (toolbar button) ──
+function claimPickerBtnHtml(){
+  return `<span id="claim-pick-wrap" style="position:relative"><button class="btn ctrl-btn" id="claim-pick-btn" onclick="toggleClaimPicker()" title="Track a claim's shared storage">${claimBtnInner()}</button></span>`;
+}
+const claimBtnInner = () => `<i class="ti ti-building-community"></i> Claims${trackedClaims.length ? ` <span style="color:var(--text3)">(${trackedClaims.length})</span>` : ''}`;
+let claimPickQ = '', claimPickRes = [], claimPickT = null, claimPickErr = '';
+function toggleClaimPicker(){
+  if (document.getElementById('claim-picker')){ claimPickerClose(); return; }
+  const wrap = document.getElementById('claim-pick-wrap'); if (!wrap) return;
+  const p = document.createElement('div'); p.id = 'claim-picker'; p.className = 'claim-picker';
+  p.innerHTML = `<div class="pl-f-head" style="padding:0 0 .45rem"><span>Track a claim's storage</span></div>
+    <input type="search" id="claim-pick-q" placeholder="Claim name…" autocomplete="off" value="${escHtml(claimPickQ)}">
+    <div id="claim-pick-res"></div><div id="claim-pick-tracked"></div>`;
+  wrap.appendChild(p);
+  const inp = p.querySelector('#claim-pick-q');
+  inp.addEventListener('input', () => { claimPickQ = inp.value; clearTimeout(claimPickT); claimPickT = setTimeout(claimPickSearch, 350); });
+  inp.focus();
+  claimPickRender();
+  document.addEventListener('mousedown', claimPickOutside, true);
+}
+function claimPickOutside(e){ const w = document.getElementById('claim-pick-wrap'); if (!w || !w.contains(e.target)) claimPickerClose(); }
+function claimPickerClose(){ const p = document.getElementById('claim-picker'); if (p) p.remove(); document.removeEventListener('mousedown', claimPickOutside, true); }
+async function claimPickSearch(){
+  const q = claimPickQ.trim();
+  claimPickErr = '';
+  if (q.length < 2){ claimPickRes = []; claimPickRender(); return; }
+  try {
+    const r = await fetch(`${RELAY_HTTP}/claim?name=${encodeURIComponent(q)}`);
+    const d = r.ok ? await r.json() : [];
+    if (q !== claimPickQ.trim()) return;   // a newer search owns the list
+    claimPickRes = Array.isArray(d) ? d.slice(0, 10) : [];
+  } catch(e){ claimPickRes = []; claimPickErr = "Claim search isn't answering right now"; }
+  claimPickRender();
+}
+function claimPickRender(){
+  const res = document.getElementById('claim-pick-res'), tr = document.getElementById('claim-pick-tracked'); if (!res) return;
+  const isT = id => trackedClaims.some(c => String(c.entityId) === String(id));
+  window._claimPick = claimPickRes;   // rows pick by index — claim names stay out of the onclick quoting
+  res.innerHTML = claimPickErr ? `<div class="cp-note">${escHtml(claimPickErr)}</div>`
+    : !claimPickRes.length ? (claimPickQ.trim().length >= 2 ? '<div class="cp-note">No claims found</div>' : '')
+    : claimPickRes.map((c, i) => { const rg = +c.region, on = isT(c.entity_id);
+        return `<div class="cp-row" onclick="claimPickToggle(${i})"><i class="ti ${on ? 'ti-check' : 'ti-plus'}" style="color:${on ? 'var(--green-light)' : 'var(--text3)'}"></i>` +
+          `<div style="flex:1;min-width:0"><div style="color:var(--text);font-weight:500">${escHtml(c.name || 'Claim')}</div><div class="cp-sub">${escHtml(claimRegionName(rg))} · R${rg}${c.tier ? ' · T' + c.tier : ''}${c.owner_player_username ? ' · ' + escHtml(c.owner_player_username) : ''}</div></div>` +
+          `${on ? '<span class="cp-sub">tracking</span>' : ''}</div>`; }).join('');
+  if (tr) tr.innerHTML = !trackedClaims.length ? '' : '<div class="cp-head">Tracking</div>' + trackedClaims.map(c =>
+    `<div class="cp-row" style="cursor:default"><i class="ti ti-building-community" style="color:var(--teal-light)"></i><div style="flex:1;min-width:0;color:var(--text)">${escHtml(c.name || 'Claim')}</div><button class="cp-stop" onclick="untrackClaim('${escHtml(String(c.entityId))}')">Stop</button></div>`).join('');
+}
+function claimPickToggle(i){
+  const c = (window._claimPick || [])[i]; if (!c) return;
+  if (trackedClaims.some(x => String(x.entityId) === String(c.entity_id))) untrackClaim(String(c.entity_id));
+  else trackClaim({ entityId: String(c.entity_id), name: c.name || 'Claim', regionId: +c.region, tier: c.tier || null });
+}
+function claimsChanged(){
+  saveClaims();
+  liveStart();   // the query set changed → one redial (stops the layer when nothing at all is tracked)
+  claimPickRender();
+  const btn = document.getElementById('claim-pick-btn'); if (btn) btn.innerHTML = claimBtnInner();
+  if (document.getElementById('inv-claims') && (trackedPlayers.length || trackedClaims.length)) fillClaimSections();
+  else if (currentTab === 'inventory') renderInventoryTab();
+}
+function trackClaim(c){
+  if (trackedClaims.some(x => String(x.entityId) === String(c.entityId))) return;
+  trackedClaims.push(c); claimSince[String(c.entityId)] = Date.now();
+  claimsChanged();
+}
+function untrackClaim(cid){
+  cid = String(cid);
+  trackedClaims = trackedClaims.filter(c => String(c.entityId) !== cid);
+  delete claimLog[cid]; delete claimNames[cid]; delete claimHttp[cid]; claimLogSaveSoon();
+  claimsChanged();
+}
+// ── CLAIM LOG — "who put in / took what" ──
+// The game's own storage log (storage_log_state: deposit or withdrawal, item, quantity, who, when, which container),
+// one semijoin per tracked claim. The FIRST time a claim is tracked on this device it loads today's entries (UTC day —
+// the log is indexed by day); after that only entries newer than the newest one seen (id > maxId, also indexed), so
+// reloads, redials and reconnects cost next to nothing (liveOpen re-derives the query each time). Busy claims are
+// busy — Sages Sanctuary logged ~5,400 entries on 2026-10-11, ~350 B each — so the newest CLAIM_LOG_KEEP per claim are
+// kept (in memory and localStorage) and the cache's copy is emptied as it's read.
+// `data` is a sum: [1, withdrawItem] / [2, depositItem], payload {item_id, quantity, item_type: [0 item | 1 cargo]}
+// (named in snapshots, positional in deltas).
+const CLAIM_LOG_KEY = 'bc_claim_log_v1', CLAIM_LOG_KEEP = 300;
+let claimLog = {};   // claimId -> { maxId, ev: Map(id -> { id, ts, who, dep, itemId, itemType, qty, b }) }
+try {
+  const d = JSON.parse(localStorage.getItem(CLAIM_LOG_KEY) || '{}');
+  Object.keys(d || {}).forEach(cid => { const x = d[cid] || {}; claimLog[cid] = { maxId: +x.maxId || 0,
+    ev: new Map((x.ev || []).map(a => [a[0], { id: a[0], ts: a[1], who: a[2], dep: !!a[3], itemId: a[4], itemType: a[5], qty: a[6], b: a[7] }])) }; });
+} catch(e){}
+function claimLogFor(cid){ return claimLog[cid] || (claimLog[cid] = { maxId: 0, ev: new Map() }); }
+let _claimLogSaveT = null;
+function claimLogSaveSoon(){
+  clearTimeout(_claimLogSaveT);
+  _claimLogSaveT = setTimeout(() => {
+    const out = {};
+    trackedClaims.forEach(c => { const L = claimLog[String(c.entityId)]; if (L) out[String(c.entityId)] = { maxId: L.maxId, ev: [...L.ev.values()].map(e => [e.id, e.ts, e.who, e.dep ? 1 : 0, e.itemId, e.itemType, e.qty, e.b]) }; });
+    safeSetItem(CLAIM_LOG_KEY, JSON.stringify(out));
+  }, 2000);
+}
+function claimLogEvent(r){
+  const d = r.data, v = Array.isArray(d) ? +d[0] : -1, p = Array.isArray(d) ? d[1] : null;
+  if ((v !== 1 && v !== 2) || !p) return null;
+  const f = (k, i) => Array.isArray(p) ? p[i] : p[k], t = f('item_type', 2);
+  return { id: +r.id, ts: +r.timestamp || 0, who: String(r.subject_name || '?'), dep: v === 2, itemId: +f('item_id', 0),
+    itemType: Array.isArray(t) ? +t[0] : (+t || 0), qty: +f('quantity', 1) || 0, b: String(r.object_entity_id) };
+}
+// Move the log rows the cache holds into each claim's list (matched through the container's claim). A row whose
+// container isn't known yet stays in the cache for the next pass.
+function claimLogIngest(){
+  const t = liveCache.storage_log_state; if (!t || !trackedClaims.length) return;
+  const ids = new Set(trackedClaims.map(c => String(c.entityId))), bClaim = new Map();
+  liveRows('building_state', r => ids.has(String(r.claim_entity_id))).forEach(r => bClaim.set(String(r.entity_id), String(r.claim_entity_id)));
+  const changed = new Set();
+  Object.values(t).forEach(slice => slice.forEach((r, pk) => {
+    const cid = bClaim.get(String(r.object_entity_id)); if (!cid) return;
+    slice.delete(pk);
+    const L = claimLogFor(cid); if (+r.id > L.maxId) L.maxId = +r.id;
+    const e = claimLogEvent(r);
+    if (e && !L.ev.has(e.id)){ L.ev.set(e.id, e); changed.add(cid); }
+  }));
+  changed.forEach(cid => { const L = claimLog[cid]; if (L.ev.size > CLAIM_LOG_KEEP){ const keep = [...L.ev.keys()].sort((a, b) => b - a).slice(0, CLAIM_LOG_KEEP); L.ev = new Map(keep.map(k => [k, L.ev.get(k)])); } });
+  if (changed.size){ claimLogSaveSoon(); changed.forEach(cid => claimLogRender(cid)); }
+}
+onLiveChange(evs => { if (evs.some(e => e.table === 'storage_log_state' || (e.table === 'building_state' && liveCache.storage_log_state))) claimLogIngest(); });
+// The Activity list under a claim's storage: newest first, 25 at a time, filtered by the Inventory search box (item or
+// player). Rows are keyed and kept (the same keyed sync the Placeables view uses), so a new entry slides
+// in at the top without redrawing the rest.
+const claimLogLimit = {};
+function claimLogRender(cid){
+  cid = String(cid);
+  const wrap = document.getElementById('csec-log-' + cid); if (!wrap) return;
+  const secKey = 'c' + cid + '|log';
+  if (!wrap.firstElementChild){
+    const shut = !!invSectionCollapsed[secKey];
+    wrap.innerHTML = `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${escHtml(secKey)}')"><span class="inv-group-name"><i class="ti ti-history"></i>Activity</span><span class="inv-group-meta clog-meta" style="font-size:11px;color:var(--text3)"></span>` +
+      `<i class="ti ti-chevron-down" id="inv-sec-chev-${escHtml(secKey)}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${shut ? 'transform:rotate(-90deg)' : ''}"></i></div>` +
+      `<div id="inv-sec-body-${escHtml(secKey)}"${shut ? ' style="display:none"' : ''}><div class="clog-list"></div><div class="clog-foot"></div></div></div>`;
+  }
+  const L = claimLog[cid], names = claimNames[cid] || new Map(), q = (invSearch || '').trim().toLowerCase();
+  let rows = L ? [...L.ev.values()].sort((a, b) => b.id - a.id).map(e => ({ e, item: claimLogItem(e), where: names.get(e.b) || 'storage' })) : [];
+  if (q) rows = rows.filter(x => x.item.toLowerCase().includes(q) || x.e.who.toLowerCase().includes(q));   // items and players — not container names ("Potions and Consumables" would match every scroll in it)
+  const limit = claimLogLimit[cid] || 25;
+  wrap.querySelector('.clog-meta').textContent = !rows.length ? '' : q ? `${rows.length} matching` : rows.length > limit ? `latest ${limit} of ${rows.length}` : `${rows.length}`;
+  plSync(wrap.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
+  wrap.querySelector('.clog-foot').innerHTML = !rows.length
+    ? `<div class="clog-empty">${q ? 'No activity matches' : 'No deposits or withdrawals yet — new ones show up here as they happen'}</div>`
+    : rows.length > limit ? `<button class="clog-more" onclick="claimLogMore('${escHtml(cid)}')">Show more</button>` : '';
+}
+function claimLogMore(cid){ claimLogLimit[cid] = Math.min(CLAIM_LOG_KEEP, (claimLogLimit[cid] || 25) + 50); claimLogRender(cid); }
+function claimLogItem(e){ const m = gameItemDefs && (e.itemType === 1 ? gameItemDefs.cargos : gameItemDefs.items); return itemLabel(m && m[e.itemId], e.itemId, e.itemType); }
+function claimLogRowEl(x){
+  const el = document.createElement('div'), e = x.e;
+  el.className = 'clog-row'; el.dataset.plKey = x.key;
+  const m = gameItemDefs && (e.itemType === 1 ? gameItemDefs.cargos : gameItemDefs.items), meta = m && m[e.itemId];
+  el.innerHTML = `<span class="clog-t" data-ts="${e.ts}" title="${escHtml(e.ts ? new Date(e.ts).toLocaleString() : '')}">${clogTime(e.ts)}</span><span class="clog-who">${escHtml(e.who)}</span>` +
+    `<span class="${e.dep ? 'clog-dep' : 'clog-wd'}">${e.dep ? 'put in' : 'took'}</span><span class="clog-q">${e.qty.toLocaleString()}×</span>` +
+    `${gameIconImg(meta && meta.iconAssetName, 18)}<span class="clog-item">${escHtml(x.item)}</span><span class="clog-where"></span>`;
+  claimLogRowPatch(el, x);
+  return el;
+}
+function claimLogRowPatch(el, x){
+  const it = el.querySelector('.clog-item'); if (it && it.textContent !== x.item) it.textContent = x.item;   // names land once the game data does
+  const w = el.querySelector('.clog-where'), txt = `${x.e.dep ? 'into' : 'from'} ${x.where}`; if (w && w.textContent !== txt) w.textContent = txt;
+}
+function clogTime(ts){
+  if (!ts) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 45) return 'just now';
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm ago';
+  const d = new Date(ts), t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + t;
+}
+setInterval(() => {   // "just now" → "3m ago" while the list is on screen
+  if (document.hidden || currentTab !== 'inventory') return;
+  document.querySelectorAll('.clog-t[data-ts]').forEach(el => { const t = clogTime(+el.dataset.ts); if (el.textContent !== t) el.textContent = t; });
+}, 30000);
 // ── PLACEABLES (Crafts → Placeables) ──
 // Things a player has put in the world that grow, vanish or wait for them: planted trees, tree seeds and stashes,
 // fishing traps and nets, rice paddies, animal traps, drying bricks… The list rides the live layer like crafts do
@@ -13395,7 +13739,7 @@ async function renderGroupCraft(){
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
   try { localStorage.removeItem('bcTabCache'); } catch(e){}   // §9.1: retired — reclaim its quota once
-  if (trackedPlayers.length){
+  if (trackedPlayers.length || trackedClaims.length){
     // Discover the live region list BEFORE dialling, so a region the relay has added (or dropped) is
     // picked up without a code change. Falls back to the hardcoded list if /health can't be reached.
     loadRelayRegions().then(() => liveStart());   // 13 held sockets, one Subscribe each — everything live from here (OVERHAUL §2)
