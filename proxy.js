@@ -299,18 +299,32 @@ function slimRecipeOuts(rows) {
   });
   return out;
 }
+// placeable_desc + placeable_growth_desc → { placeableId: [name, [[chance, nextPlaceableId], …]] } — what a growing
+// placeable (sapling, rice seedling, fishing trap…) turns into, for the Crafts tab's Placeables view. outcomes_v2 is
+// a SATS option, [0, [[probability, placeable_id, radius_min, radius_max], …]]; a next id of 0 means it vanishes
+// (tree seeds and food stashes go after 30s if nobody gathers them). No growth rule → no outcomes.
+function slimPlaceables(descs, growth) {
+  const next = {}, out = {};
+  (Array.isArray(growth) ? growth : []).forEach(g => {
+    const v = g && g.outcomes_v2, list = Array.isArray(v) && v[0] === 0 && Array.isArray(v[1]) ? v[1] : [];
+    if (g && g.placeable_id != null) next[g.placeable_id] = list.filter(Array.isArray).map(o => [+o[0] || 0, +o[1] || 0]);
+  });
+  (Array.isArray(descs) ? descs : []).forEach(p => { if (p && p.id != null) out[p.id] = [p.name || '', next[p.id] || []]; });
+  return out;
+}
 async function getItemDefs() {
   if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
   itemDefsBuilding = (async () => {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
-      // recipeOuts must be non-empty — a build whose recipes fetch failed writes {} and must not stick for 7 days
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length) { itemDefs = d; itemDefsBuilding = null; return d; }
+      // recipeOuts and placeables must be non-empty — a build whose fetch failed writes {} and must not stick for 7
+      // days (and a cache from before placeables existed is rebuilt once)
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && Object.keys(d.placeables || {}).length) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
-      const [items, cargos, equip, buildings, recipes] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes) };
+      const [items, cargos, equip, buildings, recipes, placeDescs, placeGrowth] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => []), ghJson('placeable_desc.json').catch(() => []), ghJson('placeable_growth_desc.json').catch(() => [])]);
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), placeables: slimPlaceables(placeDescs, placeGrowth) };
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
@@ -478,7 +492,7 @@ http.createServer((req, res) => {
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
       // Hand-rolled rather than via sendJson because this route carries its own ETag/Cache-Control.
       // It's ~1MB of name/icon lookups, so it's the single biggest response the app requests.
-      const body = Buffer.from(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {}, recipeOuts: d.recipeOuts || {} }));
+      const body = Buffer.from(JSON.stringify({ items: d.items, cargos: d.cargos, equip: d.equip || {}, buildings: d.buildings || {}, recipeOuts: d.recipeOuts || {}, placeables: d.placeables || {} }));
       const hdr = { 'Content-Type': 'application/json', 'ETag': etag, 'Cache-Control': 'public, max-age=86400' };
       if (wantsGzip(req)){
         return zlib.gzip(body, (err, gz) => {

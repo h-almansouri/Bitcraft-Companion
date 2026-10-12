@@ -456,6 +456,10 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .status-active{background:rgba(29,158,117,.15);color:var(--teal-light)}
 .status-passive{background:rgba(186,117,23,.15);color:var(--amber-light)}
 .status-idle{background:var(--bg4);color:var(--text3)}
+.status-attn{background:rgba(226,75,74,.15);color:#f09595}
+.pl-meta{font-size:11px;color:var(--text3);margin-top:3px;display:flex;align-items:center;gap:.35rem;flex-wrap:wrap}
+.pl-verb{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--bg4);color:var(--text2)}
+.pl-icon-fb{font-size:22px;color:var(--text3);width:28px;text-align:center;flex-shrink:0}
 .status-private{background:rgba(139,92,246,.15);color:var(--purple-light)}
 .craft-tabs{display:flex;gap:4px;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:1rem}
 .craft-tab{padding:9px 20px;font-size:14px;font-weight:600;color:var(--text2);cursor:pointer;border-radius:7px;display:flex;align-items:center;gap:7px;transition:background .15s,color .15s,box-shadow .15s;user-select:none;white-space:nowrap}
@@ -1775,7 +1779,7 @@ async function lookupSearch(q){
   } catch(e){ el.innerHTML = '<div class="search-result-item" style="color:var(--red-light)">Search failed</div>'; }
 }
 function switchTab(tab, opts) {
-  stopPassiveCraftTimer(); stopCraftActiveTick();   // both belong to the Crafts tab; re-armed by renderCraftingTab
+  stopPassiveCraftTimer(); stopCraftActiveTick(); stopPlaceableTimers();   // all belong to the Crafts tab; re-armed by renderCraftingTab
   lookupSetMode(tab === 'lookup');   // the lookup swaps the sidebar nav for its own; any other tab restores it
   if (currentTab === 'opencrafts' && tab !== 'opencrafts') stopOpenCraftLive();  // pause the claim-craft poll when leaving
   document.querySelectorAll('.nav-item').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -5246,7 +5250,144 @@ async function fetchPlayerCrafts(id) {
 }
 function fillPlayerCraftCached(entityId) {
   const b = document.getElementById('psec-craft-' + entityId);
-  if (b) b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
+  if (!b) return;
+  if (craftTabActive === 'placeable'){ b.innerHTML = placeablesHtml(placeablesByPlayer[String(entityId)]); return; }
+  b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
+}
+// ── PLACEABLES (Crafts → Placeables) ──
+// Things a player has put in the world that change on a timer: planted trees, fishing traps and nets, rice paddies,
+// animal traps, drying bricks, geodes… bitjita's /players/<id>/placeables returns each one ready to show — name,
+// icon, tier, region, its timer (nextStateAt; nextStateAtMax when the game rolls the time from a range), what you
+// can do with it (Chop, Gather…) and an urgency: ready / needs_attention / growing / idle. What it turns into comes
+// from the game data (gameItemDefs.placeables, id → [name, [[chance, nextId]…]]); nextId 0 = it vanishes — tree
+// seeds and food stashes are gone 30s after they appear unless someone gathers them.
+// Read while the Placeables view is open: on opening, every minute, and shortly after a timer runs out.
+let placeablesByPlayer = {};   // entityId -> { ts, data } | { ts, error, data (last good, if any) }
+let _plPollTimer = null, _plTickTimer = null, _plRefetchT = null, _plLoading = false, _plForcedAt = 0;
+const PL_STALE_MS = 45000;
+const PL_URGENCY = { ready: 0, needs_attention: 1, growing: 2, idle: 3 };
+async function loadPlaceables(force){
+  if (_plLoading || !trackedPlayers.length) return;
+  _plLoading = true;
+  if (force) _plForcedAt = Date.now();
+  try {
+    loadGameItemDefs().then(() => { if (currentTab === 'crafting' && craftTabActive === 'placeable') trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId)); }).catch(() => {});   // the "grows into" names
+    const now = Date.now();
+    await Promise.all(trackedPlayers.map(async p => {
+      const id = String(p.entityId), c = placeablesByPlayer[id];
+      if (c && !force && now - c.ts < PL_STALE_MS) return;
+      if (c && c.data && isPlayerPaused(id)) return;   // paused: keep what we have
+      try {
+        if (bitjitaDisabled()) throw new Error('placeables come from bitjita (off in relay-only test mode)');
+        placeablesByPlayer[id] = { ts: Date.now(), data: await apiFetch(`/api/players/${id}/placeables`) };
+      } catch(e){ placeablesByPlayer[id] = { ts: Date.now(), error: (e && e.message) || 'failed to load', data: c && c.data }; }
+      if (currentTab === 'crafting' && craftTabActive === 'placeable') fillPlayerCraftCached(id);
+    }));
+  } finally { _plLoading = false; }
+}
+function startPlaceableTimers(){
+  stopPlaceableTimers();
+  _plPollTimer = setInterval(() => { if (!document.hidden && currentTab === 'crafting' && craftTabActive === 'placeable') loadPlaceables(); }, 60000);
+  _plTickTimer = setInterval(placeableTick, 1000);
+}
+function stopPlaceableTimers(){
+  if (_plPollTimer){ clearInterval(_plPollTimer); _plPollTimer = null; }
+  if (_plTickTimer){ clearInterval(_plTickTimer); _plTickTimer = null; }
+  if (_plRefetchT){ clearTimeout(_plRefetchT); _plRefetchT = null; }
+}
+// Count the timers down locally. One that runs out means that placeable has moved on — read again a few seconds
+// later (bitjita needs a moment to see it), at most every 20s however many run out together.
+function placeableTick(){
+  if (document.hidden) return;
+  const now = Date.now(); let due = false;
+  document.querySelectorAll('#tab-crafting [data-pl-end]').forEach(el => {
+    const end = +el.dataset.plEnd;
+    el.textContent = plCountdown(end, el.dataset.plBy === '1');
+    if (end <= now) due = true;
+  });
+  if (due && !_plRefetchT && now - _plForcedAt > 20000) _plRefetchT = setTimeout(() => { _plRefetchT = null; loadPlaceables(true); }, 4000);
+}
+// "in 6m 12s", or "any moment" once it's due; the "all by" figure reads "1m 51s", then "now".
+function plCountdown(end, by){
+  const left = Math.floor((end - Date.now()) / 1000);
+  return left >= 1 ? (by ? '' : 'in ') + fmtTimeLeft(left) : (by ? 'now' : 'any moment');
+}
+// What a placeable turns into, from the game data: "Fertile Spruce Tree", "Healthy … (80%) / Sick … (20%)", or
+// gone (every outcome is "nothing").
+function placeableNext(id){
+  const defs = gameItemDefs && gameItemDefs.placeables, e = defs && defs[id], outs = (e && e[1]) || [];
+  if (!outs.length) return null;
+  if (outs.every(o => !o[1])) return { gone: true };
+  const total = outs.reduce((s, o) => s + o[0], 0) || 1;
+  const names = outs.filter(o => o[1]).map(o => { const n = (defs[o[1]] || [])[0] || ('#' + o[1]); return outs.length > 1 ? `${n} (${Math.round(o[0] / total * 100)}%)` : n; });
+  return { names: names.join(' / ') };
+}
+function placeablesHtml(entry){
+  if (!entry) return loading();
+  const d = entry.data;
+  if (!d) return errBox(new Error(entry.error || 'failed to load'));
+  const list = d.instances || [];
+  if (!list.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-plant-2"></i><span>No placeables</span></div>';
+  // Region → placeable type. A group's status is its most urgent member's; its timer is the soonest one, with
+  // "all by" the latest when they spread out.
+  const byRegion = {};
+  list.forEach(x => {
+    const pl = x.placeable || {}, rk = x.regionId != null ? String(x.regionId) : '?';
+    const r = byRegion[rk] || (byRegion[rk] = { regionId: x.regionId, regionName: x.regionName, n: 0, groups: {} });
+    r.n++;
+    const g = r.groups[x.placeableId] || (r.groups[x.placeableId] = { id: x.placeableId, name: pl.name || ('Placeable #' + x.placeableId), tier: pl.tier, icon: pl.iconAssetName, n: 0, urg: {}, ends: [], latest: 0, verbs: new Map() });
+    g.n++;
+    const u = PL_URGENCY[x.urgency] != null ? x.urgency : 'idle';
+    g.urg[u] = (g.urg[u] || 0) + 1;
+    const t = Date.parse(x.nextStateAt || ''), tm = Date.parse(x.nextStateAtMax || '');
+    if (isFinite(t)) g.ends.push(t);
+    if (isFinite(tm) || isFinite(t)) g.latest = Math.max(g.latest, isFinite(tm) ? tm : t);
+    (x.availableInteractions || []).forEach(a => { if (a && a.verbPhrase && !g.verbs.has(a.verbPhrase)) g.verbs.set(a.verbPhrase, a); });
+  });
+  const top = g => Object.keys(g.urg).sort((a, b) => PL_URGENCY[a] - PL_URGENCY[b])[0];
+  const chip = { ready: ['status-ready', 'ti-check', 'Ready'], needs_attention: ['status-attn', 'ti-alert-triangle', 'Needs attention'], growing: ['status-passive', 'ti-plant-2', 'Growing'], idle: ['status-idle', 'ti-player-pause', 'Idle'] };
+  // Placeable art that bitjita's icon host doesn't carry (tree seeds, food stashes…) falls back to a plant glyph.
+  const plIcon = a => a ? `<img class="game-icon" src="${gameIconUrl(a)}" loading="lazy" width="28" height="28" onerror="this.outerHTML='<i class=&quot;ti ti-plant-2 pl-icon-fb&quot;></i>'">` : '<i class="ti ti-plant-2 pl-icon-fb"></i>';
+  const groupRow = g => {
+    const u = top(g), nx = placeableNext(g.id);
+    // bitjita calls a seed or stash that's about to vanish "growing" — say what's actually happening.
+    const [cls, ico, label] = u === 'growing' && nx && nx.gone ? ['status-passive', 'ti-hourglass-low', 'Expiring'] : chip[u];
+    const mix = Object.keys(g.urg).length > 1 ? Object.keys(g.urg).sort((a, b) => PL_URGENCY[a] - PL_URGENCY[b]).map(k => `${g.urg[k]} ${chip[k][2].toLowerCase()}`).join(' · ') : '';
+    const soon = g.ends.length ? Math.min(...g.ends) : 0;
+    let timer = '';
+    if (soon){
+      const lead = nx && nx.gone ? 'gone' : (nx && nx.names ? `→ ${escHtml(nx.names)}` : 'next stage');
+      const spread = g.latest - soon > 60000 ? ` <span style="color:var(--text3)">· all by</span> <span data-pl-end="${g.latest}" data-pl-by="1">${plCountdown(g.latest, true)}</span>` : '';
+      timer = `<div class="pl-meta"><i class="ti ti-clock" style="color:var(--amber-light);font-size:12px"></i><span>${lead}</span> <span data-pl-end="${soon}" style="font-weight:500;color:var(--amber-light)">${plCountdown(soon)}</span>${spread}</div>`;
+    }
+    const verbs = [...g.verbs.values()].map(a => {
+      const outs = (a.outputItemStacks || []).map(o => `${o.quantity}× ${(o.info && o.info.name) || ('item ' + o.item_id)}`).join(', ');
+      const lv = (a.levelRequirements || []).map(r => `${r.skillName || 'Skill ' + r.skill_id} ${r.level}`).join(', ');
+      return `<span class="pl-verb" title="${escHtml([outs && 'Gives ' + outs, lv && 'Needs ' + lv].filter(Boolean).join(' · '))}">${escHtml(a.verbPhrase)}</span>`;
+    }).join('');
+    return `<div class="craft-card">
+      ${plIcon(g.icon)}
+      <div class="craft-card-body">
+        <div class="craft-card-name">${g.n > 1 ? `${g.n}× ` : ''}${escHtml(g.name)}${g.tier > 0 ? ` <span class="badge badge-tier" style="font-size:10px;padding:1px 5px">T${g.tier}</span>` : ''}</div>
+        ${timer}
+        ${(mix || verbs) ? `<div class="pl-meta">${mix ? `<span>${mix}</span>` : ''}${verbs}</div>` : ''}
+      </div>
+      <span class="craft-status ${cls}"><i class="ti ${ico}"></i> ${label}</span>
+    </div>`;
+  };
+  const order = g => [PL_URGENCY[top(g)], g.ends.length ? Math.min(...g.ends) : Infinity, g.name];
+  const cmp = (a, b) => { const x = order(a), y = order(b); return x[0] - y[0] || x[1] - y[1] || String(x[2]).localeCompare(String(y[2])); };
+  const s = (d.summary && d.summary.byUrgency) || {};
+  const sum = ['ready', 'needs_attention', 'growing', 'idle'].filter(k => s[k]).map(k => `${s[k]} ${chip[k][2].toLowerCase()}`).join(' · ');
+  const stale = entry.error ? `<span style="color:var(--amber-light)" title="${escHtml(entry.error)}"> · couldn't refresh — showing the last read</span>` : '';
+  return `<div style="font-size:12px;color:var(--text3);margin:0 0 .6rem">${list.length} placeable${list.length !== 1 ? 's' : ''}${sum ? ' · ' + sum : ''}${stale}</div>` +
+    Object.values(byRegion).sort((a, b) => b.n - a.n).map(r => `<div class="craft-location-card">
+      <div class="craft-location-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+        <div class="craft-location-name"><i class="ti ti-map-pin"></i>${escHtml(r.regionName || 'Unknown region')}${r.regionId != null ? `<span style="color:var(--text3);font-size:11px;margin-left:.35rem">· R${escHtml(String(r.regionId))}</span>` : ''}</div>
+        <div class="craft-location-meta"><span>${r.n} placeable${r.n !== 1 ? 's' : ''}</span><i class="ti ti-chevron-down" style="font-size:14px;color:var(--text3)"></i></div>
+      </div>
+      <div>${Object.values(r.groups).sort(cmp).map(groupRow).join('')}</div>
+    </div>`).join('');
 }
 // ── Live craft-progress bookkeeping (fed by the live layer's bridge below) ──
 let bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
@@ -5542,9 +5683,10 @@ function onLiveCraftProgress(d, isDelta){
 }
 function setCraftTab(t) {
   craftTabActive = t;
-  document.querySelectorAll('#craft-toolbar .craft-tab').forEach((b, i) => b.classList.toggle('active', (i===0) === (t!=='passive')));
+  document.querySelectorAll('#craft-toolbar .craft-tab').forEach(b => b.classList.toggle('active', b.dataset.ct === t));
   trackedPlayers.forEach(p => fillPlayerCraftCached(p.entityId));
   if (t === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();   // the live feed runs regardless of sub-tab
+  if (t === 'placeable'){ startPlaceableTimers(); loadPlaceables(); } else stopPlaceableTimers();
 }
 async function renderCraftingTab(silent, force) {
   const el = document.getElementById('tab-crafting');
@@ -5557,8 +5699,9 @@ async function renderCraftingTab(silent, force) {
         ${tabBusyHtml('craft')}
         <span style="flex:1"></span>
         <div class="craft-tabs" style="margin:0">
-          <div class="craft-tab ${craftTabActive!=='passive'?'active':''}" onclick="setCraftTab('active')"><i class="ti ti-flame"></i> Active</div>
-          <div class="craft-tab ${craftTabActive==='passive'?'active':''}" onclick="setCraftTab('passive')"><i class="ti ti-clock"></i> Passive</div>
+          <div class="craft-tab ${craftTabActive==='active'?'active':''}" data-ct="active" onclick="setCraftTab('active')"><i class="ti ti-flame"></i> Active</div>
+          <div class="craft-tab ${craftTabActive==='passive'?'active':''}" data-ct="passive" onclick="setCraftTab('passive')"><i class="ti ti-clock"></i> Passive</div>
+          <div class="craft-tab ${craftTabActive==='placeable'?'active':''}" data-ct="placeable" onclick="setCraftTab('placeable')"><i class="ti ti-plant-2"></i> Placeables</div>
         </div>
       </div>
       <div id="craft-sections">${playersFor('crafting').map(p => playerSection(p, loading(), 'psec-craft-' + p.entityId, 'crafting')).join('')}</div>`;
@@ -5614,6 +5757,7 @@ async function renderCraftingTab(silent, force) {
   // Always live: progress bars patch in place from the delta stream, and the doorbell re-renders the list
   // when a craft starts, finishes or is cancelled. No poll — the Refresh button is just for impatience.
   if (craftTabActive === 'passive') startPassiveCraftTimer(); else stopPassiveCraftTimer();
+  if (craftTabActive === 'placeable'){ startPlaceableTimers(); loadPlaceables(force); } else stopPlaceableTimers();
   startCraftActiveTick();   // expires the Active chip; cheap enough to leave running for both sub-tabs
 }
 
@@ -6212,11 +6356,12 @@ async function loadGameItemDefs(){
   _gameItemDefsP = (async () => { try {
     // ?v busts the 24h browser cache when the payload gains fields. rout2, not rout1: a dev server
     // briefly served rout1 WITHOUT recipeOuts (the route dropped the field), and that empty payload
-    // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh.
-    const d = await apiFetch('/itemdefs?v=rout2');   // compact [name, tier, rarityIdx, tag, icon]
+    // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh. plc1 added placeables.
+    const d = await apiFetch('/itemdefs?v=plc1');   // compact [name, tier, rarityIdx, tag, icon]
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
     gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
-      recipeOuts: d.recipeOuts || {} };   // recipeId -> [headlineItemId, qty] — the game's own crafted_item_stacks[0]
+      recipeOuts: d.recipeOuts || {},     // recipeId -> [headlineItemId, qty] — the game's own crafted_item_stacks[0]
+      placeables: d.placeables || {} };   // placeableId -> [name, [[chance, nextPlaceableId], …]] — see placeablesHtml
     _gameItemDefsP = null; return gameItemDefs;
   } catch(e){ _gameItemDefsP = null; _gameItemDefsFailAt = Date.now(); throw e; } })();
   return _gameItemDefsP;
