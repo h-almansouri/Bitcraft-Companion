@@ -5274,7 +5274,7 @@ async function fetchPlayerCrafts(id) {
 function fillPlayerCraftCached(entityId) {
   const b = document.getElementById('psec-craft-' + entityId);
   if (!b) return;
-  if (craftTabActive === 'placeable'){ b.innerHTML = placeablesHtml(entityId); return; }
+  if (craftTabActive === 'placeable'){ plRender(b, entityId); return; }
   b.innerHTML = craftingContentHtml(craftByPlayer[entityId]) || '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>No crafts</span></div>';
 }
 // ── PLACEABLES (Crafts → Placeables) ──
@@ -5455,19 +5455,29 @@ function plFilterRefresh(){
 function plSetKind(kind, show){ if (show) plHidden.kinds.delete(kind); else plHidden.kinds.add(kind); plSaveHidden(); plRepaint(); }
 function plSetType(pid, show){ if (show) plHidden.types.delete(String(pid)); else plHidden.types.add(String(pid)); plSaveHidden(); plRepaint(); }
 function plShowAll(){ plHidden.types.clear(); plHidden.kinds.clear(); plSaveHidden(); plRepaint(); }
-// Collapsed region cards, kept across the live repaints ("playerId:regionId").
+// Collapsed region cards, kept across repaints ("playerId:regionId").
 const plCollapsed = new Set();
 function plToggleRegion(el, key){
   const body = el.nextElementSibling, shut = body.style.display !== 'none';
   body.style.display = shut ? 'none' : '';
   if (shut) plCollapsed.add(key); else plCollapsed.delete(key);
 }
-function placeablesHtml(id){
+// Icons bitjita's host doesn't carry (tree seeds, food stashes…): once one has failed, the plant glyph is drawn
+// straight away instead of trying the image again every time such a row comes back.
+const plIconFailed = new Set();
+function plIconFail(img){ plIconFailed.add(img.dataset.asset); img.outerHTML = '<i class="ti ti-plant-2 pl-icon-fb"></i>'; }
+const plIconHtml = a => a && !plIconFailed.has(a)
+  ? `<img class="game-icon" src="${gameIconUrl(a)}" data-asset="${escHtml(a)}" loading="lazy" width="28" height="28" onerror="plIconFail(this)">`
+  : '<i class="ti ti-plant-2 pl-icon-fb"></i>';
+// One player's view as data: the summary line, then regions → rows, each row split into the parts that change on their
+// own (name line with the count, timer line, actions line, status). { html } instead when there's nothing to list.
+// Regions sort by name and rows by status then name — never by count or timer — so nothing moves while counts change.
+function plModel(id){
   const src = plInstances(id);
-  if (src.loading) return loading();
-  if (src.error) return errBox(new Error(src.error));
+  if (src.loading) return { html: loading() };
+  if (src.error) return { html: errBox(new Error(src.error)) };
   const all = src.list || [];
-  if (!all.length) return '<div class="empty" style="padding:1rem"><i class="ti ti-plant-2"></i><span>No placeables</span></div>';
+  if (!all.length) return { html: '<div class="empty" style="padding:1rem"><i class="ti ti-plant-2"></i><span>No placeables</span></div>' };
   // Region → placeable type. A group's status is its most urgent member's; its timer is the soonest one, with
   // "all by" the latest when they spread out.
   const byRegion = {}, counts = {};
@@ -5478,7 +5488,7 @@ function placeablesHtml(id){
     const st = plStatus(x.placeableId, info, x);
     counts[st] = (counts[st] || 0) + 1;
     const rk = x.regionId != null ? String(x.regionId) : '?';
-    const r = byRegion[rk] || (byRegion[rk] = { regionId: x.regionId, regionName: x.regionName, n: 0, groups: {} });
+    const r = byRegion[rk] || (byRegion[rk] = { rid: x.regionId, name: x.regionName, n: 0, groups: {} });
     r.n++;
     const g = r.groups[x.placeableId] || (r.groups[x.placeableId] = { id: x.placeableId, info, n: 0, st: {}, ends: [], latest: 0 });
     g.n++;
@@ -5488,12 +5498,10 @@ function placeablesHtml(id){
   const rank = s => PL_STATUS[s].rank;
   const byRank = o => Object.keys(o).sort((a, b) => rank(a) - rank(b));
   const sum = byRank(counts).map(k => `${counts[k]} ${PL_STATUS[k].label.toLowerCase()}`).join(' · ');
-  const head = `<div style="font-size:12px;color:var(--text3);margin:0 0 .6rem">${all.length} placeable${all.length !== 1 ? 's' : ''}${sum ? ' · ' + sum : ''}` +
+  const head = `${all.length} placeable${all.length !== 1 ? 's' : ''}${sum ? ' · ' + sum : ''}` +
     `${hidden ? ` · <span style="color:var(--text2)">${hidden} hidden</span>` : ''}` +
-    `${src.stale ? `<span style="color:var(--amber-light)" title="${escHtml(src.stale)}"> · couldn't refresh — showing the last read</span>` : ''}</div>`;
-  if (hidden === all.length) return head + '<div class="empty" style="padding:1rem"><i class="ti ti-eye-off"></i><span>All hidden — Show/hide above brings them back</span></div>';
-  // Placeable art that bitjita's icon host doesn't carry (tree seeds, food stashes…) falls back to a plant glyph.
-  const plIcon = a => a ? `<img class="game-icon" src="${gameIconUrl(a)}" loading="lazy" width="28" height="28" onerror="this.outerHTML='<i class=&quot;ti ti-plant-2 pl-icon-fb&quot;></i>'">` : '<i class="ti ti-plant-2 pl-icon-fb"></i>';
+    `${src.stale ? `<span style="color:var(--amber-light)" title="${escHtml(src.stale)}"> · couldn't refresh — showing the last read</span>` : ''}`;
+  if (hidden === all.length) return { html: `<div style="font-size:12px;color:var(--text3);margin:0 0 .6rem">${head}</div><div class="empty" style="padding:1rem"><i class="ti ti-eye-off"></i><span>All hidden — Show/hide above brings them back</span></div>` };
   const verbsHtml = acts => {
     const seen = new Set();
     return acts.filter(a => { if (seen.has(a[0])) return false; seen.add(a[0]); return true; }).map(a => {
@@ -5502,39 +5510,88 @@ function placeablesHtml(id){
       return `<span class="pl-verb" title="${escHtml([outs && 'Gives ' + outs, lv && 'Needs ' + lv].filter(Boolean).join(' · '))}">${escHtml(a[0])}</span>`;
     }).join('');
   };
-  const groupRow = g => {
-    const S = PL_STATUS[byRank(g.st)[0]], nx = placeableNext(g.id);
+  const row = g => {
+    const st = byRank(g.st)[0], nx = placeableNext(g.id);
     const mix = Object.keys(g.st).length > 1 ? byRank(g.st).map(k => `${g.st[k]} ${PL_STATUS[k].label.toLowerCase()}`).join(' · ') : '';
-    const soon = g.ends.length ? Math.min(...g.ends) : 0;
-    let timer = '';
-    if (soon){
-      const lead = nx && nx.gone ? 'gone' : (nx && nx.names ? `→ ${escHtml(nx.names)}` : 'next stage');
-      const spread = g.latest - soon > 60000 ? ` <span style="color:var(--text3)">· all by</span> <span data-pl-end="${g.latest}" data-pl-by="1">${plCountdown(g.latest, true)}</span>` : '';
-      timer = `<div class="pl-meta"><i class="ti ti-clock" style="color:var(--amber-light);font-size:12px"></i><span>${lead}</span> <span data-pl-end="${soon}" style="font-weight:500;color:var(--amber-light)">${plCountdown(soon)}</span>${spread}</div>`;
-    }
+    const soon = g.ends.length ? Math.min(...g.ends) : 0, latest = soon && g.latest - soon > 60000 ? g.latest : 0;
+    const lead = !soon ? '' : nx && nx.gone ? 'gone' : (nx && nx.names ? `→ ${escHtml(nx.names)}` : 'next stage');
     const verbs = verbsHtml(g.info.acts);
-    return `<div class="craft-card">
-      ${plIcon(g.info.icon)}
-      <div class="craft-card-body">
-        <div class="craft-card-name">${g.n > 1 ? `${g.n}× ` : ''}${escHtml(g.info.name)}${g.info.tier > 0 ? ` <span class="badge badge-tier" style="font-size:10px;padding:1px 5px">T${g.info.tier}</span>` : ''}</div>
-        ${timer}
-        ${(mix || verbs) ? `<div class="pl-meta">${mix ? `<span>${mix}</span>` : ''}${verbs}</div>` : ''}
-      </div>
-      <span class="craft-status ${S.cls}"><i class="ti ${S.ico}"></i> ${S.label}</span>
-    </div>`;
+    return { key: String(g.id), st, icon: g.info.icon || '', name: g.info.name, tier: g.info.tier > 0 ? g.info.tier : 0,
+      nameHtml: `${g.n > 1 ? `${g.n}× ` : ''}${escHtml(g.info.name)}${g.info.tier > 0 ? ` <span class="badge badge-tier" style="font-size:10px;padding:1px 5px">T${g.info.tier}</span>` : ''}`,
+      // the countdown text inside ticks every second (placeableTick) — the line is rebuilt only when what it counts to changes
+      timerSig: [soon, latest, lead].join('|'),
+      timerHtml: !soon ? '' : `<div class="pl-meta"><i class="ti ti-clock" style="color:var(--amber-light);font-size:12px"></i><span>${lead}</span> <span data-pl-end="${soon}" style="font-weight:500;color:var(--amber-light)">${plCountdown(soon)}</span>` +
+        `${latest ? ` <span style="color:var(--text3)">· all by</span> <span data-pl-end="${latest}" data-pl-by="1">${plCountdown(latest, true)}</span>` : ''}</div>`,
+      metaHtml: (mix || verbs) ? `<div class="pl-meta">${mix ? `<span>${mix}</span>` : ''}${verbs}</div>` : '' };
   };
-  const order = g => [rank(byRank(g.st)[0]), g.ends.length ? Math.min(...g.ends) : Infinity, g.info.name];
-  const cmp = (a, b) => { const x = order(a), y = order(b); return x[0] - y[0] || x[1] - y[1] || String(x[2]).localeCompare(String(y[2])); };
-  return head + Object.values(byRegion).sort((a, b) => b.n - a.n).map(r => {
-    const key = `${id}:${r.regionId != null ? r.regionId : '?'}`;
-    return `<div class="craft-location-card">
-      <div class="craft-location-header" onclick="plToggleRegion(this,'${escHtml(key)}')">
-        <div class="craft-location-name"><i class="ti ti-map-pin"></i>${escHtml(r.regionName || (r.regionId != null ? 'Region ' + r.regionId : 'Unknown region'))}${r.regionId != null ? `<span style="color:var(--text3);font-size:11px;margin-left:.35rem">· R${escHtml(String(r.regionId))}</span>` : ''}</div>
-        <div class="craft-location-meta"><span>${r.n} placeable${r.n !== 1 ? 's' : ''}</span><i class="ti ti-chevron-down" style="font-size:14px;color:var(--text3)"></i></div>
-      </div>
-      <div${plCollapsed.has(key) ? ' style="display:none"' : ''}>${Object.values(r.groups).sort(cmp).map(groupRow).join('')}</div>
-    </div>`;
-  }).join('');
+  const regions = Object.values(byRegion).map(r => {
+    const rk = r.rid != null ? String(r.rid) : '?', label = r.name || (r.rid != null ? 'Region ' + r.rid : 'Unknown region');
+    return { key: rk, ckey: `${id}:${rk}`, label,
+      nameHtml: `<i class="ti ti-map-pin"></i>${escHtml(label)}${r.rid != null ? `<span style="color:var(--text3);font-size:11px;margin-left:.35rem">· R${escHtml(rk)}</span>` : ''}`,
+      countText: `${r.n} placeable${r.n !== 1 ? 's' : ''}`,
+      rows: Object.values(r.groups).map(row).sort((a, b) => rank(a.st) - rank(b.st) || a.name.localeCompare(b.name) || a.tier - b.tier) };
+  }).sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+  return { head, regions };
+}
+// Build the player's block once, then PATCH it. The view repaints on every relay update — every couple of seconds
+// while someone chops trees — and rebuilding it re-created every icon, so the ones bitjita's host doesn't carry
+// flashed empty before their glyph. Now regions and rows are keyed and kept: an update touches only the parts whose
+// content changed (a row's count, timer, actions or status; a region's count), adds what came, drops what went, and
+// fixes the order by moving nodes — never by rebuilding them.
+function plRender(b, id){
+  const m = plModel(id);
+  if (m.html != null){ b.innerHTML = m.html; return; }   // loading / error / empty / everything hidden — no rows to keep
+  let root = b.firstElementChild;
+  if (!root || b.children.length !== 1 || !root.classList.contains('pl-root')){
+    b.innerHTML = '<div class="pl-root"><div style="font-size:12px;color:var(--text3);margin:0 0 .6rem"></div><div></div></div>';
+    root = b.firstElementChild;
+  }
+  plSetHtml(root.firstElementChild, m.head);
+  plSync(root.lastElementChild, m.regions, plRegionEl, plRegionPatch);
+}
+const plSetHtml = (el, html, sig = html) => { if (el._plSig !== sig){ el.innerHTML = html; el._plSig = sig; } };
+// Keyed children: reuse each child whose key is still wanted (patching it), create the new ones, drop the rest, and
+// put them in order with moves only.
+function plSync(parent, items, make, patch){
+  const have = new Map();
+  [...parent.children].forEach(el => have.set(el.dataset.plKey, el));
+  items.forEach((it, i) => {
+    let el = have.get(it.key);
+    if (el){ have.delete(it.key); patch(el, it); } else el = make(it);
+    if (parent.children[i] !== el) parent.insertBefore(el, parent.children[i] || null);
+  });
+  have.forEach(el => el.remove());
+}
+function plRegionEl(r){
+  const el = document.createElement('div');
+  el.className = 'craft-location-card'; el.dataset.plKey = r.key;
+  el.innerHTML = `<div class="craft-location-header" onclick="plToggleRegion(this,'${escHtml(r.ckey)}')"><div class="craft-location-name"></div>` +
+    `<div class="craft-location-meta"><span></span><i class="ti ti-chevron-down" style="font-size:14px;color:var(--text3)"></i></div></div>` +
+    `<div${plCollapsed.has(r.ckey) ? ' style="display:none"' : ''}></div>`;
+  plRegionPatch(el, r);
+  return el;
+}
+function plRegionPatch(el, r){
+  const hdr = el.firstElementChild;
+  plSetHtml(hdr.firstElementChild, r.nameHtml);
+  const cnt = hdr.lastElementChild.firstElementChild; if (cnt.textContent !== r.countText) cnt.textContent = r.countText;
+  plSync(el.lastElementChild, r.rows, plRowEl, plRowPatch);
+}
+function plRowEl(g){
+  const el = document.createElement('div');
+  el.className = 'craft-card'; el.dataset.plKey = g.key;
+  el.innerHTML = plIconHtml(g.icon) + '<div class="craft-card-body"><div class="craft-card-name"></div><div></div><div></div></div><span class="craft-status"></span>';
+  el._plIcon = g.icon;
+  plRowPatch(el, g);
+  return el;
+}
+function plRowPatch(el, g){
+  if (el._plIcon !== g.icon){ el.firstElementChild.outerHTML = plIconHtml(g.icon); el._plIcon = g.icon; }   // game data landed after the first paint
+  const [nm, tm, mt] = el.children[1].children;
+  plSetHtml(nm, g.nameHtml);
+  plSetHtml(tm, g.timerHtml, g.timerSig);
+  plSetHtml(mt, g.metaHtml);
+  if (el._plSt !== g.st){ const S = PL_STATUS[g.st], chip = el.lastElementChild; chip.className = 'craft-status ' + S.cls; chip.innerHTML = `<i class="ti ${S.ico}"></i> ${S.label}`; el._plSt = g.st; }
 }
 // ── Live craft-progress bookkeeping (fed by the live layer's bridge below) ──
 let bcCraftRate = {};   // cid -> {rate,etaSecs,lastT,lastP} for the ETA
