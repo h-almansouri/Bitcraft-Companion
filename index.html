@@ -2131,7 +2131,8 @@ function playerFoodEnd(id){
   });
   return end > Date.now() ? end : 0;
 }
-// Every other buff with a timer, soonest to run out first: anything that lasts at least a minute — elixirs (5 min and
+// Every other buff with a timer, the one with the most time left first (leftmost, right after the food timer — which
+// never moves): anything that lasts at least a minute — elixirs (5 min and
 // 1 h), Berserker flasks, teas, Ancient Knowledge, wonder fruits, Empire gifts… Seconds-long effects (healing and
 // stamina potions, combat procs, the tree food stash pulse) would only flicker, and effects with no end (carrying
 // cargo) have no timer. Lasting debuffs (resurrection sickness, Reckless Poison, warp sickness) come too, drawn red.
@@ -2145,7 +2146,7 @@ function playerBuffTimers(id){
     .filter(b => b.dur >= BUFF_MIN_SECS && !isFoodBuff(b))
     .map(b => ({ id: b.buffId, label: b.label || b.name, type: b.name || '', bad: b.beneficial === false, end: (b.start + b.dur) * 1000 }))
     .filter(b => b.end > now)
-    .sort((a, b) => a.end - b.end || a.label.localeCompare(b.label));
+    .sort((a, b) => b.end - a.end || a.label.localeCompare(b.label));
 }
 // The game draws buff icons from its own icon font (icon_asset_name is a single glyph), so they can't be loaded as
 // pictures — each kind gets a Tabler icon instead, matched on the buff's type first ("Flask" is the Berserker potions,
@@ -8269,7 +8270,6 @@ async function loadItemMarket(id, type, name, prefetched) {
         <div class="stat"><div class="stat-label">Highest buy</div><div class="stat-val price-buy">${fmtCoin(stats.highestBuy||stats.highestBuyPrice)}</div></div>
         <div class="stat" title="Average traded price over the last 7 days (bitjita)"><div class="stat-label">7d avg</div><div class="stat-val" id="mkt-avg7d"><span class="dot-spin"></span></div></div>
         <div class="stat" title="Average traded price over the last 30 days (bitjita)"><div class="stat-label">30d avg</div><div class="stat-val" id="mkt-avg30d"><span class="dot-spin"></span></div></div>
-        <div class="stat"><div class="stat-label">24h volume</div><div class="stat-val">${fmtNum(stats.volume24h||0)}</div></div>
         <div class="stat"><div class="stat-label">Sell orders</div><div class="stat-val">${sells.length}</div></div>
       </div>
       <div id="mkt-history"></div>
