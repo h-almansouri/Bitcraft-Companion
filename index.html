@@ -7978,7 +7978,7 @@ function renderDealResults() {
   const el = document.getElementById('deals-results');
   if (!el) return;
   updateDealsUpdatedLabel();
-  const q   = (dealsNameFilter||'').toLowerCase().trim();
+  const q   = (dealsNameFilter||'').toLowerCase().trim(), qWords = searchWords(q);
   const bf  = (dealsBuyFrom||'').toLowerCase().trim();
   const st  = (dealsSellTo||'').toLowerCase().trim();
   const minP = dealsMinProfit || 0;
@@ -7987,7 +7987,7 @@ function renderDealResults() {
   // Each entry is already a pre-computed route (sellOrder → buyOrder).
   // Region filter is applied here at render time — no rescan needed.
   const deals = dealsData
-    .filter(d => !q   || (d.item.name||'').toLowerCase().includes(q))
+    .filter(d => !q   || matchesWords(qWords, d.item.name))
     .filter(d => !bf  || sName(d.sellOrder).includes(bf))
     .filter(d => !st  || sName(d.buyOrder).includes(st))
     .filter(d => !dealsRegionFilter ||
@@ -8120,7 +8120,7 @@ function renderMarketResults() {
   items = items.filter(it => sellCount(it) > 0 || buyCount(it) > 0);
   items = items.filter(it => !marketHiddenItems.has(String(it.id||it.itemId)));
   items = items.filter(it => !marketHiddenCategories.has(it.tag||it.category||'Other'));
-  if (q.length >= 2) items = items.filter(it => (it.name||'').toLowerCase().includes(q)||(it.tag||'').toLowerCase().includes(q));
+  if (q.length >= 2){ const words = searchWords(q); items = items.filter(it => matchesWords(words, it.name, it.tag)); }
   if (marketOrderFilter === 'sell') items = items.filter(it => sellCount(it) > 0);
   if (marketOrderFilter === 'buy') items = items.filter(it => buyCount(it) > 0);
   if (marketTierFilter) items = items.filter(it => String(it.tier) === String(marketTierFilter));
@@ -8609,9 +8609,11 @@ function shoppingSearchType(q) {
   if (!dd) return;
   if (!shoppingSearchQ || shoppingSearchQ.length < 2) { dd.innerHTML = ''; clearTimeout(shoppingCatalogTimer); return; }
   ensureShoppingOrderIds();   // load the accurate "has listings" set (once) for correct flags
+  if (!gameItemDefs && searchWords(shoppingSearchQ).length > 1) loadGameItemDefs().then(shoppingRenderSearch).catch(() => {});   // the full item list, for word-by-word matches
   shoppingRenderSearch();   // instant results from the already-loaded market pool + session catalog
-  // Augment with the FULL item catalog (bitjita /api/items) so items with no current market orders —
-  // e.g. a Legendary/Epic Rathium Quill nobody's listed — still show up and can be added for later.
+  // Augment with bitjita's item search (/api/items) so items with no current market orders — e.g. a
+  // Legendary/Epic Rathium Quill nobody's listed — still show up and can be added for later. It only takes the
+  // exact phrase; shoppingRenderSearch adds the word-by-word matches from the game's item list.
   clearTimeout(shoppingCatalogTimer);
   const q0 = shoppingSearchQ, seq = ++shoppingCatalogSeq;
   shoppingCatalogTimer = setTimeout(async () => {
@@ -8634,24 +8636,30 @@ function shoppingRenderSearch() {
   // The game has many distinct item-ids that share the same name+tier+rarity. Collapse them into ONE row,
   // preferring the id that actually has orders (then one in the local pool) — so the row isn't duplicated,
   // the "no listings" flag is correct, and adding it lands on the id that carries the real listing.
-  const byKey = {};
+  const byKey = {}, words = searchWords(q);
+  // Closest first: names holding the whole phrase (earliest first), then names where more of the words start a
+  // word — so "fine pe" lists Fine Tanned Pelt ahead of Fine Rope before the 16-row cut.
+  const rank = n => { const i = n.indexOf(q); return i >= 0 ? i : 1000 - words.filter(w => (' ' + n).includes(' ' + w)).length; };
   const consider = it => {
     const id = String(it.id || it.itemId); if (!id) return;
-    if (!(it.name||'').toLowerCase().includes(q)) return;
+    if (!matchesWords(words, it.name)) return;
     const tier = it.tier > 0 ? it.tier : 0;
     const rarity = rarityName(it.rarityStr ?? it.rarity);
     const key = (it.name||'').toLowerCase() + '|' + tier + '|' + rarity;
     const score = (hasOrder(id) ? 2 : 0) + (poolIds.has(id) ? 1 : 0);
     const cur = byKey[key];
-    if (!cur || score > cur.score) byKey[key] = { it, id, tier, rarity, score, name: it.name || ('Item ' + id) };
+    if (!cur || score > cur.score) byKey[key] = { it, id, tier, rarity, score, name: it.name || ('Item ' + id), rank: rank((it.name||'').toLowerCase()) };
   };
   pool.forEach(consider);
   Object.values(shoppingCatalogById).forEach(consider);   // adds items with no market orders
+  // ...as does the game's full item list once there's more than one word: bitjita's search only takes the exact
+  // phrase, so "sturdy pelt" gets nothing back from it. One word stays on bitjita's alone — the whole list would
+  // flood a short "pe" with unlisted Peach Cobbler Mastery rows ahead of the listed Peerless ones.
+  if (words.length > 1 && gameItemDefs) for (const id in gameItemDefs.items){ const m = gameItemDefs.items[id]; if (matchesWords(words, m.name)) consider({ ...m, id }); }
   let results = Object.values(byKey)
     .sort((a,b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
       const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
-      const ai = an.indexOf(q), bi = bn.indexOf(q);
-      if (ai !== bi) return ai - bi;
       if (an !== bn) return an.localeCompare(bn);
       if ((a.tier||0) !== (b.tier||0)) return (a.tier||0) - (b.tier||0);
       return (SHOP_RARITY_RANK[(a.rarity||'').toLowerCase()]||0) - (SHOP_RARITY_RANK[(b.rarity||'').toLowerCase()]||0);
@@ -10444,10 +10452,10 @@ function bcInitResourceFilters(){
 }
 function bcRenderResourceList(){
   const listEl = document.getElementById('bc-res-list'); if (!listEl) return;
-  const q = (bcResSearch||'').toLowerCase().trim();
+  const q = (bcResSearch||'').toLowerCase().trim(), words = searchWords(q);
   let entries = bcAllEntries();
   // Search matches name OR category/type tag (e.g. "fiber" finds Ferns, "nubi goat" finds the enemy)
-  if (q)         entries = entries.filter(v => (v.name||'').toLowerCase().includes(q) || (v.tag||'').toLowerCase().includes(q));
+  if (q)         entries = entries.filter(v => matchesWords(words, v.name, v.tag));
   if (bcResTier) entries = entries.filter(v => String(v.tier) === String(bcResTier));
   if (bcResTag)  entries = entries.filter(v => (v.tag||'') === bcResTag);
   entries = entries.filter(v => !bcHiddenRes.has(bcResKey(v.kind, v.id))); // skip hidden
@@ -11180,7 +11188,7 @@ function plannerFilter() {
   const skillId = document.getElementById('planner-skill')?.value || '';
 
   let items = plannerGetCraftableItems();
-  if (q) items = items.filter(i => (i.name||'').toLowerCase().includes(q) || (i.tag||'').toLowerCase().includes(q));
+  if (q){ const words = searchWords(q); items = items.filter(i => matchesWords(words, i.name, i.tag)); }
   if (tier) items = items.filter(i => String(i.tier) === String(tier));
   if (skillId) {
     items = items.filter(i => {
