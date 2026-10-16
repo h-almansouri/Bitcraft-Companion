@@ -1881,7 +1881,7 @@ async function refreshPlayerOnline(){
   if (usingCache()){
     const online = new Set(liveRows('signed_in_player_state', () => true).map(r => String(r.entity_id)));
     ids.forEach(id => playerOnline[id] = online.has(id));
-  } else if (!bitjitaDisabled()){
+  } else {
     await Promise.all(trackedPlayers.map(async p => {   // cache not ready → bitjita
       const id = String(p.entityId);
       try { const d = await apiFetch('/api/players/' + id); const pl = d.player || d; if (pl && typeof pl.signedIn === 'boolean') playerOnline[id] = pl.signedIn; } catch(e){}
@@ -2683,7 +2683,7 @@ async function loadSkillsInto(p, silent=false) {
     const rankP = apiFetch(`/api/players/${p.entityId}/skill-rankings`).catch(() => ({}));
     let pData;
     try { pData = await fetchSkillsRelay(p.entityId); }
-    catch(e){ if (bitjitaDisabled()) throw e; pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
+    catch(e){ pData = await apiFetch(`/api/players/${p.entityId}`); }   // relay unreachable → bitjita
     // Paint as soon as the XP is in, rather than waiting on ranks too. The relay read is ~84ms but the
     // rankings call is ~557ms cold (971 bytes — it's latency, not size), and blocking on it made the
     // whole tab five times slower to appear for one small "#12" beside each XP figure. Passing {} here
@@ -3394,7 +3394,6 @@ async function fetchPlayerMarketRelay(id){   // single-player wrapper
   return (await fetchMarketRelayMulti([id]))[String(id)] || { sellOrders: [], buyOrders: [], collections: [] };
 }
 async function fetchPlayerMarketBitjita(id){
-  if (bitjitaDisabled()) throw new Error('bitjita fallback disabled (relay-only test)');
   const [m, c] = await Promise.all([
     apiFetch(`/api/players/${id}/market`),
     apiFetch(`/api/players/${id}/market-collections`).catch(() => ({ collections: [] })),
@@ -3730,9 +3729,8 @@ async function renderOrdersTab(silent, force){
   if (!batched){
     await Promise.all(toLoad.map(async p => {
       try { ordersByPlayer[p.entityId] = await fetchPlayerMarketBitjita(p.entityId); }
-      catch(e){ if (!bitjitaDisabled() && !ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
-      // Relay-only test with nothing yet: keep the spinner (see the crafts loop for why).
-      if (myRun === ordersRunId && (ordersByPlayer[p.entityId] || !bitjitaDisabled())) fillPlayerOrdersCached(p.entityId);
+      catch(e){ if (!ordersByPlayer[p.entityId]) ordersByPlayer[p.entityId] = { sellOrders:[], buyOrders:[], collections:[] }; }
+      if (myRun === ordersRunId) fillPlayerOrdersCached(p.entityId);
     }));
     if (myRun !== ordersRunId) return;
   }
@@ -4308,21 +4306,6 @@ async function loadRelayRegions(){
 // The authoritative list is /health (`sources[].database` + `.port`); the relay's own explorer reads it
 // from there at runtime, which is why the explorer kept working while we broke. Their docs still say
 // relay-mirror-bcN, so trust /health over the tutorial. One helper so a future rename is a one-line fix.
-// Dev instrumentation: `sessionStorage.bc_count_sockets = 1` then reload to tally every socket the app
-// opens, with what it was for. Read it back via window.__sockLog.
-if (typeof sessionStorage !== 'undefined' && (sessionStorage.getItem('bc_count_sockets') || sessionStorage.getItem('bc_track_concurrent'))){
-  window.__sockLog = []; window.__sockLive = 0; window.__sockPeak = 0;
-  const _W = window.WebSocket;
-  window.WebSocket = function(u, p){
-    window.__sockLog.push({ port: (String(u).match(/:(\d+)\//)||[])[1], at: Math.round(performance.now()) });
-    window.__sockLive++; window.__sockPeak = Math.max(window.__sockPeak, window.__sockLive);
-    const w = new _W(u, p);
-    const done = () => { window.__sockLive = Math.max(0, window.__sockLive - 1); };
-    w.addEventListener('close', done); w.addEventListener('error', done);
-    return w;
-  };
-  window.WebSocket.prototype = _W.prototype;
-}
 const relayWsUrl = region => `wss://relay.bitcraftsync.app:${3000+region}/v1/database/bitcraft-live-${region}/subscribe?compression=None`;
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
@@ -4442,13 +4425,6 @@ const livePk = r => String(r.entity_id != null ? r.entity_id : (r.id != null ? r
 // a transition that happens during a reconnect gap only ever appears as changed state (§3.5).
 const liveListeners = new Set();
 function onLiveChange(cb){ liveListeners.add(cb); return () => liveListeners.delete(cb); }
-// ── TEST SWITCH: relay-only mode ──
-// setNoFallback(true) (from the console) disables every bitjita fallback — they THROW instead of
-// answering — and skips the bcTabCache instant-paint, so the app shows the honest pure-relay
-// experience: spinner until the snapshots land, then everything from the cache. Persisted in
-// localStorage so it survives the reload it triggers. setNoFallback(false) restores everything.
-function bitjitaDisabled(){ try { return localStorage.getItem('bc_no_fallback') === '1'; } catch(e){ return false; } }
-function setNoFallback(on){ try { if (on) localStorage.setItem('bc_no_fallback','1'); else localStorage.removeItem('bc_no_fallback'); } catch(e){} location.reload(); }
 let _livePendingEv = null;
 function liveNotify(evs){
   if (!_livePendingEv){ _livePendingEv = []; setTimeout(() => { const e = _livePendingEv; _livePendingEv = null; liveListeners.forEach(cb => { try { cb(e); } catch(err){} }); }, 40); }
@@ -4511,7 +4487,6 @@ let _cacheModeSince = 0, _incompleteSince = 0, _liveRefsSettled = false;
 function liveSettleHold(){
   if (_cacheModeSince) return false;          // past the first flip — grace governs from here
   if (_liveRefsSettled) return false;
-  if (bitjitaDisabled()) return false;
   if (_bitjitaFailedAt && (Date.now() - _bitjitaFailedAt) < BITJITA_FAIL_FRESH_MS) return false;
   if (_liveLayerStartedAt && (Date.now() - _liveLayerStartedAt) > LIVE_SETTLE_MAX_MS) return false;
   return true;
@@ -5145,7 +5120,6 @@ async function fetchPlayerCraftsRelay(id){   // single-player wrapper (kept for 
   return out;
 }
 async function fetchPlayerCraftsBitjita(id){
-  if (bitjitaDisabled()) throw new Error('bitjita fallback disabled (relay-only test)');
   const [acData, pcData] = await Promise.all([
     apiFetch(`/api/players/${id}/crafts?completed=all`),
     apiFetch(`/api/players/${id}/passive-crafts?status=all`),
@@ -5496,8 +5470,7 @@ async function loadPlaceables(force){
   if (!gameItemDefs) loadGameItemDefs().then(plRepaint).catch(() => {});        // names, kinds, growth rules, actions
   if (!craftingData) loadCraftingData().then(plRepaint).catch(() => {});        // skill names in the action tooltips
   if (usingCache()){ plRepaint(); return; }                                      // live: the cache already has it all
-  // Relay-only test mode: no fallback — keep the spinner; the live layer's handoff kick repaints once the cache is whole.
-  if (_plLoading || !trackedPlayers.length || bitjitaDisabled()) return;
+  if (_plLoading || !trackedPlayers.length) return;
   _plLoading = true;
   if (force) _plForcedAt = Date.now();
   try {
@@ -6152,10 +6125,8 @@ async function renderCraftingTab(silent, force) {
     if (!batched){
       await Promise.all(toLoad.map(async p => {
         try { craftByPlayer[p.entityId] = await fetchPlayerCraftsBitjita(p.entityId); }
-        catch(e) { if (!bitjitaDisabled() && !craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
-        // Relay-only test with nothing yet: keep the spinner — the live layer's completion kick will
-        // re-render the moment the cache is whole, and "No crafts" before that would be a lie.
-        if (myRun === craftRunId && (craftByPlayer[p.entityId] || !bitjitaDisabled())) fillPlayerCraftCached(p.entityId);
+        catch(e) { if (!craftByPlayer[p.entityId]) craftByPlayer[p.entityId] = { active:[], done:[], passive:[], itemMap:{} }; }
+        if (myRun === craftRunId) fillPlayerCraftCached(p.entityId);
       }));
       if (myRun !== craftRunId) return;
     }
@@ -6979,7 +6950,7 @@ function dropDeadRegionInvs(d){
   return { ...d, inventories: d.inventories.filter(inv => !(inv.regionId != null && DEAD_REGIONS.has(+inv.regionId))) };
 }
 async function fetchPlayerInv(id) {
-  try { return dropDeadRegionInvs(await fetchPlayerInvRelay(id)); } catch(e){ if (bitjitaDisabled()) throw e; /* relay down → fall back to bitjita */ }
+  try { return dropDeadRegionInvs(await fetchPlayerInvRelay(id)); } catch(e){ /* relay down → fall back to bitjita */ }
   return fetchPlayerInvBitjita(id);
 }
 // bitjita's per-player inventory + housing. Also the Player Lookup's source for players outside the roster:
