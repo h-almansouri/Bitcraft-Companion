@@ -181,8 +181,8 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .pv-txt{position:relative;display:block;text-align:center;font-size:12px;font-weight:600;line-height:18px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.85);white-space:nowrap;font-variant-numeric:tabular-nums}
 .pv-food{display:inline-flex;align-items:center;gap:.3rem;flex:none;font-size:14px;font-weight:700;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}
 .pv-food .ti{font-size:17px;color:var(--amber-light)}
-.pv-food.off{color:var(--text3);font-weight:500}
-.pv-food.off .ti{color:var(--text3)}
+.pv-food.off,.pv-food.held{color:var(--text3);font-weight:500}   /* held = paused while the player is signed out */
+.pv-food.off .ti,.pv-food.held .ti{color:var(--text3)}
 .pv-buffs{display:inline-flex;flex-wrap:wrap;align-items:center;gap:.25rem .65rem;flex:0 3 auto;min-width:0;padding-left:.6rem;border-left:1px solid var(--border2)}   /* shrinks (wraps) 3× faster than the stamina bar */
 .pv-buffs:empty{display:none}
 .pv-buff{display:inline-flex;align-items:center;gap:.25rem;flex:none;font-size:14px;font-weight:700;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums;cursor:default}
@@ -1978,6 +1978,8 @@ function playerVitals(id){
 // When the food buff runs out (ms). One meal puts on "Food Buffs" and "Food Regen" together with the same
 // duration (measured: both 3600s), so the later of the two ends is the time to eat again. 0 = no food buff
 // on; null = can't tell (no buff row yet, or the buff catalogue is still loading — repainted when it lands).
+// A PAUSED food buff (its owner signed out, or is mid-way through a teleport to another region — see buffClock)
+// has no end; it comes back as { held: ms left } and is drawn frozen.
 // Same rule as the food-buff alert: a beneficial buff whose name starts with "Food".
 let _vitalsDescsAt = 0;   // last time the banner asked for the buff catalogue (at most once a minute — every banner render lands here)
 const isFoodBuff = b => b.beneficial !== false && /^food/i.test(b.name || '');
@@ -1988,17 +1990,21 @@ function playerFoodEnd(id){
     if (Date.now() - _vitalsDescsAt > 60000){ _vitalsDescsAt = Date.now(); relayBuffDescs().then(m => { if (m) vitalsPatchAll(); }).catch(() => {}); }
     return null;
   }
-  let end = 0;
+  let end = 0, held = 0;
   activeBuffsOf(row, _buffDescs).forEach(b => {
-    if (b.dur > 0 && isFoodBuff(b)) end = Math.max(end, (b.start + b.dur) * 1000);
+    if (b.dur <= 0 || !isFoodBuff(b)) return;
+    if (b.paused) held = Math.max(held, b.timeRemaining * 1000);
+    else end = Math.max(end, b.end);
   });
-  return end > Date.now() ? end : 0;
+  if (end > Date.now()) return end;
+  return held ? { held } : 0;
 }
 // Every other buff with a timer, the one with the most time left first (leftmost, right after the food timer — which
 // never moves): anything that lasts at least a minute — elixirs (5 min and
 // 1 h), Berserker flasks, teas, Ancient Knowledge, wonder fruits, Empire gifts… Seconds-long effects (healing and
 // stamina potions, combat procs, the tree food stash pulse) would only flicker, and effects with no end (carrying
 // cargo) have no timer. Lasting debuffs (resurrection sickness, Reckless Poison, warp sickness) come too, drawn red.
+// A paused buff (owner signed out — see buffClock) has no end either, so it isn't shown until they're back.
 // null = can't tell yet (no buff row, or the catalogue is still loading — playerFoodEnd asks for it).
 const BUFF_MIN_SECS = 60;
 function playerBuffTimers(id){
@@ -2006,8 +2012,8 @@ function playerBuffTimers(id){
   if (!row || !_buffDescs) return null;
   const now = Date.now();
   return activeBuffsOf(row, _buffDescs)
-    .filter(b => b.dur >= BUFF_MIN_SECS && !isFoodBuff(b))
-    .map(b => ({ id: b.buffId, label: b.label || b.name, type: b.name || '', bad: b.beneficial === false, end: (b.start + b.dur) * 1000 }))
+    .filter(b => b.dur >= BUFF_MIN_SECS && !isFoodBuff(b) && b.end)
+    .map(b => ({ id: b.buffId, label: b.label || b.name, type: b.name || '', bad: b.beneficial === false, end: b.end }))
     .filter(b => b.end > now)
     .sort((a, b) => b.end - a.end || a.label.localeCompare(b.label));
 }
@@ -2047,9 +2053,13 @@ function fmtFoodLeft(ms){
   const s = Math.max(0, Math.ceil(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
   return h ? `${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}` : `${m}:${String(r).padStart(2,'0')}`;
 }
+// The chip's data-food-end doubles as its change signature: the end time, "0" = none, "" = can't tell, "p<ms left>" =
+// paused. A paused chip holds still — +"p…" is NaN, so the countdown below passes over it.
+const foodSig = f => f == null ? '' : typeof f === 'object' ? 'p' + f.held : String(f);
 function vitalsFoodHtml(end){
   if (end == null) return '<span class="pv-food" data-food-end=""></span>';
   if (!end) return '<span class="pv-food off" data-food-end="0" title="No food buff — time to eat"><i class="ti ti-meat"></i>–</span>';
+  if (typeof end === 'object') return `<span class="pv-food held" data-food-end="${foodSig(end)}" title="Food buff — paused while signed out, ${fmtFoodLeft(end.held)} left"><i class="ti ti-meat"></i><span class="pv-food-t">${fmtFoodLeft(end.held)}</span></span>`;
   return `<span class="pv-food" data-food-end="${end}" title="Food buff — runs out ${fmtWhen(end)}"><i class="ti ti-meat"></i><span class="pv-food-t">${fmtFoodLeft(end - Date.now())}</span></span>`;
 }
 function playerVitalsHtml(id){
@@ -2068,7 +2078,7 @@ function vitalsFlush(){
   ids.forEach(id => {
     const els = document.querySelectorAll(`.pv[data-vitals="${id}"]`); if (!els.length) return;
     const v = playerVitals(id), st = vitalsBar(v.st, v.stMax);
-    const food = v.foodEnd == null ? '' : String(v.foodEnd), bsig = buffsSig(v.buffs);
+    const food = foodSig(v.foodEnd), bsig = buffsSig(v.buffs);
     els.forEach(el => {
       const bar = el.querySelector('.pv-st');
       if (bar){ bar.querySelector('.pv-fill').style.width = st.pct + '%'; bar.querySelector('.pv-txt').textContent = st.txt; }
@@ -2613,13 +2623,31 @@ async function relayBuffDescs(){
   }
   return null;
 }
+// ⚠️ PAUSED BUFFS — why a food buff "fell off" every time a player logged out or teleported to another region.
+// Buffs whose buff_desc has online_timestamp (every Food Buffs and Food Regen; also Inner Light, teas, potions)
+// only count down while their owner is signed in. Signing out pauses them, and so does every teleport across a
+// region border, which signs the player out of the region they leave (BitCraftPublic sign_out.rs and
+// transfer_player.rs → pause_all_buffs). Pausing rewrites the start from a unix time into the seconds already
+// USED (OnlineTimestamp::pause; -1 when it lands inside the buff's first second), and signing in turns it back
+// into a time. Read as a time, a paused buff ended in 1970. Seconds used stay far below 1e9 (largest seen:
+// 9.7M, ~112 days of play; earliest real start: 1.77e9), so size tells the two apart. bitjita misreads them the
+// same way — it calls a paused food buff "expired" — so its rows go through here too.
+// → { paused, left (s; Infinity = never runs out), end (ms; null while paused or never-ending) }
+function buffClock(start, dur, nowSec){
+  const paused = start === -1 || (start > 0 && start < 1e9);
+  if (dur <= 0) return { paused, left: Infinity, end: null };
+  if (paused) return { paused, left: dur - Math.max(0, start), end: null };
+  return { paused, left: start + dur - nowSec, end: (start + dur) * 1000 };
+}
 // The buffs actually on a player, from their active_buff_state row (needs the catalogue above for names).
 // ⚠️ active_buffs is a FIXED ~238-slot array covering every buff, NOT a list of what's on you — 236 of
 // those slots read start=0/duration=0. A slot is active only with a real start that hasn't expired.
 // Verified against bitjita for the same player: both said exactly "Food Regen" + "Food Buffs".
 // ⚠️ buff_start_timestamp arrives in SECONDS here (1785571683), unlike the micros every other timestamp
-// column uses — dividing by 1e6 gave 1785 and made every buff look long expired.
-// Returns [{ buffId, name (type), label (own name), beneficial, start (s), dur (s; 0 = no expiry), timeRemaining (s) }].
+// column uses — dividing by 1e6 gave 1785 and made every buff look long expired. It's an OnlineTimestamp,
+// so while the buff is paused it isn't a time at all (buffClock).
+// Returns [{ buffId, name (type), label (own name), beneficial, start (s), dur (s; 0 = no expiry), timeRemaining (s),
+//            paused, end (ms; null while paused or with no expiry) }].
 function activeBuffsOf(row, descs){
   const nowSec = Math.floor(Date.now() / 1000);
   return ((row && row.active_buffs) || []).map(b => {
@@ -2631,9 +2659,10 @@ function activeBuffsOf(row, descs){
     if (sv && typeof sv === 'object') sv = sv.__timestamp_micros_since_unix_epoch__;
     let start = Number(sv || 0);
     if (start > 1e12) start = Math.floor(start / 1e6);   // tolerate micros should the shape ever change
-    const d0 = (descs || {})[buffId] || {};
-    return { buffId, name: d0.name, label: d0.label || d0.name, beneficial: d0.beneficial, start, dur, timeRemaining: dur > 0 ? (start + dur) - nowSec : 1 };
-  }).filter(b => b.name && b.start > 0 && (b.dur <= 0 || b.timeRemaining > 0));
+    const d0 = (descs || {})[buffId] || {}, c = buffClock(start, dur, nowSec);
+    return { buffId, name: d0.name, label: d0.label || d0.name, beneficial: d0.beneficial, start, dur,
+      timeRemaining: dur > 0 ? c.left : 1, paused: c.paused, end: c.end };
+  }).filter(b => b.name && b.start !== 0 && b.timeRemaining > 0);   // start -1 = paused in its first second, still on
 }
 const SKILL_DESC_KEY = 'bcSkillDescs', SKILL_DESC_TTL = 7*24*60*60*1000;
 let _skillDescs = null;
@@ -4370,7 +4399,7 @@ const LIVE_COLS = {
   player_housing_state: ['entity_id','entrance_building_entity_id','network_entity_id','exit_portal_entity_id','rank','locked_until','is_empty','region_index'],
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
   building_nickname_state: ['entity_id','nickname'],
-  // active_buffs element: { buff_id i32, buff_start_timestamp Timestamp, buff_duration i32, values [f32] }
+  // active_buffs element: { buff_id i32, buff_start_timestamp OnlineTimestamp { value i32 }, buff_duration i32, values [f32] }
   buff_desc: ['id','buff_type_id','description','priority','duration','warn_time','online_timestamp','beneficial','icon_asset_name','stats','vfx','vfx_attachment_point'],
   buff_type_desc: ['id','name','category'],
   dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
@@ -12419,19 +12448,33 @@ async function checkPlayerBuffs(p){
     // The relay is primary: active_buff_state carries buff_id + start + duration per player, and the
     // buff catalogue supplies the name and `beneficial`. bitjita is the fallback for when we're not on
     // the cache — it used to be the only source, with the relay row serving as a mere doorbell.
+    // A PAUSED buff (its owner signed out, or is mid-way through a teleport to another region) is still on
+    // — see buffClock. Both sources keep it, with end = null since it has no end until they sign back in.
     let active = null;
     if (usingCache()){
       const descs = await relayBuffDescs();
       const row = liveRows('active_buff_state', r => String(r.entity_id) === id)[0];
-      if (descs && row){
-        // The slot-array and seconds-timestamp traps are handled in activeBuffsOf.
-        active = activeBuffsOf(row, descs).map(b => ({ buffTypeName: b.name, buffName: b.name, beneficial: b.beneficial,
-          buffStartTimestamp: b.start, buffDuration: b.dur, timeRemaining: b.timeRemaining }));
+      // Every player has an active_buff_state row, so finding none means it's in flight: a teleport to another
+      // region deletes it from the region being left before the destination inserts it. That's "can't tell",
+      // not "every buff gone" — keep the baseline; the insert re-runs this check (onLiveBuffs).
+      if (descs && !row) return;
+      if (descs){
+        // The slot-array, seconds-timestamp and paused-buff traps are handled in activeBuffsOf.
+        active = activeBuffsOf(row, descs).map(b => ({ buffTypeName: b.name, buffName: b.name, beneficial: b.beneficial, end: b.end }));
       }
     }
     if (active === null){
-      const d = await apiFetch(`/api/players/${id}/buffs`);
-      active = (d.buffs||[]).filter(b => b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0));
+      const d = await apiFetch(`/api/players/${id}/buffs`), nowSec = Math.floor(Date.now() / 1000);
+      // bitjita lists every slot ever used, expired ones included (23-57 in the players checked) — so an empty list
+      // is the same in-flight gap as the missing row above, not a player with nothing on.
+      if (!(d.buffs||[]).length) return;
+      active = [];
+      (d.buffs||[]).forEach(b => {
+        // bitjita's status/timeRemaining call a paused buff expired, so its raw start + duration get a say too
+        const c = buffClock(+b.buffStartTimestamp || 0, +b.buffDuration || 0, nowSec);
+        if (b.status==='active' || (typeof b.timeRemaining==='number' && b.timeRemaining>0) || (c.paused && c.left > 0))
+          active.push({ buffTypeName: b.buffTypeName, buffName: b.buffName, beneficial: b.beneficial, end: c.end });
+      });
     }
     // "Food buff only" = name STARTS with "Food" (anchored). The old unanchored /food/i also caught the
     // "Tree Food Stash" buff family added 2026-09 — 10 tier variants, beneficial, duration 20s, pulsing
@@ -12448,13 +12491,12 @@ async function checkPlayerBuffs(p){
     if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
     st.buffs = cur;
     // Record exactly WHEN each watched buff runs out, so we can wake on it instead of waiting for the
-    // next poll. buffStartTimestamp is unix seconds and buffDuration is seconds — that pair is exact,
-    // unlike timeRemaining which is a snapshot that drifts between fetches.
+    // next poll. `end` is the buff's start + duration (buffClock) — exact, unlike timeRemaining, which is a
+    // snapshot that drifts between fetches. A paused buff has none: it can't run out until its owner is back.
     const exp = {};
     watched.forEach(b => {
       const nm = b.buffTypeName || b.buffName;
-      const start = +b.buffStartTimestamp, dur = +b.buffDuration;
-      if (nm && isFinite(start) && isFinite(dur) && dur > 0) exp[nm] = (start + dur) * 1000;
+      if (nm && b.end) exp[nm] = b.end;
     });
     st.buffExpiry = exp;
   } catch(e){ /* skip this check */ }
