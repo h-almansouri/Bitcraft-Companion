@@ -21,7 +21,7 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', (e
 process.on('uncaughtException',  (e) => console.error('[uncaughtException]',  (e && e.stack) || e));
 
 // ────────────────────────────────────────────────────────────────────────────
-// Tier 1 backend: in-memory caches + server-side deal precompute + prefs storage.
+// Tier 1 backend: in-memory caches + server-side deal precompute.
 // The server now does the heavy lifting (one shared market fetch, one shared item-detail cache, and
 // a periodic arbitrage scan) so the browser just downloads small, finished payloads instead of
 // fetching ~2400 items and computing thousands of routes itself. Everything degrades gracefully:
@@ -73,9 +73,8 @@ async function getMarketList(force) {
   return marketRefreshing;
 }
 
-// ── Per-item detail cache (shared by the precompute and /item) ──
+// ── Per-item detail cache (used by the deal precompute) ──
 const detailCache = new Map(); // `${type}_${id}` -> { ts, data }
-let mkt429 = 0;
 async function getItemDetail(type, id) {
   const key = `${type}_${id}`;
   const c = detailCache.get(key);
@@ -218,7 +217,7 @@ async function computeDeals() {
         const cached = detailCache.has(`${type}_${id}`) && (Date.now() - detailCache.get(`${type}_${id}`).ts) < DETAIL_TTL;
         if (!cached) await reserve();
         try { const det = await getItemDetail(type, id); processItem(it, det, out); }
-        catch (e) { if (e && e.status === 429) { mkt429++; minInterval = Math.min(minInterval * 1.4 + 20, 400); await new Promise(r => setTimeout(r, 1200)); } }
+        catch (e) { if (e && e.status === 429) { minInterval = Math.min(minInterval * 1.4 + 20, 400); await new Promise(r => setTimeout(r, 1200)); } }
         dealsCache.scanned++;
         if (!cached && minInterval > 45) minInterval = Math.max(minInterval - 4, 45);
       }
@@ -355,16 +354,6 @@ async function getItemDefs() {
   return itemDefsBuilding;
 }
 
-// ── Preference storage (JSON file; survives reloads, cross-device, no localStorage quota) ──
-function prefsPath() { return path.join(DATA_DIR, 'prefs.json'); }
-function readPrefs() {
-  try { return JSON.parse(fs.readFileSync(prefsPath(), 'utf8')); } catch (e) { return {}; }
-}
-function writePrefs(obj) {
-  try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(prefsPath(), JSON.stringify(obj)); return true; }
-  catch (e) { return false; }
-}
-
 // ── gzip ────────────────────────────────────────────────────────────────────
 // Every JSON response left here uncompressed, which is pure waste on a text payload: /api/crafts is
 // 1.43MB raw and 192KB gzipped (87% off), and the Networth tab's market calls are ~16MB per cold load.
@@ -480,14 +469,6 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Server-cached item/cargo detail. /item/item/123 or /item/cargo/123
-  let m = req.url.match(/^\/item\/(item|cargo)\/([^/?]+)$/);
-  if (m) {
-    getItemDetail(m[1], m[2]).then(data => sendJson(res, 200, data, req))
-                             .catch(() => sendJson(res, 502, { error: 'detail unavailable' }, req));
-    return;
-  }
-
   // Precomputed deals. Returns the current snapshot immediately and kicks off a refresh if stale.
   if (req.url === '/deals' || req.url.startsWith('/deals?')) {
     maybeComputeDeals();
@@ -524,31 +505,6 @@ http.createServer((req, res) => {
       res.end(body);
     }).catch(() => sendJson(res, 502, { items: {}, cargos: {}, equip: {}, buildings: {} }, req));
     return;
-  }
-
-  // Bulk prefs (used by the client at startup to restore from backup). Returns { key: rawString }.
-  if (req.url === '/prefs') { sendJson(res, 200, readPrefs(), req); return; }
-
-  // Per-key prefs. Values are stored as OPAQUE STRINGS — the exact localStorage value — so the client
-  // can mirror/restore with perfect fidelity (some values are JSON, some are bare strings like "market").
-  let pm = req.url.match(/^\/prefs\/([^/?]+)$/);
-  if (pm) {
-    const key = decodeURIComponent(pm[1]);
-    if (req.method === 'GET') {
-      const all = readPrefs();
-      sendJson(res, 200, { key, value: key in all ? all[key] : null }, req);
-      return;
-    }
-    if (req.method === 'PUT') {
-      const chunks = [];
-      req.on('data', c => chunks.push(c));
-      req.on('end', () => {
-        const value = Buffer.concat(chunks).toString('utf8'); // store verbatim
-        const all = readPrefs(); all[key] = value;
-        sendJson(res, writePrefs(all) ? 200 : 500, { ok: true, key }, req);
-      });
-      return;
-    }
   }
 
   // Price history for an item. /history/item/123 -> { key, points: [{t,s,b}] }

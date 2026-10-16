@@ -15,7 +15,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#0d0f14;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column}
 :root{
-  --bg:#0d0f14;--bg2:#13171f;--bg3:#1a1f2b;--bg4:#222836;--bg5:#2a3040;
+  --bg:#0d0f14;--bg2:#13171f;--bg3:#1a1f2b;--bg4:#222836;
   --border:#2a3040;--border2:#3a4257;
   --text:#e2e8f0;--text2:#8fa3bf;--text3:#5a6a82;
   --teal:#1d9e75;--teal-light:#9fe1cb;--teal-dim:#0f6e56;
@@ -59,11 +59,6 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .shopping-chip{display:inline-flex;align-items:center;gap:.25rem;font-size:11px;background:var(--bg4);border:1px solid var(--border2);border-radius:12px;padding:2px 5px 2px 9px;color:var(--text);white-space:nowrap}
 .shopping-chip i{cursor:pointer;color:var(--text3);font-size:13px}
 .shopping-chip i:hover{color:var(--text)}
-.player-badge{display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px}
-.player-badge-avatar{width:24px;height:24px;background:var(--teal-dim);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--teal-light);flex-shrink:0}
-.player-badge-name{font-size:12px;font-weight:500;color:var(--teal-light);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.player-badge-x{color:var(--text3);cursor:pointer;font-size:14px;flex-shrink:0}
-.player-badge-x:hover{color:var(--text)}
 
 .nav-section{padding:.75rem 0}
 .nav-label{font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:.25rem 1.25rem .4rem}
@@ -71,7 +66,6 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .nav-item i{font-size:16px;flex-shrink:0}
 .nav-item:hover{color:var(--text);background:var(--bg3)}
 .nav-item.active{color:var(--teal-light);background:rgba(29,158,117,.08);border-left-color:var(--teal)}
-.nav-wip{margin-left:auto;font-size:9px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--amber-light);background:rgba(186,117,23,.16);border:1px solid rgba(186,117,23,.3);border-radius:4px;padding:1px 5px;line-height:1.4;flex-shrink:0}
 
 /* ── MAIN ── */
 .main-wrap{margin-left:var(--sidebar);flex:1;display:flex;flex-direction:column;min-height:100vh}
@@ -110,23 +104,20 @@ main.planner-mode{max-width:none;padding:1rem}
 .card-title{font-size:13px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:6px}
 .card-title i{color:var(--teal);font-size:15px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
 .stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.75rem;margin-bottom:1.25rem}
 .stat{background:var(--bg3);border-radius:6px;padding:.75rem 1rem}
 .stat-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
 .stat-val{font-size:20px;font-weight:600;color:var(--text)}
-.stat-sub{font-size:11px;color:var(--text2);margin-top:2px}
 .badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500}
 .badge-tier{background:var(--bg4);color:var(--text2)}
 .badge-sell{background:var(--red-dim);color:#f09595}
 .badge-buy{background:var(--green-dim);color:var(--green-light)}
 .ord-section-hdr{display:flex;align-items:center;gap:.5rem;margin:1rem 0 .6rem;padding:.5rem .85rem;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;font-weight:600;font-size:13px;color:var(--c,var(--text));cursor:pointer;user-select:none}
 .ord-section-hdr:hover{background:var(--bg3)}
-.ord-chev{font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s}
+.ord-chev{font-size:13px;color:var(--text3);flex-shrink:0;margin-left:.1rem;transition:transform .2s}
 .ord-row{display:flex;align-items:center;gap:.5rem;padding:.5rem .9rem;border-top:1px solid var(--border);font-size:12px}
 .ord-row-click{cursor:pointer}
 .ord-row-click:hover{background:var(--bg4)}
-.ord-chev{color:var(--text3);font-size:13px;flex-shrink:0;margin-left:.1rem}
 .ord-uc{display:inline-flex;align-items:center;gap:.2rem;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;background:var(--red-dim);color:#f09595;white-space:nowrap}
 .ord-expand:empty{display:none}
 .ord-exp-inner{padding:.6rem .9rem;background:var(--bg2);border-top:1px solid var(--border);font-size:12px}
@@ -265,8 +256,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .sj-mode button.on{background:var(--tc,var(--teal-dim));border-color:var(--tc,var(--teal));color:#fff}
 .sj-field{margin-bottom:.5rem}
 .sj-field label{display:block;font-size:10px;color:var(--text3);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.04em}
-/* task trader collapse chevron */
-.task-npc-header .tnpc-chev{transition:transform .15s;color:var(--text3);font-size:14px}
 /* tool crafting grid */
 .tool-grid{display:flex;flex-direction:column;gap:6px;margin-top:1rem}
 .tool-grid-row{display:grid;grid-template-columns:56px repeat(var(--cols,6),1fr);gap:6px;align-items:stretch}
@@ -286,8 +275,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 /* calculator count inputs: no number spinners */
 .tc-num::-webkit-outer-spin-button,.tc-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .tc-num{-moz-appearance:textfield;appearance:textfield}
-.tool-cell.tool-cost .tool-have{color:var(--amber-light)}
-.tool-cell.tool-reroll .tool-have{color:var(--purple-light)}
 .tool-hcell{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:center;padding:2px 4px;text-align:center}
 .tool-per{color:var(--text3);font-weight:500;margin-left:3px;text-transform:none}
 .tool-tier-cell{display:flex;align-items:center;justify-content:center;border:1px solid var(--tc,var(--border));border-left:4px solid var(--tc,var(--border));border-radius:8px;background:var(--tcbg,var(--bg3))}
@@ -307,47 +294,7 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .tool-cell.tool-low .tool-have{color:var(--amber-light)}
 .tool-cell.tool-zero{opacity:.45}
 .tool-cell.tool-zero .tool-have{color:var(--text3)}
-.tool-note{font-size:11px;color:var(--text3);margin-top:.85rem;display:flex;align-items:flex-start;gap:6px;line-height:1.5}
 @media(max-width:720px){.tool-grid-row{grid-template-columns:36px repeat(var(--cols,6),1fr);gap:3px}.tool-cell{flex-direction:column;gap:2px;padding:5px 1px}.tool-hcell{font-size:8px}.tool-have{font-size:11px}}
-/* reroll / upgrade calculator */
-.tool-calc{margin-top:1.5rem;border:1px solid var(--border2);border-radius:10px;background:var(--bg2);padding:1rem}
-.tool-calc-hdr{font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem}
-.tool-calc-hdr i{color:var(--teal-light)}
-.tc-wip{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--amber-light);background:rgba(186,117,23,.15);border:1px solid rgba(186,117,23,.4);border-radius:6px;padding:1px 6px}
-.tc-field label{display:block;font-size:10px;color:var(--text3);margin-bottom:.2rem;text-transform:uppercase;letter-spacing:.03em}
-.tc2-controls{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:.9rem}
-@media(max-width:640px){.tc2-controls{grid-template-columns:1fr}}
-.tc2-result{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.9rem}
-.tc2-headline{font-size:13px;color:var(--text2)}
-.tc2-sub{color:var(--text3);font-size:11px}
-.tc2-cost{font-size:26px;font-weight:800;color:var(--teal-light);margin:.15rem 0 .6rem}
-.tc2-steps{margin-bottom:.7rem;display:flex;flex-direction:column;gap:.35rem}
-.tc2-step{font-size:12px;color:var(--text);background:var(--bg4);border-radius:6px;padding:.45rem .55rem;display:flex;align-items:center;gap:.45rem;line-height:1.4}
-.tc2-stepnum{flex-shrink:0;width:18px;height:18px;border-radius:50%;background:var(--bg2);color:var(--text3);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
-.tc2-line{display:flex;align-items:center;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--text3);border-top:1px solid var(--border)}
-.tc2-line b{color:var(--text);font-weight:700}
-.tc2-bad{font-size:12px;color:var(--amber-light);display:flex;align-items:center;gap:.4rem}
-/* batch upgrade advisor */
-.tcb-controls{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:.7rem;margin-bottom:.9rem}
-@media(max-width:720px){.tcb-controls{grid-template-columns:1fr 1fr}}
-.tcb-tier{margin-bottom:.55rem;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.tcb-tier-hdr{background:var(--bg4);padding:.35rem .6rem;font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.03em;display:flex;align-items:center;gap:.4rem}
-.tcb-band{display:grid;grid-template-columns:auto 1fr auto auto;gap:.5rem;align-items:center;padding:.4rem .6rem;font-size:12px;border-top:1px solid var(--border)}
-.tcb-band:first-child{border-top:none}
-.tcb-cnt{font-variant-numeric:tabular-nums;color:var(--text);font-weight:700;min-width:38px}
-.tcb-rar{font-weight:600}
-.tcb-verdict{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;border-radius:5px;padding:2px 7px;white-space:nowrap}
-.tcb-v-upgrade{background:rgba(29,158,117,.16);color:var(--teal-light)}
-.tcb-v-reroll{background:rgba(151,109,230,.16);color:var(--purple-light)}
-.tcb-v-scrap{background:rgba(186,117,23,.16);color:var(--amber-light)}
-.tcb-v-sell{background:rgba(80,120,200,.18);color:#a9c2f5}
-.tcb-v-keeper{background:rgba(99,196,90,.18);color:#8fd66f}
-.tcb-v-keep{background:rgba(29,158,117,.16);color:var(--teal-light)}
-.tcb-v-leave{background:rgba(186,117,23,.2);color:var(--amber-light)}
-.tcb-sub{font-size:10px;color:var(--text3)}
-.tcb-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem}
-.tcb-chip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .55rem;font-size:11px;color:var(--text2)}
-.tcb-chip b{color:var(--text);font-weight:700}
 /* alerts / notifications */
 .al-wrap{max-width:760px}
 .al-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;margin-bottom:.7rem}
@@ -402,7 +349,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .inv-loc-chip.active{border-color:var(--teal);background:rgba(29,158,117,.08)}
 .inv-loc-chip-name{font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inv-loc-chip-sub{font-size:11px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.inv-loc-chip-count{font-size:11px;color:var(--teal-light)}
 /* Expanded chip content panel */
 .inv-chip-content{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:.6rem;margin-bottom:.5rem}
 .inv-locb-hdr{display:flex;align-items:center;gap:.45rem;cursor:pointer;user-select:none;padding:.1rem .1rem .4rem;border-bottom:1px solid var(--border);margin-bottom:.5rem}
@@ -449,7 +395,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .craft-location-name{font-size:13px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:.5rem}
 .craft-location-meta{font-size:11px;color:var(--text3);display:flex;align-items:center;gap:.75rem}
 .craft-card{display:flex;align-items:flex-start;gap:.75rem;padding:.75rem 1rem;border-top:1px solid var(--border)}
-.craft-card-icon{width:32px;height:32px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--teal);font-size:16px}
 .craft-card-body{flex:1;min-width:0}
 .craft-card-name{font-size:13px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
 .craft-card-meta{font-size:11px;color:var(--text2);margin-top:2px}
@@ -505,16 +450,11 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .craft-tab:hover{color:var(--text);background:var(--bg2)}
 .craft-tab.active{color:#fff;background:var(--teal);box-shadow:0 1px 6px rgba(0,0,0,.25)}
 .craft-tab.active:hover{background:var(--teal);color:#fff}
-.craft-search{margin-bottom:1rem}
 /* Open Crafts (claim craft monitor) */
-.oc-toolbar{display:flex;align-items:center;gap:.6rem;margin-bottom:1rem;flex-wrap:wrap}
-.oc-search{flex:1;min-width:220px;max-width:360px}
 .oc-claim-block{margin-bottom:0}
 .oc-claim-hdr{cursor:pointer}
 .oc-region{font-size:11px;color:var(--text3);font-weight:400}
 .oc-claim-sub{font-size:11px;color:var(--text3);font-weight:400}
-.oc-remove{cursor:pointer;font-size:15px;color:var(--text3)}
-.oc-remove:hover{color:var(--text)}
 .oc-active-pill{display:inline-flex;align-items:center;gap:.25rem;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;background:rgba(99,153,34,.16);color:var(--green-light);white-space:nowrap}
 .oc-active-pill-lg{font-size:11px;padding:3px 9px}
 .oc-claim-body{padding:.5rem}
@@ -593,29 +533,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 @keyframes bcFocusPulse{0%{transform:scale(.4);opacity:1}100%{transform:scale(1.5);opacity:0}}
 .oc-home-tag{font-size:9px;font-weight:700;letter-spacing:.04em;color:var(--amber-light);background:rgba(186,117,23,.16);padding:1px 5px;border-radius:3px}
 
-/* ── TASKS ── */
-.task-rotation{display:flex;align-items:center;gap:.75rem;padding:.6rem 1rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin-bottom:1.25rem;font-size:13px}
-.task-rotation i{color:var(--text3)}
-.task-countdown{font-family:monospace;font-size:14px;font-weight:600;color:var(--teal-light);background:var(--bg4);padding:3px 10px;border-radius:5px}
-.task-npc-block{margin-bottom:1rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.task-npc-header{display:flex;align-items:center;justify-content:space-between;padding:.7rem 1rem;background:var(--bg3);cursor:pointer}
-.task-npc-header:hover{background:var(--bg4)}
-.task-npc-name{font-size:13px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:.5rem}
-.task-npc-skill{font-size:11px;color:var(--text3)}
-.task-items-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;padding:.75rem 1rem}
-.task-item-card{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem}
-.task-item-status{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem;display:flex;align-items:center;gap:.3rem}
-.status-all{color:var(--green-light)}
-.status-some{color:var(--amber-light)}
-.status-none{color:var(--text3)}
-.task-item-name{font-size:12px;color:var(--text);font-weight:500}
-.task-item-needed{font-size:11px;color:var(--text3);margin-top:2px}
-.task-item-qty{font-size:12px;font-weight:600;float:right;margin-top:-16px}
-.task-item-qty.full{color:var(--green-light)}
-.task-item-qty.partial{color:var(--amber-light)}
-.task-item-qty.empty{color:var(--text3)}
-.todo-section{margin-top:1.25rem}
-
 /* ── MARKET ── */
 .market-table{width:100%;border-collapse:collapse;font-size:13px}
 .market-table th{text-align:left;color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:6px 8px;border-bottom:1px solid var(--border)}
@@ -628,7 +545,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .market-item-left{flex:1;min-width:0}
 .market-item-name{font-size:13px;color:var(--text);font-weight:500}
 .market-item-tag{font-size:11px;color:var(--text3);margin-top:2px}
-.market-item-right{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
 .market-items-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.5rem;margin-top:.75rem}
 .game-icon{object-fit:contain;flex-shrink:0;border-radius:4px;background:rgba(0,0,0,.18);vertical-align:middle}
 .mkt-hide-btn{background:none;border:none;color:#c07070;cursor:pointer;font-size:15px;line-height:1;padding:3px 5px;border-radius:4px;opacity:0.35;transition:opacity .12s,color .12s,background .12s;flex-shrink:0}
@@ -678,7 +594,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .rn-children{margin-left:1.25rem;margin-top:.3rem;border-left:2px solid var(--border);padding-left:.6rem}
 .rn-sel{width:100%;background:var(--bg4);border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:3px 5px;font-size:10px;margin-top:.3rem;outline:none;cursor:pointer}
 .rn-sel:focus{border-color:var(--teal)}
-.recipe-add-bar{padding:.6rem .75rem;border-top:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:.5rem}
 .plan-item-row{display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;border-bottom:1px solid var(--border)}
 .plan-item-name{flex:1;font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .plan-item-meta{font-size:10px;color:var(--text3)}
@@ -702,8 +617,6 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .planner-inv-loc:hover{background:var(--bg4);border-color:var(--border2)}
 .planner-inv-loc.active{background:rgba(29,158,117,.12);border-color:var(--teal);color:var(--text)}
 .planner-inv-loc.active i{color:var(--teal-light)}
-.inv-loc-count{font-size:10px;background:var(--bg4);padding:1px 6px;border-radius:8px;color:var(--text3);margin-left:2px}
-.planner-inv-loc.active .inv-loc-count{background:rgba(29,158,117,.2);color:var(--teal-light)}
 /* Resize handle between panels and building steps */
 .planner-resize-handle{height:14px;display:flex;align-items:center;justify-content:center;cursor:ns-resize;color:var(--text3);font-size:16px;opacity:.4;transition:opacity .15s,color .15s;margin:.1rem 0;user-select:none;flex-shrink:0}
 .planner-resize-handle:hover{opacity:1;color:var(--teal-light)}
@@ -733,7 +646,6 @@ tr.shop-item-dragging{opacity:.4}
 tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 /* Tasks toolbar — unified bar holding rotation + buttons */
 .tasks-toolbar{display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.35rem .75rem}
-.tasks-toolbar .task-rotation{padding:0;background:none;border:none;border-radius:0;margin:0}
 /* Task inventory selector (mirrors planner) */
 .task-inv-selector{margin-bottom:.6rem}
 /* Inventory-aware chips */
@@ -815,8 +727,6 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
 .leaflet-control-search .search-tooltip{background:var(--bg2)!important;border:1px solid var(--border2)!important}
 .leaflet-control-search .search-tip{color:var(--text)!important;background:var(--bg2)!important}
 .leaflet-control-search .search-tip.over,.leaflet-control-search .search-tip:hover{background:var(--bg4)!important}
-.map-legend{font-size:11px;color:var(--text2);line-height:1.7}
-.map-legend .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle}
 .map-attrib{font-size:10px;color:var(--text3);margin-top:.4rem;text-align:right}
 .map-attrib a{color:var(--text3)}
 /* Map tab: left sidebar (search/filter) + map. The page is capped at 1200px everywhere else; the map tab
@@ -870,10 +780,7 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-mp-status{margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45;flex-shrink:0}
 .bc-player-tip{background:rgba(13,15,20,.45)!important;border:none!important;color:rgba(255,255,255,.82)!important;font-size:9px!important;font-weight:500;padding:0 3px!important;box-shadow:none!important;text-shadow:0 1px 2px rgba(0,0,0,.9);border-radius:3px}
 .bc-player-tip::before{display:none!important}
-/* resource search/filter tabs + list */
-.bc-tabs{display:flex;gap:4px;margin-bottom:6px}
-.bc-tab{flex:1;text-align:center;font-size:12px;padding:5px;border-radius:5px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);cursor:pointer}
-.bc-tab.on{background:rgba(29,158,117,.15);border-color:var(--teal);color:var(--text)}
+/* resource list */
 .bc-res-list{flex:1;min-height:0;overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
 .bc-li{display:flex;align-items:center;gap:7px;padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px;content-visibility:auto;contain-intrinsic-size:auto 29px}
 .bc-li:hover{background:var(--bg3)}
@@ -887,9 +794,6 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-tracked-res{margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);padding:4px;max-height:120px;overflow-y:auto;flex-shrink:0}
 .bc-trk-hdr{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);padding:2px 4px}
 .bc-trk{display:flex;align-items:center;gap:6px;padding:2px 4px;font-size:12px}
-.bc-trk-col{width:18px;height:18px;padding:0;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;flex-shrink:0}
-.bc-trk-col::-webkit-color-swatch{border:none;border-radius:3px}
-.bc-trk-col::-webkit-color-swatch-wrapper{padding:0}
 .bc-trk-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:96px}
 .bc-trk-t{font-size:10px;color:var(--text3);flex-shrink:0}
 .bc-trk-tag{font-size:9px;color:var(--text2);background:var(--bg4);border-radius:3px;padding:0 4px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -959,15 +863,12 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .gc-tool-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:12px;color:var(--text3)}
 .gc-table td{padding:.55rem .55rem;border-bottom:1px solid var(--border);color:var(--text2)}
 .gc-table tr:last-child td{border-bottom:none}
-.gc-th-sub{text-transform:none;letter-spacing:0;color:var(--text3);font-weight:400}
 .gc-num{text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}
 .gc-item{display:flex;align-items:center;gap:.5rem;color:var(--text)}
 .gc-val{color:var(--text);font-weight:600}
 .gc-price{color:var(--text2)}
 .gc-tag{font-size:9px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:0 4px;text-transform:uppercase;letter-spacing:.03em}
 .gc-manual{width:110px;padding:.2rem .4rem;font-size:11px}
-.gc-total{display:flex;justify-content:space-between;align-items:center;margin-top:1rem;padding:.7rem .85rem;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;font-size:14px;color:var(--text)}
-.gc-total b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
 .gc-foot-note{font-size:11px;color:var(--text3);margin-top:.7rem;line-height:1.5}
 .gc-cfind-list{display:flex;flex-direction:column;gap:.25rem;margin:.3rem 0 .5rem;max-height:230px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:.4rem}
 .gc-cfind-opt{display:flex;align-items:center;gap:.45rem;font-size:12px;color:var(--text2);cursor:pointer;padding:.15rem .2rem}
@@ -1002,7 +903,6 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .gc-funded{background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:.7rem .9rem;margin-bottom:1rem}
 .gc-funded-hd{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--text);margin-bottom:.4rem}
 .gc-funded-hd b{color:var(--teal-light);font-size:16px;font-variant-numeric:tabular-nums}
-.gc-funded-sub{font-size:11px;color:var(--text3);margin-top:.35rem}
 .gc-lb .gc-rank span{font-weight:700}
 .gc-share-pct{color:var(--text2)}
 .gc-modes{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.3rem 0 .2rem}
@@ -1139,7 +1039,6 @@ let invSectionCollapsed = {}; // sectionKey -> bool
 let invLocCollapsed   = {};  // per-location-block key -> bool (collapse one inventory's items)
 let invLocHidden      = {};  // search mode: per-location-block key -> bool (whole result block hidden via its chip)
 let craftTabActive = 'active';
-let lastTaskData = null;   // cached task data for live refresh re-renders
 let passiveCraftTimer = null;
 let marketOrderFilter = 'all';
 let marketTierFilter = '';      // '' = all, else tier number as string
@@ -1465,48 +1364,13 @@ function _evictOptionalCaches() {
 }
 // Persist a critical preference. If the quota is full, evict the big regenerable snapshots and retry
 // once — so user data (hidden items, shopping lists, map selections) NEVER silently fails to save.
-// Also mirrors the value to the backend (best-effort) as a cross-device/cleared-browser backup.
-let prefsServerOk = null; // null=unknown · true=backend reachable · false=skip server mirror
-// Server-side prefs sync is OFF: the backend's /prefs store is global (no per-user identity), so on a
-// SHARED hosted instance it would mix everyone's lists/hidden items together. Personal data therefore
-// lives only in each person's own browser (localStorage) — giving everyone their own stuff for free.
-// (Re-enable only if per-user auth/namespacing is added.)
-const PREFS_SERVER_SYNC = false;
+// Personal data lives only in this browser: the proxy has no per-user identity, so a server copy would mix
+// everyone's lists and hidden items together on a shared instance.
 function safeSetItem(key, val) {
   let ok = true;
   try { localStorage.setItem(key, val); }
   catch(e) { _evictOptionalCaches(); try { localStorage.setItem(key, val); } catch(e2) { ok = false; } }
-  mirrorPrefToServer(key, val);
   return ok;
-}
-function mirrorPrefToServer(key, val){
-  if (!PREFS_SERVER_SYNC) return;
-  if (prefsServerOk === false) return;
-  if (key === 'bc_market_cache_v1' || key === 'bc_deals_cache_v1' || key.startsWith('bc_mkt_')) return; // regenerable, don't back up
-  try { fetch(`${API}/prefs/${encodeURIComponent(key)}`, { method:'PUT', body: val }).then(r => { if (!r.ok) prefsServerOk = false; else prefsServerOk = true; }).catch(() => { prefsServerOk = false; }); } catch(e){}
-}
-// On startup, pull any server-backed prefs and fill in keys MISSING locally (restores a fresh or
-// cleared browser from the server backup without clobbering local edits). Returns # of keys filled.
-async function restorePrefsFromServer(){
-  if (!PREFS_SERVER_SYNC) return 0; // per-user data is browser-local; nothing to restore from the server
-  let all;
-  try {
-    const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 1200); // never hang the UI
-    const r = await fetch(`${API}/prefs`, { signal: ctrl.signal }); clearTimeout(timer);
-    if (!r.ok){ prefsServerOk = false; return 0; } all = await r.json(); prefsServerOk = true;
-  }
-  catch(e){ prefsServerOk = false; return 0; }
-  if (!all || typeof all !== 'object') return 0;
-  let filled = 0;
-  Object.entries(all).forEach(([k,v]) => {
-    if (typeof v === 'string' && localStorage.getItem(k) === null){ try { localStorage.setItem(k, v); filled++; } catch(e){} }
-  });
-  if (filled){
-    try { loadMarketHiddenPrefs(); } catch(e){}
-    try { const s = localStorage.getItem('bc_deals_sort'); if (s) dealsSortMode = s; } catch(e){}
-    try { const t = localStorage.getItem('bc_tab'); if (t && document.getElementById('tab-'+t)) currentTab = t; } catch(e){}
-  }
-  return filled;
 }
 
 // One-time reclaim: older versions wrote the per-item market cache to localStorage, which could fill
@@ -1652,7 +1516,6 @@ function parseRoute(pathname){
   if (m) return { player: m[1], sub: LOOKUP_SUBS_BY_PATH[m[2] || 'experience'] };
   return ROUTE_TABS[p] ? { tab: ROUTE_TABS[p] } : {};
 }
-function routeTab(pathname){ return parseRoute(pathname).tab || null; }   // null = "/", a lookup, or unknown
 let _bootLookup = null;   // a /player route the page was opened on — rendered once boot has restored the roster
 function routeApply(){ const r = parseRoute(location.pathname); if (r.tab && document.getElementById('tab-' + r.tab)) currentTab = r.tab; if (r.player) _bootLookup = r; }
 window.addEventListener('popstate', () => {   // the path is already right — neither call pushes
@@ -3421,7 +3284,7 @@ function rebuildInvData(){
     const inv = invByPlayer[p.entityId]; if (!inv) return;
     Object.assign(merged.items, inv.items || {});
     Object.assign(merged.cargos, inv.cargos || {});
-    (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); iv._ownerName = playerName(p); merged.inventories.push(iv); });
+    (inv.inventories || []).forEach(iv => { iv._ownerId = String(p.entityId); merged.inventories.push(iv); });
   });
   invData = merged;
   // Re-attach the dropdown selections on EVERY rebuild, against the persisted keys unioned with anything
@@ -4619,16 +4482,6 @@ function liveComplete(){
   const rgs = Object.keys(liveConns);
   return rgs.length > 0 && rgs.every(rg => liveConns[rg].snapshotTs > 0 && liveConns[rg].status === 'live');
 }
-// liveReady() = every region has either answered or demonstrably failed, and at least one answered → we
-// know as much as we're going to for now, so RENDER it. A region whose mirror is up but refuses to
-// answer subscribes (observed on r19: connects in 253ms, never sends a frame, while /health still calls
-// it live) must not hold twelve healthy regions hostage — the alternative was every tab silently
-// serving bitjita forever.
-function liveReady(){
-  const rgs = Object.keys(liveConns);
-  if (!rgs.length) return false;
-  return rgs.some(rg => liveConns[rg].snapshotTs > 0) && rgs.every(rg => liveConns[rg].snapshotTs > 0 || liveConns[rg].tried);
-}
 // ═══════════ THE SOURCE SWITCH — one source at a time, never a blend ═══════════
 // Rendering from the cache while ONE mirror is missing produced views with silent holes: a player's
 // house storage vanished because it all lives in one region, and nothing said so. Worse, two tabs could
@@ -4680,36 +4533,23 @@ function dataSource(){
   return 'bitjita';
 }
 const usingCache = () => dataSource() === 'cache';
-// `additive` = this snapshot answers a SECOND Subscribe sent on an already-open socket, so it contains
-// ONLY that subscribe's rows. Replacing the region slice with it (correct for a full dial) would delete
-// everything the first subscribe established. Merge instead.
-function liveApplySnapshot(c, frame, additive){
+function liveApplySnapshot(c, frame){
   const fresh = {};
   ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
     // UNION, not overwrite: one subscribe can carry several queries against the SAME table (personal
     // inventory by owner + banks by player_owner + container contents by id), and the snapshot may
     // report them as separate table entries.
     const m = fresh[t.table_name] || (fresh[t.table_name] = new Map());
-    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r){ r.__region = c.region; m.set(livePk(r), r); } }));
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) m.set(livePk(r), r); }));
   });
   const evs = [];
-  if (additive){
-    // Merge: only tables this snapshot actually mentioned, and only adding rows.
-    Object.keys(fresh).forEach(tb => {
-      const byRegion = liveCache[tb] || (liveCache[tb] = {});
-      const slice = byRegion[c.region] || (byRegion[c.region] = new Map());
-      fresh[tb].forEach((row, pk) => slice.set(pk, row));
-      evs.push({ table: tb, region: c.region, isDelta: false, rows: [...fresh[tb].values()], deletes: [] });
-    });
-  } else {
-    // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
-    // snapshot didn't mention it), so rows from before a reconnect can never linger.
-    c.tables.forEach(tb => {
-      const slice = fresh[tb] || new Map();
-      (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
-      evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
-    });
-  }
+  // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
+  // snapshot didn't mention it), so rows from before a reconnect can never linger.
+  c.tables.forEach(tb => {
+    const slice = fresh[tb] || new Map();
+    (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
+    evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
+  });
   liveNotify(evs);
   liveHandoffKick();
 }
@@ -4757,8 +4597,8 @@ function liveApplyDelta(c, frame){
     (t.updates || []).forEach(u => {
       // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
       // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
-      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } r.__region = c.region; slice.delete(livePk(r)); del.push(r); } });
-      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } r.__region = c.region; slice.set(livePk(r), r); ins.push(r); } });
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
   });
@@ -5042,32 +4882,9 @@ function liveDial(rg){
   if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
   if (ex) liveDrop(rg);
   const { sqls, tables } = liveQuerySet(liveRosterIds, rg);
-  const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false, subs: 1 };
+  const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
   liveConns[rg] = c;
   liveOpen(c);
-}
-// Send an ADDITIVE Subscribe on the sockets that are already open, rather than redialling. Used only
-// for discovery: at boot we can't name bank buildings or house chests until the first snapshot tells us
-// they exist, and redialling for that cost a whole second round of 13 handshakes. Subscriptions are
-// additive, so this just extends what each socket is watching — no new sockets, no blind window.
-// It is bounded: ONE extra subscribe per socket for the whole session (the measured danger zone is ~30),
-// and the next roster redial collapses everything back to a single subscription per socket.
-function liveAddSubscribe(){
-  let sent = 0;
-  Object.values(liveConns).forEach(c => {
-    if (c.closed || c.key !== liveRosterKey || !c.ws || c.ws.readyState !== 1) return;
-    const { sqls, tables } = liveQuerySet(liveRosterIds, c.region);
-    // Only the queries the socket isn't already carrying.
-    const have = new Set(c.sqls);
-    const extra = sqls.filter(s => !have.has(s));
-    if (!extra.length) return;
-    try {
-      c.ws.send(JSON.stringify({ Subscribe: { request_id: ++c.subs, query_strings: extra } }));
-      c.sqls = sqls; c.tables = tables;   // the socket now covers the full set (a reconnect dials it whole)
-      sent++;
-    } catch(e){}
-  });
-  return sent;
 }
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey) return;
@@ -5078,10 +4895,6 @@ function liveOpen(c){
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
   c.ws = ws; c.status = 'connecting';
-  // Per-SOCKET, not per-region: a reconnect re-sends the whole query set, so its snapshot must REPLACE
-  // the region slice. Keying "is this additive?" off c.snapshotTs (which survives a reconnect) would
-  // wrongly treat that full snapshot as a merge and leave pre-outage rows lingering forever.
-  c.snapOnThisSocket = false;
   // §8.3 stuck-CONNECTING watchdog: past the browser's ~22-socket SHARED budget a socket hangs in
   // CONNECTING forever with no event — the region would render as genuinely empty. Surface it and keep
   // retrying; the moment budget frees (other app tab closed), a redial succeeds instantly.
@@ -5103,12 +4916,12 @@ function liveOpen(c){
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
     bcCreOnOpen(c);   // creature roster/position sets ride this socket as NAMED subscriptions (SubscribeMulti) — see bcCre*
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
-    // this the region sits at 'open' forever and liveReady() never trips. Give up, mark it tried, and
-    // let onclose reschedule with backoff — the region rejoins the moment it starts answering again.
+    // this the region sits at 'open' forever and liveComplete() never trips. Give up and let onclose
+    // reschedule with backoff — the region rejoins the moment it starts answering again.
     clearTimeout(c.snapTimer);
     c.snapTimer = setTimeout(() => {
       if (c.snapshotTs || c.closed) return;
-      c.status = 'stalled'; c.tried = true;
+      c.status = 'stalled';
       console.warn(`[live] r${c.region} accepted the socket but never answered its subscribe in ${LIVE_SNAPSHOT_TIMEOUT_MS}ms — backing off ${Math.round(c.backoff * 2 / 1000)}s`);
       try { ws.close(); } catch(e){}
     }, LIVE_SNAPSHOT_TIMEOUT_MS);
@@ -5120,13 +4933,8 @@ function liveOpen(c){
     if (m.InitialSubscription){
       clearTimeout(c.snapTimer);
       const first = !c.snapshotTs;
-      // Not the first snapshot ON THIS SOCKET → it answers the ADDITIVE discovery subscribe, so it
-      // carries only those queries' rows and must merge, not replace (replacing would wipe the base
-      // subscribe's rows and make every player's data vanish).
-      const additive = c.snapOnThisSocket;
-      c.snapOnThisSocket = true;
-      c.status = 'live'; c.snapshotTs = Date.now(); c.tried = true; c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
-      liveApplySnapshot(c, m.InitialSubscription, additive);
+      c.status = 'live'; c.snapshotTs = Date.now(); c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
+      liveApplySnapshot(c, m.InitialSubscription);
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
       // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
       if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
@@ -5134,12 +4942,12 @@ function liveOpen(c){
     else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
     else if (m.SubscribeMultiApplied) bcCreOnApplied(c, m.SubscribeMultiApplied);      // a creature set's snapshot
     else if (m.UnsubscribeMultiApplied){ /* a replaced creature set: the next SubscribeMultiApplied rebuilds that region's dots whole */ }
-    else if (m.SubscriptionError){ c.tried = true; bcCreOnError(c, m.SubscriptionError); console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
+    else if (m.SubscriptionError){ bcCreOnError(c, m.SubscriptionError); console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
     // IdentityToken (first frame) and anything unrecognised: ignore.
   };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onclose = () => {
-    c.ws = null; c.cre = null; clearTimeout(c.snapTimer); c.tried = true;   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
+    c.ws = null; c.cre = null; clearTimeout(c.snapTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
     if (c.closed || c.key !== liveRosterKey) return;
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     liveReschedule(c);
@@ -7324,7 +7132,6 @@ let taskRowsHidden = (() => { try { const v = JSON.parse(localStorage.getItem('b
 function _saveTaskRowsHidden(){ const o = {}; Object.keys(taskRowsHidden).forEach(k => { if (taskRowsHidden[k].size) o[k] = [...taskRowsHidden[k]]; }); safeSetItem('bc_task_rows_hidden', JSON.stringify(o)); }
 function taskRowHide(npc, t){ (taskRowsHidden[npc] = taskRowsHidden[npc] || new Set()).add(t); _saveTaskRowsHidden(); renderTasksUI(); }
 function taskRowRestore(npc, t){ if (taskRowsHidden[npc]) taskRowsHidden[npc].delete(t); _saveTaskRowsHidden(); renderTasksUI(); }
-function taskRowRestoreAll(npc){ delete taskRowsHidden[npc]; _saveTaskRowsHidden(); renderTasksUI(); }
 // Hideable material COLUMNS, one set per trader (× on header hover, like the Scrap grid), persisted as {npcId:[family keys]}.
 let taskColsHidden = (() => { try { const v = JSON.parse(localStorage.getItem('bc_task_cols_hidden') || '{}'); const o = {}; Object.keys(v || {}).forEach(k => o[k] = new Set(v[k] || [])); return o; } catch(e){ return {}; } })();
 function _saveTaskColsHidden(){ const o = {}; Object.keys(taskColsHidden).forEach(k => { if (taskColsHidden[k].size) o[k] = [...taskColsHidden[k]]; }); safeSetItem('bc_task_cols_hidden', JSON.stringify(o)); }
@@ -7425,64 +7232,6 @@ async function renderTasksUI(){
   }).join('');
   el.innerHTML = toolbar + taskInvSelectorHtml() + blocks + '<div style="height:2.5rem"></div>';   // breathing room under the last trader
   updateLiveBtns();
-}
-
-function skillIcon(skill) {
-  const s = (skill||'').toLowerCase();
-  if (s.includes('woodcutt') || s.includes('logging')) return 'ti-trees';
-  if (s.includes('wood') && !s.includes('work')) return 'ti-trees';
-  if (s.includes('carpent') || s.includes('woodwork')) return 'ti-ruler-2';
-  if (s.includes('mining') || s.includes('mine')) return 'ti-pick';
-  if (s.includes('quarry') || s.includes('excavat')) return 'ti-pick';
-  if (s.includes('cook') || s.includes('chef') || s.includes('bak')) return 'ti-soup';
-  if (s.includes('farm') || s.includes('harvest') || s.includes('agri')) return 'ti-plant';
-  if (s.includes('herd') || s.includes('ranch') || s.includes('animal')) return 'ti-paw';
-  if (s.includes('build') || s.includes('construct') || s.includes('architect')) return 'ti-building';
-  if (s.includes('blacksmith') || s.includes('smith')) return 'ti-hammer';
-  if (s.includes('forge') || s.includes('foundry') || s.includes('metal')) return 'ti-flame';
-  if (s.includes('fish')) return 'ti-fish';
-  if (s.includes('hunt') || s.includes('ranger')) return 'ti-bow-arrow';
-  if (s.includes('combat') || s.includes('fight') || s.includes('warrior') || s.includes('battle')) return 'ti-sword';
-  if (s.includes('gather') || s.includes('forage')) return 'ti-basket';
-  if (s.includes('herb') || s.includes('alchemi') || s.includes('brew')) return 'ti-leaf';
-  if (s.includes('stone') || s.includes('mason')) return 'ti-wall';
-  if (s.includes('tailoring') || s.includes('weaving') || s.includes('textile')) return 'ti-scissors';
-  if (s.includes('leather') || s.includes('tanning')) return 'ti-scissors';
-  if (s.includes('jewel') || s.includes('gem') || s.includes('lapidary')) return 'ti-diamond';
-  if (s.includes('schol') || s.includes('research') || s.includes('lore')) return 'ti-book';
-  if (s.includes('trade') || s.includes('merchant') || s.includes('commerce')) return 'ti-coins';
-  if (s.includes('survey') || s.includes('cartograph') || s.includes('explor')) return 'ti-map';
-  if (s.includes('travell') || s.includes('traveler')) return 'ti-route';
-  if (s.includes('craft')) return 'ti-tools';
-  return 'ti-tool';
-}
-
-function craftIcon(name) {
-  const s = (name||'').toLowerCase();
-  if (s.includes('sword') || s.includes('blade') || s.includes('dagger') || s.includes('lance') || s.includes('spear')) return 'ti-sword';
-  if (s.includes('axe') || s.includes('hatchet')) return 'ti-axe';
-  if (s.includes('bow') || s.includes('arrow') || s.includes('quiver')) return 'ti-bow-arrow';
-  if (s.includes('shield') || s.includes('buckler')) return 'ti-shield';
-  if (s.includes('helm') || s.includes('helmet') || s.includes('hood') || s.includes('hat') || s.includes('cap')) return 'ti-hard-hat';
-  if (s.includes('chestplate') || s.includes('breastplate') || s.includes('armor') || s.includes('armour') || s.includes('tunic') || s.includes('robe') || s.includes('coat')) return 'ti-shield-half';
-  if (s.includes('boot') || s.includes('shoe') || s.includes('greave') || s.includes('legging') || s.includes('trouser') || s.includes('pant')) return 'ti-boot-2';
-  if (s.includes('glove') || s.includes('gauntlet') || s.includes('handwrap') || s.includes('bracer')) return 'ti-glove';
-  if (s.includes('ring') || s.includes('necklace') || s.includes('amulet') || s.includes('pendant')) return 'ti-diamond';
-  if (s.includes('ingot') || s.includes('bar') || s.includes('iron') || s.includes('steel') || s.includes('copper') || s.includes('gold') || s.includes('silver') || s.includes('luminite') || s.includes('ore')) return 'ti-hammer';
-  if (s.includes('plank') || s.includes('lumber') || s.includes('log') || s.includes('wood')) return 'ti-trees';
-  if (s.includes('stone') || s.includes('brick') || s.includes('block') || s.includes('rock')) return 'ti-wall';
-  if (s.includes('thread') || s.includes('spool') || s.includes('yarn') || s.includes('fibre') || s.includes('fiber') || s.includes('cloth') || s.includes('fabric') || s.includes('textile') || s.includes('wool')) return 'ti-needle-thread';
-  if (s.includes('leather') || s.includes('hide') || s.includes('fur') || s.includes('pelt') || s.includes('skin')) return 'ti-paw';
-  if (s.includes('potion') || s.includes('elixir') || s.includes('tonic') || s.includes('brew') || s.includes('flask') || s.includes('vial')) return 'ti-flask';
-  if (s.includes('food') || s.includes('meal') || s.includes('stew') || s.includes('soup') || s.includes('bread') || s.includes('pie') || s.includes('cooked') || s.includes('roast') || s.includes('fish') || s.includes('meat')) return 'ti-soup';
-  if (s.includes('herb') || s.includes('plant') || s.includes('flower') || s.includes('mushroom') || s.includes('root')) return 'ti-leaf';
-  if (s.includes('rope') || s.includes('string') || s.includes('cord') || s.includes('twine')) return 'ti-line';
-  if (s.includes('tool') || s.includes('pickaxe') || s.includes('shovel') || s.includes('chisel')) return 'ti-tools';
-  if (s.includes('furniture') || s.includes('table') || s.includes('chair') || s.includes('chest') || s.includes('cabinet') || s.includes('shelf')) return 'ti-armchair';
-  if (s.includes('bag') || s.includes('pack') || s.includes('pouch') || s.includes('sack')) return 'ti-backpack';
-  if (s.includes('scroll') || s.includes('book') || s.includes('tome') || s.includes('manual')) return 'ti-book';
-  if (s.includes('gem') || s.includes('crystal') || s.includes('jewel')) return 'ti-diamond';
-  return 'ti-hammer';
 }
 
 // ── MARKET ──
@@ -8077,22 +7826,6 @@ function applyDealFilter(idx) {
   if (bfEl) bfEl.value = bf;
   if (stEl) stEl.value = st;
   renderDealResults();
-}
-
-async function loadMyOrders(id) {
-  const el = document.getElementById('my-orders-content');
-  if (!el) return;
-  try {
-    const d = await apiFetch(`/api/players/${id}/market`);
-    const sells=d.sellOrders||[],buys=d.buyOrders||[];
-    if(!sells.length&&!buys.length){el.innerHTML='<div class="empty"><i class="ti ti-mood-empty"></i><span>No open orders</span></div>';return;}
-    el.innerHTML=`<div style="overflow-x:auto"><table class="market-table">
-      <thead><tr><th>Type</th><th>Item</th><th>Price</th><th>Qty</th><th>Claim</th></tr></thead>
-      <tbody>
-        ${sells.map(o=>`<tr><td><span class="badge badge-sell">Sell</span></td><td>${escHtml(o.itemName||'Item '+o.itemId)}</td><td class="price-sell">${fmtCoin(o.priceThreshold||o.price)}</td><td>${fmtNum(o.quantity)}</td><td>${escHtml(o.claimName||'—')}</td></tr>`).join('')}
-        ${buys.map(o=>`<tr><td><span class="badge badge-buy">Buy</span></td><td>${escHtml(o.itemName||'Item '+o.itemId)}</td><td class="price-buy">${fmtCoin(o.priceThreshold||o.price)}</td><td>${fmtNum(o.quantity)}</td><td>${escHtml(o.claimName||'—')}</td></tr>`).join('')}
-      </tbody></table></div>`;
-  } catch(e){el.innerHTML=errBox(e);}
 }
 
 function renderMarketResults() {
@@ -8992,7 +8725,6 @@ async function fetchShoppingPrice(id, isCargo, allowResolve) {
     }
     if (item && hasOrders(d) && !item.resolved) { item.resolved = true; saveShoppingItems(); }   // lock in a good id
     const avg7d = await fetchShoppingAvg7d(id, isCargo);
-    const regionId = shoppingRegionFilter || null;
 
     const pickOrder = (orders, compareFn) => {
       if (!orders || !orders.length) return null;
@@ -9074,9 +8806,6 @@ function shoppingInvalidatePrices() {
   if (listEl) listEl.innerHTML = renderShoppingListHtml();
 }
 
-// Called by live refresh system
-function manualRefreshShopping() { fetchAllShoppingPrices(); }
-
 // ── MAP ──
 // Leaflet map. The custom CRS + base-image approach is adapted from the open-source
 // bitcraftmap project (BSD-2-Clause). Map data: prism (BitCraftToolBox) · bitcraftmap · bitjita (fallback).
@@ -9096,10 +8825,6 @@ function bcLoadMapView(){
     return (v && Number.isFinite(v.lat) && Number.isFinite(v.lng) && Number.isFinite(v.zoom)) ? v : null;
   } catch(e){ return null; }
 }
-const BC_TIER_COLORS = {
-  0:'#8a8f9c',1:'#9aa3ad',2:'#c08a5a',3:'#7fa355',4:'#55a0f5',
-  5:'#9b5af0',6:'#f0a83a',7:'#f0653a',8:'#f03a6e',9:'#3af0d0',10:'#ffffff'
-};
 
 function bcMapCRS() {
   // BitCraft hex grid: vertical axis scaled by the hex apothem. Identity pixel transform.
@@ -10298,7 +10023,7 @@ function bcPointLayerClass(){
   // renderer transform so points scale/translate WITH the map during the animation (no drift-then-snap).
   _bcPointCls = L.Layer.extend({
     options: { padding: 0.1 },
-    initialize(opts){ L.Util.setOptions(this, opts); this._sets = []; this._r = (opts&&opts.radius)||4; this._proj = new WeakMap(); },
+    initialize(opts){ L.Util.setOptions(this, opts); this._sets = []; this._proj = new WeakMap(); },
     setDatasets(sets){ this._sets = sets||[]; if (this._map) this._redraw(); return this; },
     onAdd(map){
       this._map = map;
@@ -10664,10 +10389,9 @@ let bcRelayRedrawT = null;
 const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-relay';
 function bcRelayEnemyTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'enemy'); }
 function bcRelayResourceTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'resource'); }
-function bcRelayActive(){ return bcRelayReady; }
 async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${API}/mapassets/prism-relay.js`); return bcRelayLib; }
-// Rebuild each tracked enemy's points from the SDK cache (bucketed by enemyType). Throttled — animals
-// emit a flood of move events — and only repaints while the Map tab is showing.
+// Rebuild each tracked resource's points from the SDK cache (bucketed by resourceId). Throttled, and only
+// repaints while the Map tab is showing.
 function bcRelayScheduleRedraw(){ if (bcRelayRedrawT) return; bcRelayRedrawT = setTimeout(() => { bcRelayRedrawT = null; bcRelayRebuild(); }, 200); }
 function bcRelayRebuild(){
   if (!bcRelayConn || !bcRelayReady) return;
@@ -10679,7 +10403,7 @@ function bcRelayRebuild(){
   resTypes.forEach(t => t.count = t.pts.length);
   if (bcMapShowing()){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
-// Sync subscriptions to the currently-tracked enemy types × selected region. Connects on first use,
+// Sync subscriptions to the currently-tracked resource types × selected region. Connects on first use,
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
 function bcRelaySync(){
   bcCreSync();   // creatures ride the bitcraftsync sockets (bcCre*); everything below is prism: resources + respawn timers
@@ -11175,7 +10899,6 @@ function plannerGetCraftableItems() {
 }
 
 function plannerGetSkillForItem(itemId) {
-  const recipes = craftingData.recipesByOutput[itemId] || [];
   const best = plannerBestRecipe(itemId);
   if (!best) return null;
   return craftingData.skillsById[best.skillId];
@@ -11231,12 +10954,7 @@ function plannerFilter() {
 
 function plannerSelectItem(itemId) {
   plannerSelId = itemId;
-  // Re-render item list to update active state
-  document.querySelectorAll('.planner-item-row').forEach(r => r.classList.remove('pactive'));
-  // Find the clicked row and mark active
-  const rows = document.querySelectorAll('.planner-item-row');
-  // Rebuild to update active class efficiently
-  plannerFilter();
+  plannerFilter();   // rebuilds the item list with the selected row marked active
   // Scroll selected into view
   const activeRow = document.querySelector('.planner-item-row.pactive');
   if (activeRow) activeRow.scrollIntoView({block:'nearest'});
@@ -12468,9 +12186,6 @@ function slotContents(slot) {
   return (slot.contents && slot.contents.itemId) ? slot.contents : (slot.itemId ? slot : null);
 }
 
-// Bootstrap. Pull any server-backed prefs FIRST (fills keys missing locally — restores a fresh or
-// cleared browser from the backup) so the initial render doesn't overwrite the backup with defaults.
-// restorePrefsFromServer has a short timeout, so a slow/absent backend never blocks the UI for long.
 // ══════════════════════════════════════════════════════════════════════════
 // ALERTS / NOTIFICATIONS
 // Background poller over tracked players: plays a sound + toast when a buff is lost (food or any
@@ -13709,7 +13424,6 @@ function gcMatRank(label){ const n = (label||'').toLowerCase(); return /ingot/.t
 // The plan summary + overall funding bar. Kept above the two columns so "Tool materials" and
 // "Contributions" line up.
 function gcPlanHtml(lines){
-  const fmt = n => fmtCoin(Math.round(n));
   const total = lines.reduce((s,l)=>s+(l.value||0),0);
   const haveGathered = Object.keys(gcGathered).length > 0;
   const toolSummary = (gcState.tools||[]).filter(t=>t.family).map(t => `${cap(t.family)} T${t.topTier}×${fmtCount(t.qty)}`).join('  ·  ');
@@ -13770,7 +13484,6 @@ async function renderGroupCraft(){
 }
 
 (async () => {
-  try { await restorePrefsFromServer(); } catch(e) {}
   try { const t = localStorage.getItem('bc_tab'); if (t && document.getElementById('tab-'+t)) currentTab = t; } catch(e) {}
   routeApply();   // a path in the address bar wins over the remembered tab
   // Load saved shopping lists so in-memory state mirrors storage before the Shopping tab is opened.

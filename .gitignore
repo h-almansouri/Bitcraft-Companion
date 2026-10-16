@@ -8,7 +8,6 @@ data/
 node_modules/
 
 # Leftover investigation/debug scripts (not part of the app)
-debug-chunk.js
 _bcm3*
 
 # OS / editor cruft
