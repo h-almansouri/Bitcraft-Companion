@@ -46,8 +46,9 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .search-btn{width:100%;margin-top:.4rem;background:var(--teal-dim);border:1px solid var(--teal);color:var(--teal-light);border-radius:6px;padding:5px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;transition:background .15s}
 .search-btn:hover{background:var(--teal)}
 .search-results{position:absolute;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;z-index:100;width:100%;top:100%;left:0;margin-top:4px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.5)}
-.search-result-item{padding:7px 10px;font-size:12px;cursor:pointer;color:var(--text);display:flex;flex-direction:column;gap:1px}
+.search-result-item{padding:7px 10px;font-size:12px;cursor:pointer;color:var(--text);display:flex;flex-direction:column;gap:1px;transition:opacity .12s}
 .search-result-item:hover{background:var(--bg4)}
+.search-result-item.ps-out{opacity:.3;pointer-events:none}   /* no longer matches; replaced when the answer lands */
 .search-result-item small{color:var(--text3);font-size:10px}
 /* Player lookup: topbar search + page header */
 .tb-search{width:230px}
@@ -1577,7 +1578,7 @@ function openLookup(id, sub, opts){
 function lookupSub(sub){ if (lookupState.id) openLookup(lookupState.id, sub); }
 function lookupExit(){ lookupClearSearch(); let t = null; try { t = localStorage.getItem('bc_tab'); } catch(e){} switchTab(t && TAB_ROUTES[t] ? t : 'skills'); }
 // Empty the topbar lookup box (its pending search + dropdown too): "Back to app", and the box's own clear "x".
-function lookupClearSearch(){ clearTimeout(_lookupSearchTimer); const inp = document.getElementById('lookup-input'); if (inp) inp.value = ''; lookupHideResults(); }
+function lookupClearSearch(){ const inp = document.getElementById('lookup-input'); if (inp) inp.value = ''; lookupHideResults(); }
 async function lookupLoadInfo(){
   const id = lookupState.id;
   try { const d = await apiFetch('/api/players/' + id); if (lookupState.id !== id) return; lookupState.info = d.player || d || {}; }
@@ -1657,27 +1658,98 @@ function lookupRender(){
 function lookupRenderInvBody(){ const b = document.getElementById('lookup-inv-body'); if (!b || !lookupState.data.inventory) return; b.innerHTML = inventoryContentHtml(lookupState.data.inventory, lookupState.invQ || '', 'lk' + lookupState.id); }
 function lookupRefresh(){ const s = lookupState; if (!s.id) return; s.info = null; delete s.data[s.sub]; lookupLoadInfo(); lookupLoadSub(s.sub, true); }
 function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); bcSyncAlertFeed(); lookupRenderHeader(); }   // tracked now: the relay feed takes over, drop the page's channel
+// ── Player-name answers on hand, narrowed as you type ──
+// bitjita's /api/players?q= is a case-insensitive LIKE '%q%' (so _ and % are wildcards) returning the alphabetically
+// first 50 matches. Every name a longer query matches, a shorter query inside it matched too, so a cached answer can be
+// narrowed the moment a letter is typed — and the names left are the FIRST names of the longer query's own answer
+// (anything else it matches sorts after the cached 50th, i.e. below them). So narrowing an answer under 50 (every match
+// there is) is final, and so is narrowing a capped one down to at least a full list; anything shorter shows at once and
+// the request adds the rest below it. Answers keep 5 minutes, so backspacing is instant too.
+const PS_CAP = 50, PS_TTL = 5 * 60 * 1000;
+const _psCache = new Map(), _psInflight = new Map();   // lower-cased query -> { t, players } / its request
+function playerSearchLocal(q, max){
+  const k = q.toLowerCase(), now = Date.now(), hit = _psCache.get(k);
+  if (hit && now - hit.t < PS_TTL) return { players: hit.players, final: true };
+  if (/[_%\\]/.test(k)) return null;   // wildcards don't narrow like a plain substring — the server answers those
+  let best = null, final = false;
+  for (const [bk, e] of _psCache){
+    if (now - e.t >= PS_TTL || !k.includes(bk)) continue;
+    const players = e.players.filter(p => playerName(p).toLowerCase().includes(k));
+    if (!best || players.length > best.length) best = players;
+    if (e.players.length < PS_CAP) final = true;
+  }
+  return best && { players: best, final: final || best.length >= max };
+}
+function playerSearchFetch(q){
+  const k = q.toLowerCase();
+  if (!_psInflight.has(k)) _psInflight.set(k, apiFetch('/api/players?q=' + encodeURIComponent(q), 10000).then(d => {
+    const players = d && d.players;
+    if (!Array.isArray(players)) throw new Error('no player list');   // never cache a malformed reply as "no matches"
+    _psCache.delete(k); _psCache.set(k, { t: Date.now(), players });
+    if (_psCache.size > 80) _psCache.delete(_psCache.keys().next().value);
+    return players;
+  }).finally(() => _psInflight.delete(k)));
+  return _psInflight.get(k);
+}
+// Redraw a search dropdown in place. Rows are keyed ({k, h}), so a row that stays is left alone instead of rebuilt; new
+// rows fade in and the box eases to its new height. While the answer is still coming (opt.pending), rows that stopped
+// matching stay, dimmed, rather than collapsing the box to "Searching…" — the answer replaces them.
+function patchResultRows(el, rows, opt){
+  opt = opt || {};
+  const shown = el.style.display !== 'none' && el.childElementCount > 0, h0 = shown ? el.offsetHeight : 0;
+  if (el._rowAnim){ el._rowAnim.cancel(); el._rowAnim = null; }
+  const old = new Map(); for (const c of el.children) if (c._rk) old.set(c._rk, c);
+  const tpl = document.createElement('template'), fresh = [];
+  const make = (k, h) => { tpl.innerHTML = h; const n = tpl.content.firstElementChild; n._rk = k; n._rh = h; fresh.push(n); return n; };
+  const next = rows.map(r => { const c = old.get(r.k); old.delete(r.k); if (c && c._rh === r.h){ c.classList.remove('ps-out'); return c; } return make(r.k, r.h); });
+  if (opt.pending) for (const [k, c] of old) if (k[0] !== '_' && next.length < (opt.max || 8)){ c.classList.add('ps-out'); next.push(c); }
+  const status = opt.failed ? ['_failed', 'var(--red-light)', 'Search failed'] : rows.length ? null
+    : !opt.pending ? ['_none', 'var(--text3)', 'No players found'] : next.length ? null : ['_busy', 'var(--text3)', 'Searching…'];
+  if (status) next.push(old.get(status[0]) || make(status[0], '<div class="search-result-item" style="color:' + status[1] + '">' + status[2] + '</div>'));
+  const keep = new Set(next);
+  for (const c of [...el.children]) if (!keep.has(c)) c.remove();
+  next.forEach((n, i) => { if (el.children[i] !== n) el.insertBefore(n, el.children[i] || null); });
+  el.style.display = 'block';
+  if (!shown || !el.animate || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const h1 = el.offsetHeight;
+  if (h1 !== h0) el._rowAnim = el.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 140, easing: 'ease-out' });
+  fresh.forEach(n => n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: 'ease-out' }));
+}
 // Topbar search → lookup (never tracks). Same endpoint as the sidebar search, its own dropdown.
-let _lookupSearchTimer = null, _lookupSearchBound = false;
+const LOOKUP_MAX = 8;
+let _lookupSearchTimer = null, _lookupSearchQ = null, _lookupSearchBound = false;   // _lookupSearchQ: the query whose request is queued or out
 function initLookupSearch(){
   const inp = document.getElementById('lookup-input'); if (!inp || _lookupSearchBound) return; _lookupSearchBound = true;
-  inp.addEventListener('input', () => { clearTimeout(_lookupSearchTimer); const q = inp.value.trim(); if (q.length < 2){ lookupHideResults(); return; } _lookupSearchTimer = setTimeout(() => lookupSearch(q), 400); });
+  inp.addEventListener('input', () => lookupSearch());
   inp.addEventListener('keydown', e => {
-    if (e.key === 'Enter'){ const first = document.querySelector('#lookup-results .search-result-item[data-id]'); if (first) first.click(); else lookupSearch(inp.value.trim()); }
+    if (e.key === 'Enter'){ const first = document.querySelector('#lookup-results .search-result-item[data-id]:not(.ps-out)'); if (first) first.click(); else lookupSearch(true); }
     if (e.key === 'Escape') lookupHideResults();
   });
   document.addEventListener('click', e => { if (!e.target.closest('#lookup-search-wrap')) lookupHideResults(); });
 }
-function lookupHideResults(){ const el = document.getElementById('lookup-results'); if (el) el.style.display = 'none'; }
-async function lookupSearch(q){
-  const el = document.getElementById('lookup-results'); if (!el || !q) return;
-  el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">Searching…</div>'; el.style.display = 'block';
-  try {
-    const d = await apiFetch('/api/players?q=' + encodeURIComponent(q));
-    const players = (d.players || []).slice(0, 8);
-    if (!players.length){ el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">No players found</div>'; return; }
-    el.innerHTML = players.map(p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(p.username || p.userName || 'Unknown') + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>'; }).join('');
-  } catch(e){ el.innerHTML = '<div class="search-result-item" style="color:var(--red-light)">Search failed</div>'; }
+function lookupHideResults(){ clearTimeout(_lookupSearchTimer); _lookupSearchQ = null; const el = document.getElementById('lookup-results'); if (el){ el.style.display = 'none'; el.textContent = ''; } }
+// Draws the best answer on hand straight away and asks bitjita only when that isn't the final list. A reply just fills
+// the cache and redraws for whatever the box says by then, so a slow reply to an older query can't overwrite a newer one.
+function lookupSearch(now){
+  const inp = document.getElementById('lookup-input'); if (!inp) return;
+  const q = inp.value.trim();
+  if (q.length < 2){ lookupHideResults(); return; }
+  const local = playerSearchLocal(q, LOOKUP_MAX), pending = !(local && local.final);
+  lookupDrawResults(local ? local.players : [], { pending });
+  if (!pending){ clearTimeout(_lookupSearchTimer); _lookupSearchQ = null; return; }
+  if (_lookupSearchQ === q && !now) return;
+  clearTimeout(_lookupSearchTimer); _lookupSearchQ = q;
+  _lookupSearchTimer = setTimeout(() => playerSearchFetch(q).then(
+    () => { if (_lookupSearchQ != null) lookupSearch(); },
+    () => { if (_lookupSearchQ !== q) return; _lookupSearchQ = null; const l = playerSearchLocal(q, LOOKUP_MAX); lookupDrawResults(l ? l.players : [], { failed: true }); }
+  ), now ? 0 : 250);
+}
+function lookupDrawResults(players, opt){
+  const el = document.getElementById('lookup-results'); if (!el) return;
+  patchResultRows(el, players.slice(0, LOOKUP_MAX).map(p => {
+    const pid = escHtml(String(p.entityId));
+    return { k: pid, h: '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>' };
+  }), Object.assign({ max: LOOKUP_MAX }, opt));
 }
 function switchTab(tab, opts) {
   stopPassiveCraftTimer(); stopCraftActiveTick(); stopPlaceableTimers(); plFilterClose();   // all belong to the Crafts tab; re-armed by renderCraftingTab
