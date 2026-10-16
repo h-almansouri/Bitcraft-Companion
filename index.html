@@ -4386,7 +4386,6 @@ const LIVE_COLS = {
   deployable_state_v2: ['entity_id','owner_id','claim_entity_id','direction','deployable_description_id','nickname','hidden','appearance_override_id'],
   player_housing_state: ['entity_id','entrance_building_entity_id','network_entity_id','exit_portal_entity_id','rank','locked_until','is_empty','region_index'],
   storage_log_state: ['id','object_entity_id','subject_entity_id','subject_name','subject_type','data','timestamp','days_since_epoch'],
-  traveler_task_loop_timer: ['scheduled_id','scheduled_at'],
   building_nickname_state: ['entity_id','nickname'],
   // active_buffs element: { buff_id i32, buff_start_timestamp Timestamp, buff_duration i32, values [f32] }
   buff_desc: ['id','buff_type_id','description','priority','duration','warn_time','online_timestamp','beneficial','icon_asset_name','stats','vfx','vfx_attachment_point'],
@@ -4754,9 +4753,8 @@ function liveQuerySet(ids, region){
   // Tracked claims in THIS region: their shared storage, its containers and names, and its activity log
   // (claimStorageSqls). Independent of the player roster — a claim can be tracked with nobody tracked at all.
   trackedClaims.forEach(c => { if (claimRegion(c) === region) sqls.push(...claimStorageSqls(c)); });
-  // Unfiltered but bounded (§8.4): one row per mirror each — the region's display name, and the task
-  // rotation timer (its delta at rollover is what lets the Tasks tab show a live countdown).
-  sqls.push('SELECT * FROM world_region_name_state', 'SELECT * FROM traveler_task_loop_timer');
+  // Unfiltered but bounded (§8.4): one row per mirror — the region's display name.
+  sqls.push('SELECT * FROM world_region_name_state');
   // Map "everyone online" layer (bcPlayersWanted): the same three questions bitjita's map asks its relay —
   // movement rows of signed-in players in the overworld, their usernames, and the signed-in list itself.
   // Semijoins, so a sign-out deletes that player's rows from the result — no client-side reaping. Measured
@@ -4807,7 +4805,7 @@ function liveQuerySet(ids, region){
   return {
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
-      'world_region_name_state', 'traveler_task_loop_timer', 'building_nickname_state', 'claim_state',
+      'world_region_name_state', 'building_nickname_state', 'claim_state',
       'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state',
       'placeable_state', 'placeable_growth_timer', 'storage_log_state'],
   };
