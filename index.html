@@ -3294,10 +3294,11 @@ function equipmentSectionHtml(data, pfx){
 const TOOLBELT_HIDE = new Set(['cooking pot', 'mallet', 'hexite tuner']);
 function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data).filter(s => !(/^tool ?belt$/i.test(s.inventoryName || '') && TOOLBELT_HIDE.has(((s.meta && s.meta.name) || '').toLowerCase())));
-  q = (q||'').toLowerCase();
+  q = (q||'').trim().toLowerCase();
   const equip = q ? '' : equipmentSectionHtml(data, pfx);   // hidden while searching, so results stay focused
   if (!allSlots.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
-  const filtered = q ? allSlots.filter(s => (s.meta?.name||'').toLowerCase().includes(q) || (s.meta?.tag||'').toLowerCase().includes(q)) : allSlots;
+  const words = searchWords(q);
+  const filtered = q ? allSlots.filter(s => matchesWords(words, s.meta?.name, s.meta?.tag)) : allSlots;
   if (!filtered.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
   // Sort by tier (untiered sinks to the bottom), then name; accent each card with its tier colour.
   const invTierKey = m => (m && m.tier > 0) ? m.tier : 99;
@@ -5636,7 +5637,7 @@ function claimLogRender(cid){
   }
   const L = claimLog[cid], names = claimNames[cid] || new Map(), q = (invSearch || '').trim().toLowerCase();
   let rows = L ? [...L.ev.values()].sort((a, b) => b.id - a.id).map(e => ({ e, item: claimLogItem(e), where: names.get(e.b) || 'storage' })) : [];
-  if (q) rows = rows.filter(x => x.item.toLowerCase().includes(q) || x.e.who.toLowerCase().includes(q));   // items and players — not container names ("Potions and Consumables" would match every scroll in it)
+  if (q){ const words = searchWords(q); rows = rows.filter(x => matchesWords(words, x.item, x.e.who)); }   // items and players — not container names ("Potions and Consumables" would match every scroll in it)
   const limit = claimLogLimit[cid] || 25;
   wrap.querySelector('.clog-meta').textContent = !rows.length ? '' : q ? `${rows.length} matching` : rows.length > limit ? `latest ${limit} of ${rows.length}` : `${rows.length}`;
   plSync(wrap.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
@@ -12435,6 +12436,10 @@ function itemLabel(meta, itemId, itemType) {
   if (meta.tier && meta.tier > 0) return 'T' + meta.tier + ' - ' + name;
   return name;
 }
+// Item search: every word typed has to turn up somewhere in the texts, in any order — so "sturdy pelt" finds
+// Sturdy Raw / Cleaned / Tanned Pelt, and "sturdy pe" already does while you're still typing.
+function searchWords(q){ return (q || '').toLowerCase().split(/\s+/).filter(Boolean); }
+function matchesWords(words, ...texts){ const hay = texts.join(' ').toLowerCase(); return words.every(w => hay.includes(w)); }
 // Real in-game icons: bitjita serves them at https://bitjita.com/<assetName>.webp. We point <img>
 // straight at bitjita (NOT our proxy) so it costs the host nothing, and hide gracefully on a miss.
 const BC_ICON_BASE = 'https://bitjita.com/';
