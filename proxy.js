@@ -290,14 +290,18 @@ function slimBuildings(rows) {
 // real stack, so the crafts tab flickered between names as the fallback handed over to the relay path.
 // This map is the authoritative headline; the scraped outputs stay for the Planner's crafting trees.
 // Stack shape (SATS): [item_id, quantity, [type_variant, []], [durability...]] — only [0] and [1] matter.
+// Each entry also carries the recipe's actions_required, so the crafts tab can total a craft from this copy of
+// the game data, which refreshes itself weekly. craftingData.json is rebuilt by hand: the mushroom Identify recipes
+// (added after its Aug 8 build) had no total, and their raw action count rendered as "2400% complete".
 function slimRecipeOuts(rows) {
   const out = {};
   (Array.isArray(rows) ? rows : []).forEach(x => {
     const s = x && Array.isArray(x.crafted_item_stacks) ? x.crafted_item_stacks[0] : null;
-    if (x && x.id != null && Array.isArray(s) && s[0] != null) out[x.id] = [s[0], +s[1] || 1];
+    if (x && x.id != null && Array.isArray(s) && s[0] != null) out[x.id] = [s[0], +s[1] || 1, +x.actions_required || 0];
   });
   return out;
 }
+const RECIPE_OUTS_FORMAT = 2;   // bump with slimRecipeOuts' shape (2 = actions_required added), so an older disk cache is rebuilt
 // placeable_desc + placeable_growth_desc + placeable_interaction_desc → everything the Crafts tab's Placeables view
 // shows about a placeable (the relay only says WHICH placeable sits where), keyed by placeable id:
 //   [name, tier, kind (the game's tag: "Tree Seed", "Fishing Trap"…), icon, growth, actions]
@@ -337,12 +341,12 @@ async function getItemDefs() {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
       // recipeOuts and placeables must be non-empty — a build whose fetch failed writes {} and must not stick for 7
-      // days (and a cache from before placeables existed, or with placeables in an older shape, is rebuilt once)
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && Object.keys(d.placeables || {}).length && d.placeablesFormat === PLACEABLES_FORMAT) { itemDefs = d; itemDefsBuilding = null; return d; }
+      // days (and a cache from before placeables existed, or with placeables or recipeOuts in an older shape, is rebuilt once)
+      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && d.recipeOutsFormat === RECIPE_OUTS_FORMAT && Object.keys(d.placeables || {}).length && d.placeablesFormat === PLACEABLES_FORMAT) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
       const [items, cargos, equip, buildings, recipes, placeDescs, placeGrowth, placeActs] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => []), ghJson('placeable_desc.json').catch(() => []), ghJson('placeable_growth_desc.json').catch(() => []), ghJson('placeable_interaction_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), placeables: slimPlaceables(placeDescs, placeGrowth, placeActs), placeablesFormat: placeActs.length ? PLACEABLES_FORMAT : 0 };   // no actions = a failed fetch: don't let the disk copy stick
+      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), recipeOutsFormat: RECIPE_OUTS_FORMAT, placeables: slimPlaceables(placeDescs, placeGrowth, placeActs), placeablesFormat: placeActs.length ? PLACEABLES_FORMAT : 0 };   // no actions = a failed fetch: don't let the disk copy stick
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
