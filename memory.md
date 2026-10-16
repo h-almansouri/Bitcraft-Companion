@@ -204,12 +204,13 @@
 Game updates (e.g. "Uncharted Islands", 2026-06-11) add items/recipes/regions. What each data source needs:
 - **Market, item detail/orders, regions, map terrain/claims/POIs/players** = LIVE from bitjita APIs → auto-update,
   no action. Verified the update did NOT change any API response shape (same keys, itemType 0/1, claimLocationX/Z).
-- **Crafting/Planner/Crafts/Craft-vs-Buy** = `craftingData.json`, scraped from bitcraft-timer.com via
-  `node extract-crafting-data.js`. The chunk filename is hashed and changes on every site rebuild, so the
-  extractor now AUTO-DISCOVERS it (scans `/planner` + `/` for `/_next/static/chunks/*.js`, picks the one
-  containing `d=[{id:` and `Assemble Empty Bucket`). Just re-run the script after an update. bitjita has
-  `/api/items` (live, no recipes) — items+recipes are kept together from bitcraft-timer for ID consistency
-  (both use canonical game IDs, verified). `craftingData.backup.json` is the pre-refresh rollback.
+- **Crafting/Planner/Crafts/Craft-vs-Buy** = `craftingData.json`, built from the BitCraftToolBox GameData mirror
+  by `node build-crafting-data.js` (the bitcraft-timer.com scrape is gone since 2026-08-08). ✅ NO ACTION NEEDED
+  since 2026-10-16: the proxy HEADs the five source tables at most hourly (only when `/crafting-data` is asked
+  for), and when an ETag differs from the serving copy's `sourceEtags` it rebuilds into `data/craftingData.json`
+  and serves that (a rebuild that loses >10% of items/recipes/skills is rejected; the committed file is the
+  fallback). Re-running the script and committing is optional: it spares a free host's cold starts the rebuild,
+  since `data/` is wiped there.
 - **Map resource/enemy tracking list** = `mapassets/resourceIndex.json` (544) + `creatureIndex.json` (42),
   keyed by id → {tier,name,tag}. ✅ NOW REBUILDABLE LIVE: run `node build-map-index.js`, which pulls
   bitjita `/api/resources` (id) + `/api/creatures` (enemyType) — those ids ARE the same space bcmap-api uses

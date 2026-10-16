@@ -5170,10 +5170,11 @@ async function fetchCraftsRelayMulti(ids){
   prog.forEach(r => {
     const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
     const rec = recipes[r.recipe_id] || {};
-    // Actions per craft from /itemdefs first: it re-reads the game data weekly, while craftingData.json is rebuilt
-    // by hand, so a recipe newer than the last rebuild (the mushroom Identify crafts) had no total at all.
+    // Actions per craft: craftingData first (the proxy rebuilds it within the hour once the game data changes), then
+    // /itemdefs (re-read weekly) for a recipe the copy this page loaded lacks. With neither the total stays 0 and the
+    // card shows a bare action count — the mushroom Identify crafts once rendered theirs as "2400% complete".
     const ro = defs.recipeOuts && defs.recipeOuts[r.recipe_id];
-    const perItem = (ro && ro[2]) || rec.actionsRequired || 0;
+    const perItem = rec.actionsRequired || (ro && ro[2]) || 0;
     const total = perItem * (r.craft_count || 1);
     // A finished-but-uncollected craft stays in progressive_action_state with progress >= total. Bucket
     // it as DONE (like the bitjita path does) so the chip reads Complete — not Idle — and the render's

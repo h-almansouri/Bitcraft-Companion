@@ -17,6 +17,10 @@
 // Name templates ("Husk into {0}", "Package {1} into {0}") resolve {0} from the first CRAFTED stack and
 // {1} from the first CONSUMED stack — the raw stacks, not the expansion, so names match what the game
 // (and bitjita) display. Run: node build-crafting-data.js [--out craftingData.json]
+//
+// Also a module: proxy.js rebuilds with it whenever the mirror's tables change (see "Crafting data" there),
+// so the committed file is the fallback and the starting point, not the only copy that's ever current.
+// Each build records the ETags of the tables it was made from (sourceEtags) so that check needs no download.
 'use strict';
 const https = require('https');
 const fs = require('fs');
@@ -25,18 +29,42 @@ const path = require('path');
 const GAMEDATA = '/BitCraftToolBox/BitCraft_GameData/refs/heads/sats-json/static/';
 const CARGO_BASE = 4000000000;                    // GAME_CARGO_ID_BASE in the app
 const RARITY = ['', 'Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic'];   // RARITY_NAMES in index.html
-const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 ? process.argv[i + 1] : 'craftingData.json'; })();
+// The mirror's tables the build reads, under the names buildCraftingData takes them by.
+const SOURCES = { items: 'item_desc.json', cargos: 'cargo_desc.json', recipes: 'crafting_recipe_desc.json', lists: 'item_list_desc.json', skills: 'skill_desc.json' };
 
-function ghJson(file) {
+// One request for a mirror file: GET resolves { etag, json }, HEAD resolves { etag }. raw.githubusercontent.com's
+// ETag is a SHA-256 of the file, so comparing it with the one a build recorded tells whether that table changed
+// without downloading it (~17MB for all five).
+function ghRequest(file, method) {
   return new Promise((resolve, reject) => {
-    const r = https.get({ hostname: 'raw.githubusercontent.com', path: GAMEDATA + file, headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, res => {
+    const r = https.request({ hostname: 'raw.githubusercontent.com', path: GAMEDATA + file, method, headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, res => {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(file + ': HTTP ' + res.statusCode)); }
+      const etag = res.headers.etag || '';
+      if (method === 'HEAD') { res.resume(); return resolve({ etag }); }
       const chunks = []; res.on('data', c => chunks.push(c));
-      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
+      res.on('error', reject);   // connection dropped mid-body: 'end' never comes, so without this the promise would hang
+      res.on('end', () => { try { resolve({ etag, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); } catch (e) { reject(new Error(file + ': ' + e.message)); } });
     });
     r.on('error', reject);
     r.setTimeout(60000, () => r.destroy(new Error(file + ': timeout')));
+    r.end();
   });
+}
+
+// The mirror's current ETag for every source table, as { file: etag } ('' when it sent none).
+async function sourceEtags() {
+  const files = Object.values(SOURCES);
+  const heads = await Promise.all(files.map(f => ghRequest(f, 'HEAD')));
+  const out = {}; files.forEach((f, i) => { out[f] = heads[i].etag; }); return out;
+}
+
+// Download every source table: { tables: { items, cargos, recipes, lists, skills }, etags: { file: etag } }.
+async function fetchSources() {
+  const keys = Object.keys(SOURCES);
+  const got = await Promise.all(keys.map(k => ghRequest(SOURCES[k], 'GET')));
+  const tables = {}, etags = {};
+  keys.forEach((k, i) => { tables[k] = got[i].json; etags[SOURCES[k]] = got[i].etag; });
+  return { tables, etags };
 }
 
 // SATS sum variant index: [idx, payload] → idx. Stack item_type: 0 = Item, 1 = Cargo.
@@ -44,14 +72,8 @@ const variant = v => Array.isArray(v) ? v[0] : (+v || 0);
 // A stack ([item_id, qty, [type], …]) mapped into the app's id space.
 const stackId = s => variant(s[2]) === 1 ? CARGO_BASE + s[0] : s[0];
 
-(async () => {
-  console.log('fetching game data…');
-  const [items, cargos, recipes, lists, skills] = await Promise.all([
-    ghJson('item_desc.json'), ghJson('cargo_desc.json'),
-    ghJson('crafting_recipe_desc.json'), ghJson('item_list_desc.json'), ghJson('skill_desc.json'),
-  ]);
-  console.log(`  item_desc ${items.length} · cargo_desc ${cargos.length} · recipes ${recipes.length} · item_lists ${lists.length} · skills ${skills.length}`);
-
+// The raw tables → the craftingData.json object. sourceEtags is stored as-is (what fetchSources returned).
+function buildCraftingData({ items, cargos, recipes, lists, skills }, sourceEtags) {
   const itemById = new Map(items.map(x => [x.id, x]));
   const listById = new Map(lists.map(x => [x.id, x]));
 
@@ -105,10 +127,9 @@ const stackId = s => variant(s[2]) === 1 ? CARGO_BASE + s[0] : s[0];
   }
 
   const outRecipes = [];
-  let dropped = 0;
   recipes.forEach(r => {
     const crafted = r.crafted_item_stacks || [];
-    if (!crafted.length) { dropped++; return; }            // nothing produced — not a craftable the app can use
+    if (!crafted.length) return;                           // nothing produced — not a craftable the app can use
     const consumed = r.consumed_item_stacks || [];
     const inputs = consumed.map(s => ({ itemId: stackId(s), quantity: +s[1] || 1 }));
     const outputs = crafted.flatMap(expandOutput);
@@ -135,7 +156,21 @@ const stackId = s => variant(s[2]) === 1 ? CARGO_BASE + s[0] : s[0];
 
   const outSkills = skills.map(s => ({ id: s.id, name: s.name || '' })).filter(s => s.name);
 
-  const built = { items: outItems, recipes: outRecipes, skills: outSkills, extractedAt: new Date().toISOString(), source: 'BitCraftToolBox/BitCraft_GameData' };
-  fs.writeFileSync(path.join(__dirname, OUT), JSON.stringify(built));
-  console.log(`wrote ${OUT}: ${outItems.length} items · ${outRecipes.length} recipes (${dropped} with no crafted output dropped) · ${outSkills.length} skills`);
-})().catch(e => { console.error('FAILED:', e.message); process.exit(1); });
+  return { items: outItems, recipes: outRecipes, skills: outSkills, extractedAt: new Date().toISOString(), source: 'BitCraftToolBox/BitCraft_GameData', sourceEtags: sourceEtags || {} };
+}
+
+module.exports = { SOURCES, sourceEtags, fetchSources, buildCraftingData };
+
+if (require.main === module) {
+  const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 ? process.argv[i + 1] : 'craftingData.json'; })();
+  (async () => {
+    console.log('fetching game data…');
+    const { tables, etags } = await fetchSources();
+    const { items, cargos, recipes, lists, skills } = tables;
+    console.log(`  item_desc ${items.length} · cargo_desc ${cargos.length} · recipes ${recipes.length} · item_lists ${lists.length} · skills ${skills.length}`);
+    const built = buildCraftingData(tables, etags);
+    fs.writeFileSync(path.resolve(__dirname, OUT), JSON.stringify(built));
+    const dropped = recipes.length - built.recipes.length;
+    console.log(`wrote ${OUT}: ${built.items.length} items · ${built.recipes.length} recipes (${dropped} with no crafted output dropped) · ${built.skills.length} skills`);
+  })().catch(e => { console.error('FAILED:', e.message); process.exit(1); });
+}

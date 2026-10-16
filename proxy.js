@@ -290,9 +290,9 @@ function slimBuildings(rows) {
 // real stack, so the crafts tab flickered between names as the fallback handed over to the relay path.
 // This map is the authoritative headline; the scraped outputs stay for the Planner's crafting trees.
 // Stack shape (SATS): [item_id, quantity, [type_variant, []], [durability...]] — only [0] and [1] matter.
-// Each entry also carries the recipe's actions_required, so the crafts tab can total a craft from this copy of
-// the game data, which refreshes itself weekly. craftingData.json is rebuilt by hand: the mushroom Identify recipes
-// (added after its Aug 8 build) had no total, and their raw action count rendered as "2400% complete".
+// Each entry also carries the recipe's actions_required: the crafts tab's backstop for totalling a craft whose
+// recipe is missing from the crafting data the page loaded (that file once sat two months stale, and the mushroom
+// Identify crafts rendered their raw action count as "2400% complete").
 function slimRecipeOuts(rows) {
   const out = {};
   (Array.isArray(rows) ? rows : []).forEach(x => {
@@ -356,6 +356,79 @@ async function getItemDefs() {
     } finally { itemDefsBuilding = null; }
   })();
   return itemDefsBuilding;
+}
+
+// ── Crafting data (/crafting-data), kept current with the game data mirror ──────────────────────
+// craftingData.json is a build of the game's tables (build-crafting-data.js) that only changed when someone reran
+// the script by hand. By Oct 2026 it was two months behind, and crafts on newer recipes broke the Crafts tab. So
+// the proxy keeps it current itself. At most hourly, and only when the app asks for /crafting-data, it HEADs the
+// five source tables and compares their ETags (content hashes) with the ones the serving copy was built from. Only
+// a change costs the ~17MB download and rebuild (~0.3s and ~140MB RSS, measured locally), which lands in
+// data/craftingData.json. Requests never wait for it: they get the current copy, and serveFileCached's ETag hands
+// browsers the new build on their next load. The committed file is the fallback for a failed or implausible build, and the only copy a free host
+// keeps across restarts (data/ is wiped), so rerunning the script and committing now and then saves cold starts
+// the rebuild.
+const craftingBuild = require('./build-crafting-data.js');
+const CRAFTING_FILE = path.join(__dirname, 'craftingData.json');   // committed
+const CRAFTING_CACHE = path.join(DATA_DIR, 'craftingData.json');   // the proxy's own build, once the mirror has moved on
+const CRAFTING_CHECK_EVERY = 60 * 60 * 1000;
+let crafting = null;               // the copy being served: { file, extractedAt, sourceEtags, stats }
+let craftingCheckedAt = 0, craftingRefreshing = null;
+// Counts a truncated download or a renamed column would crater — the plausibility check below compares them.
+function craftingStats(d) {
+  const recipes = (d && Array.isArray(d.recipes)) ? d.recipes : [];
+  return { items: (d && Array.isArray(d.items)) ? d.items.length : 0, recipes: recipes.length,
+    acting: recipes.filter(r => r && r.actionsRequired > 0).length, skills: (d && Array.isArray(d.skills)) ? d.skills.length : 0 };
+}
+function craftingMeta(file) {
+  try {
+    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { file, extractedAt: Date.parse(d.extractedAt) || 0, sourceEtags: d.sourceEtags || {}, stats: craftingStats(d) };
+  } catch (e) { return null; }
+}
+// A build may replace the copy it's compared with only if no count fell by more than 10%: a patch adds or retires
+// a handful of recipes, while a broken fetch or a renamed column loses thousands.
+function craftingPlausible(s, base) {
+  if (!s.items || !s.recipes || !s.acting || !s.skills) return false;
+  return !base || ['items', 'recipes', 'acting', 'skills'].every(k => s[k] >= base[k] * 0.9);
+}
+function craftingCurrent() {
+  if (crafting && fs.existsSync(crafting.file)) return crafting;
+  const committed = craftingMeta(CRAFTING_FILE), cached = craftingMeta(CRAFTING_CACHE);
+  // A cached build from an earlier run wins only if it's newer than the committed file (a deploy may have brought a
+  // fresher one) and holds up next to it.
+  crafting = (cached && (!committed || (cached.extractedAt > committed.extractedAt && craftingPlausible(cached.stats, committed.stats))))
+    ? cached : committed;
+  return crafting;
+}
+// Rebuild in the background if the mirror has moved past the serving copy. Never throws, never blocks a request.
+function craftingMaybeRefresh() {
+  if (craftingRefreshing || Date.now() - craftingCheckedAt < CRAFTING_CHECK_EVERY) return;
+  craftingCheckedAt = Date.now();   // set before the attempt, so a failure waits the full hour too
+  craftingRefreshing = (async () => {
+    try {
+      const cur = craftingCurrent(), had = (cur && cur.sourceEtags) || {};
+      const now = await craftingBuild.sourceEtags();
+      const files = Object.keys(now);
+      // A table without an ETag can't be compared; fall back to age (same weekly horizon as /itemdefs).
+      const blind = files.some(f => !now[f]) && (!cur || Date.now() - cur.extractedAt > ITEMDEFS_TTL);
+      if (!files.some(f => now[f] && now[f] !== had[f]) && !blind) return;
+      if (itemDefsBuilding) await itemDefsBuilding.catch(() => {});   // never parse two copies of the 10MB recipe table at once
+      const { tables, etags } = await craftingBuild.fetchSources();
+      const built = craftingBuild.buildCraftingData(tables, etags), stats = craftingStats(built);
+      if (!craftingPlausible(stats, cur && cur.stats)) {
+        console.warn('[crafting-data] rejected a rebuild that shrank:', JSON.stringify(stats), 'vs', JSON.stringify(cur && cur.stats));
+        return;
+      }
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(CRAFTING_CACHE + '.tmp', JSON.stringify(built));
+      fs.renameSync(CRAFTING_CACHE + '.tmp', CRAFTING_CACHE);   // whole file or nothing: requests read it while we work
+      crafting = { file: CRAFTING_CACHE, extractedAt: Date.parse(built.extractedAt), sourceEtags: etags, stats };
+      console.log(`[crafting-data] rebuilt from game data: ${stats.recipes} recipes, ${stats.items} items`);
+    } catch (e) {
+      console.warn('[crafting-data] refresh failed, still serving', (crafting && crafting.file) || 'nothing', '-', e.message);
+    } finally { craftingRefreshing = null; }
+  })();
 }
 
 // ── gzip ────────────────────────────────────────────────────────────────────
@@ -439,15 +512,16 @@ http.createServer((req, res) => {
     return;
   }
 
-  // Serve local crafting data (ignore any ?v= cache-bust query)
+  // Serve crafting data — the newest good copy, see "Crafting data" above (ignore any ?v= cache-bust query)
   if (req.url.split('?')[0] === '/crafting-data') {
-    const filePath = path.join(__dirname, 'craftingData.json');
-    if (!fs.existsSync(filePath)) {
+    const cur = craftingCurrent();
+    craftingMaybeRefresh();
+    if (!cur) {
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'craftingData.json not found. Run: node build-crafting-data.js' }));
       return;
     }
-    serveFileCached(req, res, filePath, 'application/json');
+    serveFileCached(req, res, cur.file, 'application/json');
     return;
   }
 
