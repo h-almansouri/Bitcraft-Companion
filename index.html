@@ -1207,7 +1207,6 @@ const SHOP_RARITY_RANK = { common:1, uncommon:2, rare:3, epic:4, legendary:5, my
 let shoppingMarketItems = []; // market API items for search autocomplete
 const SHOPPING_LS = 'bc_shopping_v2'; // legacy single-list key (migrated into bc_shopping_lists_v1)
 const SHOPPING_LISTS_LS = 'bc_shopping_lists_v1';
-let searchTimeout = null;
 let craftingData = null;   // {items,recipes,skills,itemsById,recipesByOutput,skillsById}
 let plannerPlan = [];      // [{itemId, qty}]
 let plannerSelId = null;   // currently selected item id in left panel
@@ -1658,7 +1657,7 @@ function lookupRender(){
 function lookupRenderInvBody(){ const b = document.getElementById('lookup-inv-body'); if (!b || !lookupState.data.inventory) return; b.innerHTML = inventoryContentHtml(lookupState.data.inventory, lookupState.invQ || '', 'lk' + lookupState.id); }
 function lookupRefresh(){ const s = lookupState; if (!s.id) return; s.info = null; delete s.data[s.sub]; lookupLoadInfo(); lookupLoadSub(s.sub, true); }
 function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); bcSyncAlertFeed(); lookupRenderHeader(); }   // tracked now: the relay feed takes over, drop the page's channel
-// ── Player-name answers on hand, narrowed as you type ──
+// ── Player-name search boxes (topbar lookup, sidebar, Group Craft): answers on hand, narrowed as you type ──
 // bitjita's /api/players?q= is a case-insensitive LIKE '%q%' (so _ and % are wildcards) returning the alphabetically
 // first 50 matches. Every name a longer query matches, a shorter query inside it matched too, so a cached answer can be
 // narrowed the moment a letter is typed — and the names left are the FIRST names of the longer query's own answer
@@ -1715,42 +1714,52 @@ function patchResultRows(el, rows, opt){
   if (h1 !== h0) el._rowAnim = el.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 140, easing: 'ease-out' });
   fresh.forEach(n => n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: 'ease-out' }));
 }
+// One search box. run() draws the best answer on hand straight away and asks bitjita only when that isn't the final list;
+// a reply just fills the cache and redraws for whatever the box says by then, so a slow reply to an older query can't
+// overwrite a newer one. cfg: input() / box() look the elements up each time (re-rendered markup brings new ones), max
+// rows, row(p) → html. run(now, onFinal): now skips the 250ms wait; onFinal(players) runs once the whole answer for the
+// current text is on screen. shown: id → player for the rows drawn, for their click handlers.
+function makePlayerSearch(cfg){
+  const s = { timer: null, q: null, after: null, shown: new Map() };   // q: the query whose request is queued or out
+  // No cached answer covers q: the rows on screen that still match stay up while it's fetched.
+  const onHand = q => playerSearchLocal(q, cfg.max) || { final: false, players: /[_%\\]/.test(q) ? [] : [...s.shown.values()].filter(p => playerName(p).toLowerCase().includes(q.toLowerCase())) };
+  s.hide = () => { clearTimeout(s.timer); s.q = s.after = null; s.shown = new Map(); const el = cfg.box(); if (el){ el.style.display = 'none'; el.textContent = ''; } };
+  s.draw = (players, opt) => {
+    const el = cfg.box(); if (!el) return;
+    players = players.slice(0, cfg.max); s.shown = new Map(players.map(p => [String(p.entityId), p]));
+    patchResultRows(el, players.map(p => ({ k: String(p.entityId), h: cfg.row(p) })), Object.assign({ max: cfg.max }, opt));
+  };
+  s.run = (now, onFinal) => {
+    const inp = cfg.input(); if (!inp) return;
+    const q = inp.value.trim();
+    if (onFinal) s.after = { q, fn: onFinal };
+    if (q.length < 2){ s.hide(); return; }
+    const local = onHand(q);
+    s.draw(local.players, { pending: !local.final });
+    if (local.final){ clearTimeout(s.timer); s.q = null; const a = s.after; s.after = null; if (a && a.q === q) a.fn(local.players); return; }
+    if (s.q === q && !now) return;
+    clearTimeout(s.timer); s.q = q;
+    s.timer = setTimeout(() => playerSearchFetch(q).then(
+      () => { if (s.q != null) s.run(); },
+      () => { if (s.q !== q) return; s.q = s.after = null; s.draw(onHand(q).players, { failed: true }); }
+    ), now ? 0 : 250);
+  };
+  return s;
+}
 // Topbar search → lookup (never tracks). Same endpoint as the sidebar search, its own dropdown.
-const LOOKUP_MAX = 8;
-let _lookupSearchTimer = null, _lookupSearchQ = null, _lookupSearchBound = false;   // _lookupSearchQ: the query whose request is queued or out
+const lookupNameSearch = makePlayerSearch({ input: () => document.getElementById('lookup-input'), box: () => document.getElementById('lookup-results'), max: 8,
+  row: p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>'; } });
+let _lookupSearchBound = false;
 function initLookupSearch(){
   const inp = document.getElementById('lookup-input'); if (!inp || _lookupSearchBound) return; _lookupSearchBound = true;
-  inp.addEventListener('input', () => lookupSearch());
+  inp.addEventListener('input', () => lookupNameSearch.run());
   inp.addEventListener('keydown', e => {
-    if (e.key === 'Enter'){ const first = document.querySelector('#lookup-results .search-result-item[data-id]:not(.ps-out)'); if (first) first.click(); else lookupSearch(true); }
+    if (e.key === 'Enter'){ const first = document.querySelector('#lookup-results .search-result-item[data-id]:not(.ps-out)'); if (first) first.click(); else lookupNameSearch.run(true); }
     if (e.key === 'Escape') lookupHideResults();
   });
   document.addEventListener('click', e => { if (!e.target.closest('#lookup-search-wrap')) lookupHideResults(); });
 }
-function lookupHideResults(){ clearTimeout(_lookupSearchTimer); _lookupSearchQ = null; const el = document.getElementById('lookup-results'); if (el){ el.style.display = 'none'; el.textContent = ''; } }
-// Draws the best answer on hand straight away and asks bitjita only when that isn't the final list. A reply just fills
-// the cache and redraws for whatever the box says by then, so a slow reply to an older query can't overwrite a newer one.
-function lookupSearch(now){
-  const inp = document.getElementById('lookup-input'); if (!inp) return;
-  const q = inp.value.trim();
-  if (q.length < 2){ lookupHideResults(); return; }
-  const local = playerSearchLocal(q, LOOKUP_MAX), pending = !(local && local.final);
-  lookupDrawResults(local ? local.players : [], { pending });
-  if (!pending){ clearTimeout(_lookupSearchTimer); _lookupSearchQ = null; return; }
-  if (_lookupSearchQ === q && !now) return;
-  clearTimeout(_lookupSearchTimer); _lookupSearchQ = q;
-  _lookupSearchTimer = setTimeout(() => playerSearchFetch(q).then(
-    () => { if (_lookupSearchQ != null) lookupSearch(); },
-    () => { if (_lookupSearchQ !== q) return; _lookupSearchQ = null; const l = playerSearchLocal(q, LOOKUP_MAX); lookupDrawResults(l ? l.players : [], { failed: true }); }
-  ), now ? 0 : 250);
-}
-function lookupDrawResults(players, opt){
-  const el = document.getElementById('lookup-results'); if (!el) return;
-  patchResultRows(el, players.slice(0, LOOKUP_MAX).map(p => {
-    const pid = escHtml(String(p.entityId));
-    return { k: pid, h: '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>' };
-  }), Object.assign({ max: LOOKUP_MAX }, opt));
-}
+function lookupHideResults(){ lookupNameSearch.hide(); }
 function switchTab(tab, opts) {
   stopPassiveCraftTimer(); stopCraftActiveTick(); stopPlaceableTimers(); plFilterClose();   // all belong to the Crafts tab; re-armed by renderCraftingTab
   lookupSetMode(tab === 'lookup');   // the lookup swaps the sidebar nav for its own; any other tab restores it
@@ -1818,15 +1827,12 @@ function loadTab(tab, silent=false) {
 }
 
 // ── PLAYER SEARCH ──
+const sidebarNameSearch = makePlayerSearch({ input: () => document.getElementById('player-input'), box: () => document.getElementById('search-results'), max: 6,
+  row: p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="selectSearchResult(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + '</small></div>'; } });
 function initSearch() {
   const inp = document.getElementById('player-input');
   if (!inp) return;
-  inp.addEventListener('input', () => {
-    clearTimeout(searchTimeout);
-    const q = inp.value.trim();
-    if (q.length < 2) { hideResults(); return; }
-    searchTimeout = setTimeout(() => liveSearch(q), 400);
-  });
+  inp.addEventListener('input', () => sidebarNameSearch.run());
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') searchPlayers(); });
   // The input element is recreated whenever the player list re-renders, so its listeners are fresh;
   // the document-level close listener must bind only ONCE or it stacks on every re-render.
@@ -1835,33 +1841,10 @@ function initSearch() {
     document.addEventListener('click', e => { if (!e.target.closest('.search-wrap') && !e.target.closest('.search-btn')) hideResults(); });
   }
 }
-function hideResults() { const el = document.getElementById('search-results'); if (el) el.style.display = 'none'; }
-async function liveSearch(q) {
-  try { const d = await apiFetch(`/api/players?q=${encodeURIComponent(q)}`); showResults(d.players||[]); } catch(e) { hideResults(); }
-}
-function showResults(players) {
-  const el = document.getElementById('search-results');
-  if (!el || !players.length) { hideResults(); return; }
-  el.innerHTML = players.slice(0,6).map(p =>
-    `<div class="search-result-item" onclick='selectPlayerRaw(${JSON.stringify(JSON.stringify(p))})'>${escHtml(p.username||p.userName||'Unknown')}<small>${p.entityId}</small></div>`
-  ).join('');
-  el.style.display = 'block';
-}
-function selectPlayerRaw(s) { selectPlayer(JSON.parse(s)); }
-async function searchPlayers() {
-  const inp = document.getElementById('player-input');
-  const q = inp ? inp.value.trim() : '';
-  if (!q) return;
-  const el = document.getElementById('search-results');
-  if (el) { el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">Searching...</div>'; el.style.display = 'block'; }
-  try {
-    const d = await apiFetch(`/api/players?q=${encodeURIComponent(q)}`);
-    const players = d.players || [];
-    if (!players.length) { if(el){el.innerHTML='<div class="search-result-item" style="color:var(--text3)">No players found</div>';} }
-    else if (players.length === 1) selectPlayer(players[0]);
-    else showResults(players);
-  } catch(e) { if(el){el.innerHTML=`<div class="search-result-item" style="color:#f09595">Error: ${escHtml(e.message)}</div>`;} }
-}
+function hideResults() { sidebarNameSearch.hide(); }
+function selectSearchResult(id) { const p = sidebarNameSearch.shown.get(String(id)); if (p) selectPlayer(p); }
+// Enter / the Search (Add) button: the same list, except a name only one player matches is added straight away.
+function searchPlayers() { sidebarNameSearch.run(true, players => { if (players.length === 1) selectPlayer(players[0]); }); }
 function playerName(p) { return (p && (p.username || p.userName)) || 'Unknown'; }
 function savePlayers() { safeSetItem('bc_players', JSON.stringify(trackedPlayers)); }
 function isPlayerTracked(id) { return trackedPlayers.some(p => String(p.entityId) === String(id)); }
@@ -13092,35 +13075,18 @@ function gcToggleAlloc(){ gcState.allocCollapsed = !gcState.allocCollapsed; gcSa
 // Discover candidate containers by looking at one player's deposit/withdraw history, then let the user
 // pick which container(s) count. Tallying a container reads ALL players' deposits into it, not just this
 // player's — this search is only to surface the container's entity id + name.
-let gcSearchTimer = null;          // debounce for the player-name dropdown
 let gcContainerFilter = '';        // filter text for the container picker
 let gcCatCollapsed = {};           // category -> collapsed (transient; the filter always expands)
 let gcCfindDocBound = false;
 const GC_CAT_META = { personal:{label:'Personal',icon:'ti-user'}, housing:{label:'Housing',icon:'ti-home'}, bank:{label:'Town Banks',icon:'ti-building-bank'}, claim:{label:'Claim Storage',icon:'ti-box'} };
 const GC_CAT_ORDER = ['personal','housing','bank','claim'];
 
-// Live player-name dropdown — same debounce/markup as the sidebar's player search.
-function gcPlayerSearchInput(q){
-  clearTimeout(gcSearchTimer);
-  q = (q||'').trim();
-  if (q.length < 2){ gcHidePlayerResults(); return; }
-  gcSearchTimer = setTimeout(() => gcPlayerSearch(q), 400);
-}
-function gcHidePlayerResults(){ const el = document.getElementById('gc-psearch-results'); if (el) el.style.display = 'none'; }
-async function gcPlayerSearch(q){
-  const el = document.getElementById('gc-psearch-results'); if (!el) return;
-  el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">Searching…</div>'; el.style.display = 'block';
-  let players;
-  try { players = (await apiFetch('/api/players?q=' + encodeURIComponent(q))).players || []; }
-  catch(e){ el.innerHTML = '<div class="search-result-item" style="color:#f09595">Search failed</div>'; return; }
-  if (!players.length){ el.innerHTML = '<div class="search-result-item" style="color:var(--text3)">No players found</div>'; return; }
-  el.innerHTML = players.slice(0,6).map(p => {
-    const nm = p.username || p.userName || 'Unknown';
-    return `<div class="search-result-item" onclick='gcPickPlayerRaw(${JSON.stringify(JSON.stringify({ id:String(p.entityId), name:nm }))})'>${escHtml(nm)}<small>${p.entityId}</small></div>`;
-  }).join('');
-  el.style.display = 'block';
-}
-function gcPickPlayerRaw(s){ const p = JSON.parse(s); gcHidePlayerResults(); const inp = document.getElementById('gc-cfind'); if (inp) inp.value = p.name; gcFindContainers(p.id, p.name); }
+// Live player-name dropdown — the same search box as the sidebar's and the topbar lookup's.
+const gcNameSearch = makePlayerSearch({ input: () => document.getElementById('gc-cfind'), box: () => document.getElementById('gc-psearch-results'), max: 6,
+  row: p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="gcPickPlayer(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + '</small></div>'; } });
+function gcPlayerSearchInput(){ gcNameSearch.run(); }
+function gcHidePlayerResults(){ gcNameSearch.hide(); }
+function gcPickPlayer(id){ const p = gcNameSearch.shown.get(String(id)); gcHidePlayerResults(); if (!p) return; const nm = playerName(p), inp = document.getElementById('gc-cfind'); if (inp) inp.value = nm; gcFindContainers(String(p.entityId), nm); }
 // Every container the player can point us at, from three sources, because the storage-log history
 // alone is an incomplete and lagging view: it only shows containers they happened to touch in the
 // last ~15 days, so a chest made FOR the event (no history yet) never appeared.
@@ -13472,7 +13438,7 @@ function gcSetupHtml(){
           <label class="gc-field"><span>Find container (search a player who uses it)</span>
             <span class="gc-psearch">
               <i class="ti ti-search si"></i>
-              <input type="text" id="gc-cfind" placeholder="Search player…" autocomplete="off" oninput="gcPlayerSearchInput(this.value)">
+              <input type="text" id="gc-cfind" placeholder="Search player…" autocomplete="off" oninput="gcPlayerSearchInput()">
               <div class="search-results" id="gc-psearch-results" style="display:none"></div>
             </span>
           </label>
