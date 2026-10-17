@@ -3243,10 +3243,11 @@ function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data).filter(s => !(/^tool ?belt$/i.test(s.inventoryName || '') && TOOLBELT_HIDE.has(((s.meta && s.meta.name) || '').toLowerCase())));
   q = (q||'').trim().toLowerCase();
   const equip = q ? '' : equipmentSectionHtml(data, pfx);   // hidden while searching, so results stay focused
-  if (!allSlots.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>';
+  const hlog = houseLogSlotHtml(pfx);   // a tracked player's House activity — houseLogMount fills it
+  if (!allSlots.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Empty</span></div>' + hlog;
   const words = searchWords(q);
   const filtered = q ? allSlots.filter(s => matchesWords(words, s.meta?.name, s.meta?.tag)) : allSlots;
-  if (!filtered.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>';
+  if (!filtered.length) return equip + '<div class="empty" style="padding:1rem"><i class="ti ti-mood-empty"></i><span>Nothing matches</span></div>' + hlog;
   // Sort by tier (untiered sinks to the bottom), then name; accent each card with its tier colour.
   const invTierKey = m => (m && m.tier > 0) ? m.tier : 99;
   const invTierCol = m => (m && m.tier > 0) ? TIER_COLORS[Math.min(m.tier, TIER_COLORS.length-1)].c : 'var(--border)';
@@ -3260,7 +3261,7 @@ function inventoryContentHtml(data, q, pfx) {
     return `<div class="inv-items-grid">${mergeInvSlots(filtered).sort(invSort).map(s => { const w = [...(where[s.itemId + ':' + (s.itemType ?? 0)] || [])]; const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag" title="${escHtml(w.join(', '))}">${w.length > 1 ? `${w.length} containers` : escHtml(w[0] || '')} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
   }
   if (invViewMode === 'flat') {
-    return `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
+    return `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>` + hlog;
   }
   const byLocation = {};
   filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:'') + (s.group?'|'+s.group:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, group:s.group, slots:[]}; byLocation[key].slots.push(s); });
@@ -3305,11 +3306,11 @@ function inventoryContentHtml(data, q, pfx) {
   // A tracked claim's containers: one section per kind (chests, stockpiles, cargo bins, item storage).
   const claimLocs = Object.values(byLocation).filter(l => l.locationType === 'claim');
   const claimSecs = claimLocs.length ? CLAIM_STORE_GROUPS.map(([label, , icon], gi) => renderSection(label, icon, claimLocs.filter(l => l.group === label), 'claim' + gi)).join('') : '';
-  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + renderSection('Storage','ti-box',storage,'storage') + claimSecs;
+  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + hlog + renderSection('Storage','ti-box',storage,'storage') + claimSecs;
 }
 function fillPlayerInvCached(entityId) {
   const body = document.getElementById('psec-inv-' + entityId);
-  if (body) body.innerHTML = inventoryContentHtml(invByPlayer[entityId], invSearch, String(entityId));
+  if (body){ body.innerHTML = inventoryContentHtml(invByPlayer[entityId], invSearch, String(entityId)); houseLogMount(entityId); }
 }
 function renderAllInvBodies() { trackedPlayers.forEach(p => fillPlayerInvCached(p.entityId)); fillClaimSections(); }
 function setInvView(mode) {
@@ -4856,9 +4857,10 @@ function liveQuerySet(ids, region){
   // as well once the building rows have told us the claim ids.
   chunked(here(liveRefs.claims || []), 'entity_id', 'claim_state');
   chunked(here(liveRefs.networks), 'dimension_network_entity_id', 'dimension_description_state');   // house dimensions
-  // House-interior cells (each carries its region): everything inside a tracked player's house. One
-  // indexed query per cell — see the location_state scan warning above for why never an OR-chain.
-  (liveRefs.chunks || []).forEach(k => { const [rg, c] = k.split(':'); if (+rg === region && /^\d+$/.test(c || '')) sqls.push(`SELECT * FROM location_state WHERE chunk_index = ${c}`); });
+  // House-interior cells (each carries its region): everything inside a tracked player's house, and the storage
+  // log of it (houseLogSql). One indexed query per cell — see the location_state scan warning above for why never
+  // an OR-chain.
+  (liveRefs.chunks || []).forEach(k => { const [rg, c] = k.split(':'); if (+rg === region && /^\d+$/.test(c || '')) sqls.push(`SELECT * FROM location_state WHERE chunk_index = ${c}`, houseLogSql(k, c)); });
   // Movement feed for the idle alert's activity veto (see liveActivity): one row per tracked player,
   // a handful of deltas per move segment, silence while stationary — measured 4 deltas/50s in normal
   // play, snapshot = 1 row. perId (indexed), NEVER chunked — the location-family scan trap above.
@@ -4949,9 +4951,10 @@ function liveDial(rg){
 }
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey) return;
-  // A tracked claim's activity query asks only for log entries newer than the newest one seen — re-derive it on
-  // every (re)connect, or a socket that drops after a busy afternoon would re-download everything since its dial.
-  if (trackedClaims.length){ const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
+  // A tracked claim's or house's activity query asks only for log entries newer than the newest one seen —
+  // re-derive it on every (re)connect, or a socket that drops after a busy afternoon would re-download everything
+  // since its dial (and a house's first load is its whole 14 days).
+  if (trackedClaims.length || (liveRefs.chunks || []).length){ const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
   let ws;
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
@@ -5543,8 +5546,136 @@ function clogTime(ts){
 }
 setInterval(() => {   // "just now" → "3m ago" while the list is on screen
   if (document.hidden || currentTab !== 'inventory') return;
-  document.querySelectorAll('.clog-t[data-ts]').forEach(el => { const t = clogTime(+el.dataset.ts); if (el.textContent !== t) el.textContent = t; });
+  document.querySelectorAll('.clog-t[data-ts], .hlog-latest[data-ts]').forEach(el => { const t = clogTime(+el.dataset.ts); if (el.textContent !== t) el.textContent = t; });
 }, 30000);
+// ── HOUSE LOG — the same "who put in / took what" for each tracked player's house ──
+// The game logs every move into or out of a building's storage that no single player owns — house chests included
+// (BitCraftPublic action_log_state.rs: a Building inventory with player_owner 0) — and keeps 14 days of it
+// (storage_log_cleanup_agent.rs). Each house-interior cell gets one more query on its region's socket
+// (houseLogSql, from liveQuerySet): storage_log_state semijoined to location_state on the cell the house's contents
+// already come from, so every chest in the house is covered, whoever placed it. Houses are quiet next to a claim —
+// measured 2026-10-17 over the 120 biggest houses in r8 and r19, a busy one logs ~1,000 entries in 14 days and the
+// busiest ~3,800 (1.3 MB) — so a house's FIRST load takes all 14 days, and every later (re)connect only entries
+// newer than the newest seen in that cell (ids count per region, so a house that moves region starts over).
+// Same entries and the same newest-CLAIM_LOG_KEEP cap as the claim log.
+// The list sits in every tracked player's inventory, right under Housing, so it's collapsed by default: its header
+// says how many today and when the latest was, and a list you open stays open (per player, remembered).
+const HOUSE_LOG_KEY = 'bc_house_log_v1', HOUSE_LOG_OPEN_KEY = 'bc_house_log_open_v1', HOUSE_LOG_DAYS = 14;
+let houseLog = {};   // playerId -> { rg, cells: { 'region:cell' -> newest log id seen }, ev: Map(id -> entry, as claimLogEvent) }
+try {
+  const d = JSON.parse(localStorage.getItem(HOUSE_LOG_KEY) || '{}');
+  Object.keys(d || {}).forEach(pid => { const x = d[pid] || {}; houseLog[pid] = { rg: +x.rg || 0, cells: x.cells || {},
+    ev: new Map((x.ev || []).map(a => [a[0], { id: a[0], ts: a[1], who: a[2], dep: !!a[3], itemId: a[4], itemType: a[5], qty: a[6], b: a[7] }])) }; });
+} catch(e){}
+let houseLogOpen = (() => { try { return new Set((JSON.parse(localStorage.getItem(HOUSE_LOG_OPEN_KEY) || '[]') || []).map(String)); } catch(e){ return new Set(); } })();
+function houseLogSql(k, c){
+  let maxId = 0; Object.values(houseLog).forEach(L => { if ((L.cells[k] || 0) > maxId) maxId = L.cells[k]; });
+  return `SELECT storage_log_state.* FROM storage_log_state JOIN location_state ON storage_log_state.object_entity_id = location_state.entity_id WHERE location_state.chunk_index = ${c} AND storage_log_state.days_since_epoch >= ${Math.floor(Date.now() / 86400000) - HOUSE_LOG_DAYS} AND storage_log_state.id > ${maxId}`;
+}
+let _houseLogSaveT = null;
+function houseLogSaveSoon(){
+  clearTimeout(_houseLogSaveT);
+  _houseLogSaveT = setTimeout(() => {
+    const out = {};
+    trackedPlayers.forEach(p => { const L = houseLog[String(p.entityId)]; if (L) out[String(p.entityId)] = { rg: L.rg, cells: L.cells, ev: [...L.ev.values()].map(e => [e.id, e.ts, e.who, e.dep ? 1 : 0, e.itemId, e.itemType, e.qty, e.b]) }; });
+    safeSetItem(HOUSE_LOG_KEY, JSON.stringify(out));
+  }, 2000);
+}
+// A player's house-interior cells as 'region:cell' (the keys liveRefs.chunks uses), from the cache — matched in the
+// region the house's dimension row came from, since dimension numbers repeat across regions.
+function houseCellsOf(pid){
+  const h = liveRows('player_housing_state', r => String(r.entity_id) === pid)[0]; if (!h) return [];
+  const net = String(h.network_entity_id), out = [];
+  liveRowsByRegion('dimension_description_state', r => String(r.dimension_network_entity_id) === net).forEach(x => houseChunkIndexes(x.row).forEach(c => out.push(x.region + ':' + c)));
+  return out;
+}
+// Has this house's log query answered yet? (Its cells are in the live query set and their region has snapshotted
+// since.) Before that, an empty list means "not asked yet", not "nothing happened".
+function houseLogLoaded(pid){
+  const cells = houseCellsOf(pid);
+  return cells.length > 0 && cells.every(k => { const c = liveConns[k.split(':')[0]]; return (liveRefs.chunks || []).includes(k) && !!c && c.snapshotTs > 0 && c.key === liveRosterKey; });
+}
+// Move the log rows the cache holds into each player's house list, matched through the container's location (one of
+// the house's cells). A row nothing claims yet stays in the cache for the next pass, as with the claim log.
+function houseLogIngest(){
+  const t = liveCache.storage_log_state; if (!t || !trackedPlayers.length) return;
+  const cellOwner = new Map();
+  trackedPlayers.forEach(p => houseCellsOf(String(p.entityId)).forEach(k => cellOwner.set(k, String(p.entityId))));
+  if (!cellOwner.size) return;
+  const at = new Map();   // entity inside a tracked house -> { pid, k, rg }
+  liveRowsByRegion('location_state', () => true).forEach(x => { const k = x.region + ':' + x.row.chunk_index, pid = cellOwner.get(k); if (pid) at.set(String(x.row.entity_id), { pid, k, rg: x.region }); });
+  const changed = new Set(); let moved = false;
+  Object.values(t).forEach(slice => slice.forEach((r, pk) => {
+    const o = at.get(String(r.object_entity_id)); if (!o) return;
+    slice.delete(pk); moved = true;
+    let L = houseLog[o.pid];
+    if (!L || L.rg !== o.rg) L = houseLog[o.pid] = { rg: o.rg, cells: {}, ev: new Map() };
+    if (+r.id > (L.cells[o.k] || 0)) L.cells[o.k] = +r.id;
+    const e = claimLogEvent(r);
+    if (e && !L.ev.has(e.id)){ L.ev.set(e.id, e); changed.add(o.pid); }
+  }));
+  changed.forEach(pid => { const L = houseLog[pid]; if (L.ev.size > CLAIM_LOG_KEEP){ const keep = [...L.ev.keys()].sort((a, b) => b - a).slice(0, CLAIM_LOG_KEEP); L.ev = new Map(keep.map(k => [k, L.ev.get(k)])); } });
+  if (moved) houseLogSaveSoon();
+  changed.forEach(pid => houseLogRender(pid));
+}
+onLiveChange(evs => { if (evs.some(e => e.table === 'storage_log_state' || (['location_state','player_housing_state','dimension_description_state'].includes(e.table) && liveCache.storage_log_state))) houseLogIngest(); });
+// The House activity group. Its element is made once per player and kept: the inventory body is redrawn whole on
+// every change, so fillPlayerInvCached moves it into the new body's slot (houseLogSlotHtml, right under Housing) —
+// the rows survive, and a new entry slides in at the top like the claim's.
+const houseLogEls = {}, houseLogLimit = {};
+const houseLogSlotHtml = pfx => isPlayerTracked(pfx) ? '<div class="hlog-slot"></div>' : '';   // tracked players only — not the lookup's copy ('lk…') or a claim ('c…')
+function houseLogMount(pid){
+  pid = String(pid);
+  const body = document.getElementById('psec-inv-' + pid), slot = body && body.querySelector('.hlog-slot'); if (!slot) return;
+  let el = houseLogEls[pid];
+  if (!el){
+    const open = houseLogOpen.has(pid);
+    el = houseLogEls[pid] = document.createElement('div');
+    el.className = 'inv-group';
+    el.innerHTML = `<div class="inv-group-header" onclick="toggleHouseLog('${escHtml(pid)}')"><span class="inv-group-name"><i class="ti ti-history"></i>House activity</span><span class="inv-group-meta hlog-meta"></span>` +
+      `<i class="ti ti-chevron-down hlog-chev" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${open ? '' : 'transform:rotate(-90deg)'}"></i></div>` +
+      `<div class="hlog-body"${open ? '' : ' style="display:none"'}><div class="clog-list"></div><div class="clog-foot"></div></div>`;
+  }
+  if (el.parentNode !== slot) slot.appendChild(el);
+  houseLogRender(pid);
+}
+function houseLogRender(pid){
+  pid = String(pid);
+  const el = houseLogEls[pid]; if (!el || !el.isConnected) return;
+  const L = houseLog[pid], q = (invSearch || '').trim().toLowerCase(), bnames = (gameItemDefs && gameItemDefs.buildings) || {};
+  const where = b => { const i = relayBuildingInfo[b]; return (i && (i.nickname || bnames[i.descId])) || 'storage'; };   // named like the Housing chips
+  let rows = L ? [...L.ev.values()].sort((a, b) => b.id - a.id).map(e => ({ e, item: claimLogItem(e), where: where(e.b) })) : [];
+  const all = rows.length;
+  if (q){ const words = searchWords(q); rows = rows.filter(x => matchesWords(words, x.item, x.e.who)); }   // items and players, as the claim's
+  // Shown when there's something to say: entries, or a house with storage whose log has answered with nothing.
+  // While searching, only when something matches — like the other groups.
+  const hasStore = ((invByPlayer[pid] || {}).inventories || []).some(i => i._isHousing);
+  const show = q ? rows.length > 0 : (all > 0 || (hasStore && houseLogLoaded(pid)));
+  el.style.display = show ? '' : 'none';
+  if (!show) return;
+  const meta = el.querySelector('.hlog-meta');
+  if (q) meta.textContent = `${rows.length} matching`;
+  else if (!all) meta.textContent = `none in ${HOUSE_LOG_DAYS} days`;
+  else {
+    const mid = new Date().setHours(0, 0, 0, 0), today = rows.filter(x => x.e.ts >= mid).length, newest = rows[0].e.ts;
+    meta.innerHTML = `${today ? `${today}${today === all && all >= CLAIM_LOG_KEEP ? '+' : ''} today · ` : ''}latest <span class="hlog-latest" data-ts="${newest}">${clogTime(newest)}</span>`;
+  }
+  if (!houseLogOpen.has(pid)) return;   // collapsed: the header is all there is
+  const limit = houseLogLimit[pid] || 25;
+  plSync(el.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
+  el.querySelector('.clog-foot').innerHTML = !rows.length ? `<div class="clog-empty">No deposits or withdrawals in the last ${HOUSE_LOG_DAYS} days — new ones show up here as they happen</div>`
+    : rows.length > limit ? `<button class="clog-more" onclick="houseLogMore('${escHtml(pid)}')">Show more</button>` : '';
+}
+function toggleHouseLog(pid){
+  pid = String(pid);
+  if (houseLogOpen.has(pid)) houseLogOpen.delete(pid); else houseLogOpen.add(pid);
+  safeSetItem(HOUSE_LOG_OPEN_KEY, JSON.stringify([...houseLogOpen]));
+  const el = houseLogEls[pid], open = houseLogOpen.has(pid); if (!el) return;
+  el.querySelector('.hlog-body').style.display = open ? '' : 'none';
+  el.querySelector('.hlog-chev').style.transform = open ? '' : 'rotate(-90deg)';
+  houseLogRender(pid);
+}
+function houseLogMore(pid){ houseLogLimit[pid] = Math.min(CLAIM_LOG_KEEP, (houseLogLimit[pid] || 25) + 50); houseLogRender(pid); }
 // ── PLACEABLES (Crafts → Placeables) ──
 // Things a player has put in the world that grow, vanish or wait for them: planted trees, tree seeds and stashes,
 // fishing traps and nets, rice paddies, animal traps, drying bricks… The list rides the live layer like crafts do
