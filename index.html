@@ -5499,6 +5499,15 @@ onLiveChange(evs => { if (evs.some(e => e.table === 'storage_log_state' || (e.ta
 // The Activity list under a claim's storage: newest first, 25 at a time, filtered by the Inventory search box (item or
 // player). Rows are keyed and kept (the same keyed sync the Placeables view uses), so a new entry slides
 // in at the top without redrawing the rest.
+// The foot of every activity list (this one and each house's): Show more pages on by 50, up to the CLAIM_LOG_KEEP
+// kept; Show less goes straight back to the newest CLOG_PAGE, no reload needed. Dropping a long tail can leave the
+// list's own header above the screen — you'd be looking at whatever sat below the list — so it scrolls back to it.
+const CLOG_PAGE = 25;
+function clogFootHtml(n, limit, more, less){
+  return (n > limit ? `<button class="clog-more" onclick="${more}">Show more</button>` : '') +
+    (limit > CLOG_PAGE && n > CLOG_PAGE ? `<button class="clog-more" onclick="${less}">Show less</button>` : '');
+}
+function clogBackToHeader(hdr){ if (hdr && hdr.getBoundingClientRect().top < 0) hdr.scrollIntoView({ block: 'start' }); }
 const claimLogLimit = {};
 function claimLogRender(cid){
   cid = String(cid);
@@ -5513,14 +5522,18 @@ function claimLogRender(cid){
   const L = claimLog[cid], names = claimNames[cid] || new Map(), q = (invSearch || '').trim().toLowerCase();
   let rows = L ? [...L.ev.values()].sort((a, b) => b.id - a.id).map(e => ({ e, item: claimLogItem(e), where: names.get(e.b) || 'storage' })) : [];
   if (q){ const words = searchWords(q); rows = rows.filter(x => matchesWords(words, x.item, x.e.who)); }   // items and players — not container names ("Potions and Consumables" would match every scroll in it)
-  const limit = claimLogLimit[cid] || 25;
+  const limit = claimLogLimit[cid] || CLOG_PAGE;
   wrap.querySelector('.clog-meta').textContent = !rows.length ? '' : q ? `${rows.length} matching` : rows.length > limit ? `latest ${limit} of ${rows.length}` : `${rows.length}`;
   plSync(wrap.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
   wrap.querySelector('.clog-foot').innerHTML = !rows.length
     ? `<div class="clog-empty">${q ? 'No activity matches' : 'No deposits or withdrawals yet — new ones show up here as they happen'}</div>`
-    : rows.length > limit ? `<button class="clog-more" onclick="claimLogMore('${escHtml(cid)}')">Show more</button>` : '';
+    : clogFootHtml(rows.length, limit, `claimLogMore('${escHtml(cid)}')`, `claimLogLess('${escHtml(cid)}')`);
 }
-function claimLogMore(cid){ claimLogLimit[cid] = Math.min(CLAIM_LOG_KEEP, (claimLogLimit[cid] || 25) + 50); claimLogRender(cid); }
+function claimLogMore(cid){ claimLogLimit[cid] = Math.min(CLAIM_LOG_KEEP, (claimLogLimit[cid] || CLOG_PAGE) + 50); claimLogRender(cid); }
+function claimLogLess(cid){
+  delete claimLogLimit[cid]; claimLogRender(cid);
+  const w = document.getElementById('csec-log-' + cid); clogBackToHeader(w && w.querySelector('.inv-group-header'));
+}
 function claimLogItem(e){ const m = gameItemDefs && (e.itemType === 1 ? gameItemDefs.cargos : gameItemDefs.items); return itemLabel(m && m[e.itemId], e.itemId, e.itemType); }
 function claimLogRowEl(x){
   const el = document.createElement('div'), e = x.e;
@@ -5632,7 +5645,7 @@ function houseLogMount(pid){
     const open = houseLogOpen.has(pid);
     el = houseLogEls[pid] = document.createElement('div');
     el.className = 'inv-group';
-    el.innerHTML = `<div class="inv-group-header" onclick="toggleHouseLog('${escHtml(pid)}')"><span class="inv-group-name"><i class="ti ti-history"></i>House activity</span><span class="inv-group-meta hlog-meta"></span>` +
+    el.innerHTML = `<div class="inv-group-header" onclick="toggleHouseLog('${escHtml(pid)}')"><span class="inv-group-name"><i class="ti ti-history"></i><span class="hlog-title"></span></span><span class="inv-group-meta hlog-meta"></span>` +
       `<i class="ti ti-chevron-down hlog-chev" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${open ? '' : 'transform:rotate(-90deg)'}"></i></div>` +
       `<div class="hlog-body"${open ? '' : ' style="display:none"'}><div class="clog-list"></div><div class="clog-foot"></div></div>`;
   }
@@ -5653,6 +5666,9 @@ function houseLogRender(pid){
   const show = q ? rows.length > 0 : (all > 0 || (hasStore && houseLogLoaded(pid)));
   el.style.display = show ? '' : 'none';
   if (!show) return;
+  const tp = trackedPlayers.find(p => String(p.entityId) === pid), who = tp && (tp.username || tp.userName);
+  const title = el.querySelector('.hlog-title'), titleText = who ? `${who}'s House Activity` : 'House Activity';   // "Vel's House Activity" — the game's own "'s", whatever the name ends in
+  if (title.textContent !== titleText) title.textContent = titleText;
   const meta = el.querySelector('.hlog-meta');
   if (q) meta.textContent = `${rows.length} matching`;
   else if (!all) meta.textContent = `none in ${HOUSE_LOG_DAYS} days`;
@@ -5661,10 +5677,10 @@ function houseLogRender(pid){
     meta.innerHTML = `${today ? `${today}${today === all && all >= CLAIM_LOG_KEEP ? '+' : ''} today · ` : ''}latest <span class="hlog-latest" data-ts="${newest}">${clogTime(newest)}</span>`;
   }
   if (!houseLogOpen.has(pid)) return;   // collapsed: the header is all there is
-  const limit = houseLogLimit[pid] || 25;
+  const limit = houseLogLimit[pid] || CLOG_PAGE;
   plSync(el.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
   el.querySelector('.clog-foot').innerHTML = !rows.length ? `<div class="clog-empty">No deposits or withdrawals in the last ${HOUSE_LOG_DAYS} days — new ones show up here as they happen</div>`
-    : rows.length > limit ? `<button class="clog-more" onclick="houseLogMore('${escHtml(pid)}')">Show more</button>` : '';
+    : clogFootHtml(rows.length, limit, `houseLogMore('${escHtml(pid)}')`, `houseLogLess('${escHtml(pid)}')`);
 }
 function toggleHouseLog(pid){
   pid = String(pid);
@@ -5675,7 +5691,8 @@ function toggleHouseLog(pid){
   el.querySelector('.hlog-chev').style.transform = open ? '' : 'rotate(-90deg)';
   houseLogRender(pid);
 }
-function houseLogMore(pid){ houseLogLimit[pid] = Math.min(CLAIM_LOG_KEEP, (houseLogLimit[pid] || 25) + 50); houseLogRender(pid); }
+function houseLogMore(pid){ houseLogLimit[pid] = Math.min(CLAIM_LOG_KEEP, (houseLogLimit[pid] || CLOG_PAGE) + 50); houseLogRender(pid); }
+function houseLogLess(pid){ delete houseLogLimit[pid]; houseLogRender(pid); const el = houseLogEls[pid]; clogBackToHeader(el && el.querySelector('.inv-group-header')); }
 // ── PLACEABLES (Crafts → Placeables) ──
 // Things a player has put in the world that grow, vanish or wait for them: planted trees, tree seeds and stashes,
 // fishing traps and nets, rice paddies, animal traps, drying bricks… The list rides the live layer like crafts do
@@ -7127,8 +7144,9 @@ async function fetchPlayerInvRelay(id){
   // sort by settlement first — banks read as a list of towns
   bankInvs.sort((a, b) => (a.claimName || '').localeCompare(b.claimName || '') || byName(a, b));
   bankInvs.forEach(i => inventories.push(i));
-  // house — named like the HTTP route did: "<player>'s House (<residence type>)"
-  const pName = (trackedPlayers.find(p => String(p.entityId) === id) || {}).name;
+  // house — named like the HTTP route did: "<player>'s House (<residence type>)". Tracked players carry
+  // `username` (see playerName) — this read `.name`, which no player has, so every house said "Housing (…)".
+  const tp = trackedPlayers.find(p => String(p.entityId) === id), pName = tp && (tp.username || tp.userName);
   const ent = housing && relayBuildingInfo[String(housing.entrance_building_entity_id)];
   const entName = ent && defs.buildings[ent.descId];
   const houseName = (pName ? pName + "'s House" : 'Housing') + (entName ? ` (${entName})` : '');
