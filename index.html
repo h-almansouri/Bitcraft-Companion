@@ -367,8 +367,7 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .inv-item-qty{font-size:13px;font-weight:600;color:var(--teal-light);flex-shrink:0}
 /* Search totals: one row per matching item, summed over every container */
 .inv-totals{display:flex;align-items:flex-start;gap:.7rem;padding:.5rem .6rem;margin-bottom:.75rem;background:rgba(29,158,117,.06);border:1px solid var(--teal-dim);border-radius:6px}
-.inv-totals-lbl{display:flex;align-items:center;gap:.3rem;height:28px;flex-shrink:0;font-size:12px;font-weight:600;color:var(--teal-light);text-transform:uppercase;letter-spacing:.06em}
-.inv-totals-lbl i{font-size:14px}
+.inv-totals-lbl{display:flex;align-items:center;height:28px;flex-shrink:0;font-size:12px;font-weight:600;color:var(--teal-light);text-transform:uppercase;letter-spacing:.06em}
 .inv-totals-grid{flex:1;min-width:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.35rem}
 .inv-total{display:flex;align-items:center;gap:.45rem;height:28px;min-width:0;padding:0 .6rem 0 .45rem;background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:5px;cursor:default}
 .inv-total-name{flex:1;min-width:0;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -3283,7 +3282,7 @@ function inventoryContentHtml(data, q, pfx) {
     if (byItem.size > INV_TOTALS_MAX) return '';
     const list = [...byItem.values()].sort(invSort), names = list.map(t => itemLabel(t.meta, t.itemId, t.itemType));
     const twice = new Set(names.filter((nm, i) => names.indexOf(nm) !== i));   // same name, different rarity: say which
-    return `<div class="inv-totals"><span class="inv-totals-lbl"><i class="ti ti-sum"></i>Total</span><div class="inv-totals-grid">${list.map((t, i) => {
+    return `<div class="inv-totals"><span class="inv-totals-lbl">Total</span><div class="inv-totals-grid">${list.map((t, i) => {
       const rar = twice.has(names[i]) ? (t.meta?.rarityStr || '').toLowerCase() : '';
       const tip = names[i] + ': ' + fmtCount(t.quantity) + [...t.at].map(([at, n]) => '\n' + at + ': ' + fmtCount(n)).join('');
       return `<div class="inv-total" style="border-left-color:${invTierCol(t.meta)}" title="${escHtml(tip)}">${gameIconImg(t.meta?.iconAssetName, 18)}<span class="inv-total-name">${escHtml(names[i])}${rar ? ` <span class="inv-total-rar">${cap(rar)}</span>` : ''}</span><span class="inv-total-qty">${fmtCount(t.quantity)}</span></div>`;
