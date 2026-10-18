@@ -365,6 +365,15 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .inv-item-name{font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inv-item-tag{font-size:10px;color:var(--text3);margin-top:1px}
 .inv-item-qty{font-size:13px;font-weight:600;color:var(--teal-light);flex-shrink:0}
+/* Search totals: one row per matching item, summed over every container */
+.inv-totals{display:flex;align-items:flex-start;gap:.7rem;padding:.5rem .6rem;margin-bottom:.75rem;background:rgba(29,158,117,.06);border:1px solid var(--teal-dim);border-radius:6px}
+.inv-totals-lbl{display:flex;align-items:center;gap:.3rem;height:28px;flex-shrink:0;font-size:12px;font-weight:600;color:var(--teal-light);text-transform:uppercase;letter-spacing:.06em}
+.inv-totals-lbl i{font-size:14px}
+.inv-totals-grid{flex:1;min-width:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.35rem}
+.inv-total{display:flex;align-items:center;gap:.45rem;height:28px;min-width:0;padding:0 .6rem 0 .45rem;background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:5px;cursor:default}
+.inv-total-name{flex:1;min-width:0;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inv-total-rar{font-size:10px;color:var(--text3)}
+.inv-total-qty{font-size:13px;font-weight:600;color:var(--teal-light);flex-shrink:0;font-variant-numeric:tabular-nums}
 /* Equipment (worn gear + saved presets) */
 .eq-sets{display:flex;gap:.7rem;flex-wrap:wrap;padding:.5rem}
 .eq-set{flex:1;min-width:250px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -3239,6 +3248,10 @@ function equipmentSectionHtml(data, pfx){
 // Toolbelt items that never upgrade — Cooking Pot, Mallet, Hexite Tuner — are noise on the belt view. Hidden
 // from the DISPLAY only (the Toolbelt inventory), never from the data other tabs pool.
 const TOOLBELT_HIDE = new Set(['cooking pot', 'mallet', 'hexite tuner']);
+// Search totals (top of inventoryContentHtml) show once the search is 3+ letters and narrows the results to at most
+// this many different items — about two rows. Searching one thing ("scrofa": 1–2 items, "fine log": 2) shows its
+// totals; a broad search ("log": 12–17 items, "fine": 30–70, one letter: hundreds) would only list everything twice.
+const INV_TOTALS_MAX = 10;
 function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data).filter(s => !(/^tool ?belt$/i.test(s.inventoryName || '') && TOOLBELT_HIDE.has(((s.meta && s.meta.name) || '').toLowerCase())));
   q = (q||'').trim().toLowerCase();
@@ -3253,6 +3266,30 @@ function inventoryContentHtml(data, q, pfx) {
   const invTierCol = m => (m && m.tier > 0) ? TIER_COLORS[Math.min(m.tier, TIER_COLORS.length-1)].c : 'var(--border)';
   const invSort = (a,b) => (invTierKey(a.meta) - invTierKey(b.meta)) || (a.meta?.name||'').localeCompare(b.meta?.name||'') || (b.quantity - a.quantity);
   const itemCard = s => { const name = itemLabel(s.meta, s.itemId, s.itemType); const rar = (s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; };
+  // SEARCH totals: each matching item summed over every container, above the results and to the unit (the cards
+  // round to 4.7K) — "how many Scrofa does chelsey have" without adding up the cards. Hover one for where they
+  // sit. Only for a narrow search (see INV_TOTALS_MAX), and not in a claim's Flat view, whose cards are already
+  // one summed card per item.
+  const totalsHtml = () => {
+    if (q.replace(/\s+/g, '').length < 3 || (invViewMode === 'flat' && data._claim)) return '';
+    const byItem = new Map();
+    filtered.forEach(s => {
+      const k = s.itemId + ':' + (s.itemType ?? 0), n = +s.quantity || 0;
+      const at = s.inventoryName + (s.claimName && s.locationType !== 'claim' ? ' · ' + s.claimName : '');
+      let t = byItem.get(k);
+      if (!t) byItem.set(k, t = { ...s, quantity: 0, at: new Map() });
+      t.quantity += n; t.at.set(at, (t.at.get(at) || 0) + n);
+    });
+    if (byItem.size > INV_TOTALS_MAX) return '';
+    const list = [...byItem.values()].sort(invSort), names = list.map(t => itemLabel(t.meta, t.itemId, t.itemType));
+    const twice = new Set(names.filter((nm, i) => names.indexOf(nm) !== i));   // same name, different rarity: say which
+    return `<div class="inv-totals"><span class="inv-totals-lbl"><i class="ti ti-sum"></i>Total</span><div class="inv-totals-grid">${list.map((t, i) => {
+      const rar = twice.has(names[i]) ? (t.meta?.rarityStr || '').toLowerCase() : '';
+      const tip = names[i] + ': ' + fmtCount(t.quantity) + [...t.at].map(([at, n]) => '\n' + at + ': ' + fmtCount(n)).join('');
+      return `<div class="inv-total" style="border-left-color:${invTierCol(t.meta)}" title="${escHtml(tip)}">${gameIconImg(t.meta?.iconAssetName, 18)}<span class="inv-total-name">${escHtml(names[i])}${rar ? ` <span class="inv-total-rar">${cap(rar)}</span>` : ''}</span><span class="inv-total-qty">${fmtCount(t.quantity)}</span></div>`;
+    }).join('')}</div></div>`;
+  };
+  const totals = totalsHtml();
   // A claim's Flat view sums each item across all its containers — one card per item ("in 3 containers"). A big
   // claim holds thousands of stacks, and "how many do we have" is the question there.
   if (invViewMode === 'flat' && data._claim) {
@@ -3261,7 +3298,7 @@ function inventoryContentHtml(data, q, pfx) {
     return `<div class="inv-items-grid">${mergeInvSlots(filtered).sort(invSort).map(s => { const w = [...(where[s.itemId + ':' + (s.itemType ?? 0)] || [])]; const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag" title="${escHtml(w.join(', '))}">${w.length > 1 ? `${w.length} containers` : escHtml(w[0] || '')} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>`;
   }
   if (invViewMode === 'flat') {
-    return `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>` + hlog;
+    return totals + `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>` + hlog;
   }
   const byLocation = {};
   filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:'') + (s.group?'|'+s.group:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, group:s.group, slots:[]}; byLocation[key].slots.push(s); });
@@ -3306,7 +3343,7 @@ function inventoryContentHtml(data, q, pfx) {
   // A tracked claim's containers: one section per kind (chests, stockpiles, cargo bins, item storage).
   const claimLocs = Object.values(byLocation).filter(l => l.locationType === 'claim');
   const claimSecs = claimLocs.length ? CLAIM_STORE_GROUPS.map(([label, , icon], gi) => renderSection(label, icon, claimLocs.filter(l => l.group === label), 'claim' + gi)).join('') : '';
-  return equip + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + hlog + renderSection('Storage','ti-box',storage,'storage') + claimSecs;
+  return equip + totals + renderSection('Inventory','ti-backpack',personal,'personal') + renderSection('Banks','ti-building-bank',banks,'banks') + renderSection('Housing','ti-home',housing,'housing') + hlog + renderSection('Storage','ti-box',storage,'storage') + claimSecs;
 }
 function fillPlayerInvCached(entityId) {
   const body = document.getElementById('psec-inv-' + entityId);
