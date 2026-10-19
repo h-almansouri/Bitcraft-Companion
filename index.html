@@ -789,6 +789,17 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-mp-status{margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45;flex-shrink:0}
 .bc-player-tip{background:rgba(13,15,20,.45)!important;border:none!important;color:rgba(255,255,255,.82)!important;font-size:9px!important;font-weight:500;padding:0 3px!important;box-shadow:none!important;text-shadow:0 1px 2px rgba(0,0,0,.9);border-radius:3px}
 .bc-player-tip::before{display:none!important}
+/* herd respawn timers (bcHerd*): a pill at the herd's spawn point, ringed in the tracked type's colour */
+.bc-herd-ic{background:none;border:none}
+.bc-herd{position:absolute;transform:translate(-50%,-50%);display:flex;align-items:center;gap:3px;padding:1px 5px 1px 3px;border-radius:9px;background:rgba(13,15,20,.8);border:1px solid var(--c);color:#e8ecf2;font-size:10px;font-weight:600;line-height:13px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+.bc-herd i{width:7px;height:7px;border-radius:50%;background:var(--c);flex-shrink:0}
+.bc-herd.due span{color:var(--amber-light)}
+.bc-herd.wait span{color:#9aa3b2;font-weight:500}
+.bc-herd.dead{opacity:.55;border-style:dashed}
+.bc-herd.dead span{color:var(--red-light)}
+.bc-herd-far .bc-herd{padding:2px}
+.bc-herd-far .bc-herd span{display:none}
+.bc-herd-tip{font-weight:400;color:var(--text2);margin-top:1px}
 /* resource list */
 .bc-res-list{flex:1;min-height:0;overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
 .bc-li{display:flex;align-items:center;gap:7px;padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px;content-visibility:auto;contain-intrinsic-size:auto 29px}
@@ -4503,6 +4514,7 @@ const LIVE_COLS = {
   // order = server struct field order (BitCraftPublic components.rs MobileEntityState)
   mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','_pad1','_pad2','_pad3'],
   enemy_mob_monitor_state: ['entity_id','enemy_type','herd_entity_id','herd_location'],   // creature roster (bcCre*): id → type, herd
+  herd_state: ['entity_id','enemy_ai_params_desc_id','current_population','ignore_eagerness','population_variance','crumb_trail_entity_id'],   // herd respawn timers (bcHerd*)
   placeable_state: ['entity_id','owner_entity_id','placeable_id','direction_index'],   // Crafts → Placeables (from /schema 2026-10-11)
   placeable_growth_timer: ['scheduled_id','scheduled_at','entity_id','growth_recipe_id'],   // scheduled_at = ScheduleAt sum, [1, Timestamp]
 };
@@ -4687,17 +4699,19 @@ function liveApplyDelta(c, frame){
   const com = frame.status && frame.status.Committed;
   if (!com) return;
   const evs = [];
+  bcHerdPrescan(c, com.tables || []);   // a herd born in this transaction: claim its location row below too
   (com.tables || []).forEach(t => {
     const tb = t.table_name;
     if (tb === BC_CRE_ROSTER_TABLE){ bcCreOnRosterDelta(c, t); return; }   // creature roster: a compact map, never row objects (110k rows world-wide)
+    if (tb === BC_HERD_TABLE){ bcHerdOnDelta(c, t); return; }              // herd headcounts: the respawn timers' own map
     const byRegion = liveCache[tb] || (liveCache[tb] = {});
     const slice = byRegion[c.region] || (byRegion[c.region] = new Map());
     const ins = [], del = [];
     (t.updates || []).forEach(u => {
       // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
       // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
-      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } slice.delete(livePk(r)); del.push(r); } });
-      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'delete', r); return; } slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
   });
@@ -9142,7 +9156,7 @@ function renderMap(){
             <div class="map-side-hdr"><i class="ti ti-map-search"></i> Live map</div>
             <button class="bc-mp-btn bc-pip-btn" id="bc-pip-btn" onclick="bcMapPip()" title="Pop the map into a floating, always-on-top window (Chrome/Edge). It stays fully interactive — zoom &amp; pan work." style="display:none;width:100%;margin-bottom:5px"><i class="ti ti-picture-in-picture-on"></i> Pop out map</button>
             <select id="bc-region-sel" style="margin-bottom:4px" onchange="bcSetMapRegion(this.value)" title="Limit tracked resources to one region"></select>
-            <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin-bottom:5px;cursor:pointer" title="Show depleted resource nodes and their live respawn countdown (live via prism-relay)"><input type="checkbox" id="bc-growth-toggle" style="width:auto" onchange="bcGrowthToggle(this.checked)"><i class="ti ti-hourglass-low" style="color:var(--teal-light)"></i> Respawn timers</label>
+            <label style="display:flex;align-items:center;gap:.4rem;font-size:12px;color:var(--text2);margin-bottom:5px;cursor:pointer" title="Live respawn countdowns: depleted resource nodes, and the spawn point of every herd of a tracked creature that is missing animals (each region respawns a creature type in one sweep on a fixed clock, learned as you watch)"><input type="checkbox" id="bc-growth-toggle" style="width:auto" onchange="bcGrowthToggle(this.checked)"><i class="ti ti-hourglass-low" style="color:var(--teal-light)"></i> Respawn timers</label>
             <input type="search" id="bc-res-search" placeholder="Search…" autocomplete="off" oninput="bcResSearch=this.value;bcDebRenderResList()">
             <div style="display:flex;gap:4px;margin-top:4px">
               <select id="bc-res-tier" onchange="bcResTier=this.value;bcRenderResourceList()"></select>
@@ -10547,6 +10561,7 @@ function bcUpdateResStatus(){
   if (bcRelayDown && bcRelayResourceTypes().length) notes.push('resource relay down — retrying');
   if (bcCreWanted()){ const lag = bcCreRegions().filter(rg => { const c = liveConns[rg]; return c && c.ws && c.ws.readyState === 1 && !(c.cre && c.cre.posReady); }).length; if (lag) notes.push(`creatures: ${lag} region${lag > 1 ? 's' : ''} loading`); }
   if (!bcMapRegion && ts.some(t => (t.count || 0) > BC_BIG_HINT)) notes.push('big type — pick a region to lighten it');
+  if (bcHerdWanted() && bcHerd.params){ const n = Object.keys(bcHerd.markers).length; notes.push(`${n.toLocaleString()} herd${n === 1 ? '' : 's'} respawning`); }
   status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}` + notes.map(n => ' · ' + n).join('');
 }
 function bcToggleMapItem(kind, id){
@@ -10574,7 +10589,7 @@ function bcUntrackRes(key){
 function bcSetResColorLive(key, color){
   const t = bcTrackedRes[key]; if (!t) return;
   t.color = color;
-  bcRedrawTracked();
+  bcRedrawTracked(); bcHerdScheduleRebuild();
   bcSetResRowState(key);   // the list circle is a plain span — repainting it doesn't touch the open picker
 }
 // Committed (picker closed): persist and re-render lists so swatches/dots sync everywhere.
@@ -10582,7 +10597,7 @@ function bcSetResColor(key, color){
   const t = bcTrackedRes[key]; if (!t) return;
   t.color = color;
   bcSaveTrackedRes(); bcSaveResColor(key, color);
-  bcRedrawTracked(); bcSetResRowState(key); bcRenderTrackedResList();
+  bcRedrawTracked(); bcHerdScheduleRebuild(); bcSetResRowState(key); bcRenderTrackedResList();
 }
 function bcRenderTrackedResList(){
   const el = document.getElementById('bc-tracked-res'); if (!el) return;
@@ -10656,6 +10671,7 @@ function bcRelayRebuild(){
 // disconnects when nothing is tracked. Called on track/untrack/region-change/map-open.
 function bcRelaySync(){
   bcCreSync();   // creatures ride the bitcraftsync sockets (bcCre*); everything below is prism: resources + respawn timers
+  bcHerdApply();   // herd respawn timers ride those same sockets: their layer follows the toggle and the tab, whatever prism does
   // Only stream while the Map tab is open and showing tracked types — drop the connection otherwise (polite,
   // and nothing to draw off-map). Gated on the tab, not document.hidden, so alt-tabbing to the game
   // doesn't churn the connection; the redraw itself is skipped while hidden (see bcRelayRebuild).
@@ -10800,13 +10816,15 @@ function bcCreOwns(c, table, r){ return table === BC_CRE_POS_TABLE && !!(c.cre &
 // A socket just (re)opened: fresh per-socket state, then reconcile. Positions from the previous socket
 // stay on the map until this one's snapshot replaces them (stale beats blank, like the live cache).
 function bcCreOnOpen(c){
-  c.cre = { qid: 0, rosterQid: 0, posQid: 0, rosterReady: false, posReady: false, posKey: '', posIds: new Set() };
+  c.cre = { qid: 0, rosterQid: 0, posQid: 0, rosterReady: false, posReady: false, posKey: '', posIds: new Set(),
+            herdQid: 0, herdKey: '', herdIds: new Set(), paramsQid: 0, paramsFailed: false };   // herd* / params*: the respawn timers (bcHerd*)
   bcCreSyncSocket(c);
 }
+function bcCreSyncSocket(c){ bcCreSyncSets(c); bcHerdSyncSocket(c); }
 // Reconcile one socket with what the map wants: the roster set is present iff the region is wanted; the
 // position set is the roster's ids of the tracked types (while the Map tab shows), replaced only when
 // that id list actually changes. request_ids sit at 1000+ so they never collide with the legacy set's.
-function bcCreSyncSocket(c){
+function bcCreSyncSets(c){
   if (!c || c.closed || !c.cre || !c.ws || c.ws.readyState !== 1) return;
   const s = c.cre, rg = c.region;
   if (!bcCreRegionWanted(rg)){
@@ -10840,6 +10858,7 @@ function bcCreSync(){
     let had = false;
     Object.values(liveConns).forEach(c => { if (c.cre && (c.cre.rosterQid || c.cre.posQid)) had = true; bcCreSyncSocket(c); });
     bcCre.roster = {}; bcCre.pos = {};
+    bcHerd.herds = {}; bcHerd.loc = {}; bcHerdTickArm(); bcHerdScheduleRebuild();
     Object.keys(bcCre.resubT).forEach(rg => { clearTimeout(bcCre.resubT[rg]); delete bcCre.resubT[rg]; });
     if (had) bcCreScheduleRedraw();
     if (liveOn() && !trackedPlayers.length && !bcPlayersOn) liveStart();   // → liveStopAll
@@ -10847,6 +10866,7 @@ function bcCreSync(){
   }
   if (!liveOn()) liveStart();
   Object.values(liveConns).forEach(c => bcCreSyncSocket(c));
+  bcHerdTickArm();
 }
 // A named set answered. Roster → compact id→type map, then ask for positions. Positions → this
 // region's dots, whole: a replaced set arrives as a full snapshot, so there is no merge bookkeeping.
@@ -10865,7 +10885,8 @@ function bcCreOnApplied(c, a){
     (rows[BC_CRE_POS_TABLE] || []).forEach(r => { const id = String(r.entity_id), t = ro.get(id); if (t != null && +r.dimension === 1) m.set(id, { t, x: r.location_x / 1000, z: r.location_z / 1000 }); });
     bcCre.pos[c.region] = m; s.posReady = true;
     bcCreScheduleRedraw();
-  }
+  } else if (qid === s.herdQid) bcHerdOnApplied(c, rows);
+  else if (qid === s.paramsQid) bcHerdOnParams(c, rows);
 }
 // The relay refused a set: forget it (no automatic retry loop — the next track/region/tab action re-syncs)
 // and count the region as settled so the list doesn't show "…" forever.
@@ -10873,6 +10894,8 @@ function bcCreOnError(c, err){
   const s = c.cre, qid = err && err.query_id && err.query_id.id; if (!s || !qid) return;
   if (qid === s.rosterQid){ s.rosterQid = 0; s.rosterReady = false; }
   if (qid === s.posQid){ s.posQid = 0; s.posReady = true; s.posKey = ''; s.posIds = new Set(); }
+  if (qid === s.herdQid) s.herdQid = 0;   // herdKey stays: the same set isn't re-asked on this socket
+  if (qid === s.paramsQid){ s.paramsQid = 0; s.paramsFailed = true; bcHerd.paramsReq = null; }
 }
 // Roster deltas (positional rows; LIVE_COLS names them): a spawn of a tracked type earns a debounced
 // position re-subscribe, a death drops the dot at once.
@@ -10882,7 +10905,7 @@ function bcCreOnRosterDelta(c, t){
   let resub = false, redraw = false;
   (t.updates || []).forEach(u => {
     (u.deletes || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const id = String(r.entity_id); ro.delete(id); const p = bcCre.pos[rg]; if (p && p.delete(id)) redraw = true; });
-    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; bcHerdNoteSpawn(rg, String(r.herd_entity_id), ty); });
   });
   if (redraw) bcCreScheduleRedraw();
   if (resub && !bcCre.resubT[rg]) bcCre.resubT[rg] = setTimeout(() => { delete bcCre.resubT[rg]; bcCreSyncSocket(liveConns[rg]); }, BC_CRE_RESUB_DEBOUNCE_MS);
@@ -10907,6 +10930,292 @@ function bcCreRebuild(){
     enemies.forEach(t => { t.count = t.pts.length; t.applied = regions.every(rg => { const c = liveConns[rg]; return !(c && c.ws && c.ws.readyState === 1) || !!(c.cre && c.cre.posReady); }); });
   }
   if (bcMapShowing()){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
+}
+
+// ── Herd respawn timers: a countdown at the spawn point of every short-handed herd of a tracked type ──
+// Creatures do NOT come back a fixed time after they die (measured 2026-10-19, 30 min on r8 + r12, ~390
+// deaths / ~330 spawns). Every herd has a spawn frequency (enemy_ai_params_desc, per creature type × biome:
+// Sagi Bird 4/6/10 min, Nubi Goat 8, Yagi/Dromai/deer/boars 15, most monsters 60/120), and each region
+// tops up every short-handed herd of one frequency in a single sweep on a fixed clock: the 6-minute sweep
+// came every 360.0 s, the 8-minute one every 480.0 s, the 15-minute one crossed a whole region in 12–17 s
+// every 900 s. So the wait after a kill is "until that region's next sweep" (0.15–3.99 min for the
+// 4-minute group), and as the phase differs by region it is LEARNED from the spawns the roster sockets
+// already see, not computed. Eagerness-1 herds come back whole on their sweep (almost always); eagerness-
+// 0.5 herds (all deer and boars, Yagi in one biome) get only part of the gap back each sweep. A herd
+// still flagged ignore_eagerness has never spawned at all (enemy_spawn.rs clears it on the first spawn):
+// all 78 empty herds in the watch had it, none of 3,121 live ones did, and none refilled in 30 minutes,
+// so those spots are left off the map. A herd that misses its sweep is marked as not respawning (claimed
+// land, for one, blocks spawns). The spawner itself is an external service, not in the public module.
+// Data: one more named set per live socket while the timers are on and a creature type is tracked —
+//   herd_state WHERE enemy_ai_params_desc_id = P                 headcount of every herd of a tracked type (indexed)
+//   location_state JOIN herd_state ON entity_id … WHERE … = P    its spawn point: a herd keeps its location
+//                                                                row even when every member is dead
+// plus enemy_ai_params_desc (121 rows, 31 KB) once, kept for a day. Clocks are kept for 3 hours, shown as
+// "≈" until this session sees a sweep. "Short-handed" = empty, or below the most it has held this session;
+// a whole-herd sweep resets that to what the sweep brought back.
+const BC_HERD_TABLE = 'herd_state', BC_HERD_PARAMS_TABLE = 'enemy_ai_params_desc';
+const BC_HERD_PARAMS_KEY = 'bc_herd_params_v1', BC_HERD_PARAMS_TTL = 24 * 3600e3;
+const BC_HERD_CLOCKS_KEY = 'bc_herd_clocks_v1', BC_HERD_CLOCK_TTL = 3 * 3600e3;
+const BC_HERD_SWEEP_GAP_MS = 60000;   // spawns of one frequency closer than this are one sweep (a sweep takes ≤ ~20 s)
+const BC_HERD_GRID_TOL_MS = 30000;    // a sweep this close to the clock's grid confirms it (sweep starts jitter by a few seconds)
+const BC_HERD_GRACE_MS = 45000;       // a herd's sweep counts as come-and-gone this long after its predicted moment
+const BC_HERD_SETTLE_MS = 8000;       // one sweep's spawns into a herd land within ~1 s; after this it is as full as it gets
+const BC_HERD_LABEL_MIN_ZOOM = -1.5;  // further out, the markers shrink to dots
+const bcHerd = { params: null, typeFreq: {}, herds: {}, loc: {}, clocks: {}, gen: 0, paramsReq: null, layer: null, markers: {}, tick: null, rebuildT: null, saveT: null };
+// herds: region -> Map(herdId -> {id, pid, pop, peak, shortSince, spawnAt, settleAt, watchDue, watchGen, offset, missed, dead})
+// loc:   region -> Map(herdId -> [x, z])  (overworld only)    clocks: region -> {freqMs: {at, last, live, gen, alt}}
+const bcEnumIdx = e => Array.isArray(e) ? +e[0] : (e && typeof e === 'object') ? +Object.keys(e)[0] : +e;
+function bcHerdWanted(){ return bcGrowthOn && bcCreWanted(); }
+function bcHerdSetParams(rows){
+  const m = new Map(), freqs = {};
+  rows.forEach(r => {
+    const p = { id: +r.id, type: bcEnumIdx(r.enemy_type), biome: bcEnumIdx(r.biome), freqMs: Math.round((+r.spawn_frequency_minutes || 0) * 60000), eager: +r.spawn_eagerness || 0, night: +r.time_of_day_start !== +r.time_of_day_end };
+    m.set(p.id, p);
+    if (p.biome !== 0) (freqs[p.type] || (freqs[p.type] = new Set())).add(p.night ? -1 : p.freqMs);   // biome 0 = interiors and special spawns
+  });
+  bcHerd.params = m;
+  // A type whose every overworld herd shares one frequency (and has no night variant) can time that
+  // frequency's sweep from ANY of its spawns, tracked or not — most of the 15-minute group, which is
+  // why that clock is usually known within one sweep.
+  bcHerd.typeFreq = {};
+  Object.keys(freqs).forEach(t => { const s = freqs[t]; if (s.size === 1){ const f = [...s][0]; if (f >= 120000) bcHerd.typeFreq[t] = f; } });
+}
+function bcHerdLoadSaved(){
+  const now = Date.now();
+  try { const v = JSON.parse(localStorage.getItem(BC_HERD_PARAMS_KEY) || 'null'); if (v && now - v.at < BC_HERD_PARAMS_TTL && Array.isArray(v.rows) && v.rows.length) bcHerdSetParams(v.rows); } catch(e){}
+  try {
+    const o = JSON.parse(localStorage.getItem(BC_HERD_CLOCKS_KEY) || 'null') || {};
+    Object.keys(o).forEach(rg => Object.keys(o[rg]).forEach(f => { const at = +o[rg][f]; if (at && now - at < BC_HERD_CLOCK_TTL) (bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}))[f] = { at, last: at, live: false, gen: ++bcHerd.gen, alt: null }; }));
+  } catch(e){}
+}
+bcHerdLoadSaved();
+function bcHerdSaveClocks(){
+  if (bcHerd.saveT) return;
+  bcHerd.saveT = setTimeout(() => {
+    bcHerd.saveT = null; const o = {};
+    Object.keys(bcHerd.clocks).forEach(rg => Object.keys(bcHerd.clocks[rg]).forEach(f => (o[rg] || (o[rg] = {}))[f] = bcHerd.clocks[rg][f].at));
+    safeSetItem(BC_HERD_CLOCKS_KEY, JSON.stringify(o));
+  }, 5000);
+}
+function bcHerdTrackedPids(){
+  if (!bcHerd.params) return [];
+  const types = new Set(bcRelayEnemyTypes().map(t => +t.id)), out = [];
+  bcHerd.params.forEach(p => { if (types.has(p.type) && p.biome !== 0 && p.freqMs > 0) out.push(p.id); });
+  return out.sort((a, b) => a - b);
+}
+// Reconcile one socket's herd set (and, once per session, the settings table) with what the map wants.
+function bcHerdSyncSocket(c){
+  if (!c || c.closed || !c.cre || !c.ws || c.ws.readyState !== 1) return;
+  const s = c.cre, rg = c.region, want = bcHerdWanted() && bcCreRegionWanted(rg);
+  if (want && !bcHerd.params){   // the settings first, on whichever socket gets here first
+    const q = bcHerd.paramsReq;
+    if (!s.paramsFailed && (!q || !q.c.cre || q.c.cre !== q.cre)){   // nobody has asked, or the socket that asked has gone
+      s.paramsQid = ++s.qid; bcHerd.paramsReq = { c, cre: s };
+      bcCreSend(c, { SubscribeMulti: { request_id: 1000 + s.paramsQid, query_id: { id: s.paramsQid }, query_strings: [`SELECT * FROM ${BC_HERD_PARAMS_TABLE}`] } });
+    }
+    return;   // bcHerdOnParams re-syncs every socket
+  }
+  const pids = want ? bcHerdTrackedPids() : [], key = pids.join(',');
+  if (key === s.herdKey) return;
+  if (s.herdQid){ bcCreSend(c, { UnsubscribeMulti: { request_id: 1000 + (++s.qid), query_id: { id: s.herdQid } } }); s.herdQid = 0; }
+  s.herdKey = key; s.herdIds = new Set();
+  if (!pids.length){ if (bcHerd.herds[rg] || bcHerd.loc[rg]){ delete bcHerd.herds[rg]; delete bcHerd.loc[rg]; bcHerdScheduleRebuild(); } return; }
+  const T = BC_HERD_TABLE, q = [];
+  pids.forEach(p => {
+    q.push(`SELECT * FROM ${T} WHERE enemy_ai_params_desc_id = ${p}`);
+    q.push(`SELECT location_state.* FROM location_state JOIN ${T} ON location_state.entity_id = ${T}.entity_id WHERE ${T}.enemy_ai_params_desc_id = ${p}`);
+  });
+  s.herdQid = ++s.qid;
+  bcCreSend(c, { SubscribeMulti: { request_id: 1000 + s.herdQid, query_id: { id: s.herdQid }, query_strings: q } });
+}
+// Static data: no deltas worth holding a set for, so it's dropped as soon as it lands.
+function bcHerdOnParams(c, rows){
+  const s = c.cre, list = rows[BC_HERD_PARAMS_TABLE] || [];
+  if (s && s.paramsQid){ bcCreSend(c, { UnsubscribeMulti: { request_id: 1000 + (++s.qid), query_id: { id: s.paramsQid } } }); s.paramsQid = 0; }
+  bcHerd.paramsReq = null;
+  if (!list.length){ if (s) s.paramsFailed = true; return; }
+  bcHerdSetParams(list);
+  safeSetItem(BC_HERD_PARAMS_KEY, JSON.stringify({ at: Date.now(), rows: list }));
+  Object.values(liveConns).forEach(x => bcHerdSyncSocket(x));
+}
+const bcHerdShort = h => h.pop === 0 || h.pop < h.peak;
+function bcHerdNew(id, pid){ return { id, pid, pop: 0, peak: -1, shortSince: 0, spawnAt: 0, settleAt: 0, watchDue: 0, watchGen: 0, offset: 0, missed: 0, dead: false, dormant: false }; }
+// A new headcount. `live` = it arrived as a delta (a spawn we saw happen) rather than in a snapshot.
+function bcHerdSetPop(h, pop, live){
+  const now = Date.now(), was = h.peak >= 0 && bcHerdShort(h);
+  if (live && pop > h.pop){
+    h.spawnAt = now; h.missed = 0; h.dead = false; h.watchDue = 0; h.shortSince = now;   // its sweep came; if still short, the next one is the wait
+    const p = bcHerd.params && bcHerd.params.get(h.pid);
+    if (p && p.eager >= 1) h.settleAt = now + BC_HERD_SETTLE_MS;
+  }
+  h.pop = pop;
+  if (h.peak < 0 || pop > h.peak) h.peak = pop;
+  if (bcHerdShort(h) && !was){ h.shortSince = now; h.watchDue = 0; }
+}
+// The herd set's snapshot replaces the region whole; herds already known keep what this session learnt.
+function bcHerdOnApplied(c, rows){
+  const rg = c.region, s = c.cre, old = bcHerd.herds[rg] || new Map(), m = new Map(), loc = new Map();
+  (rows.location_state || []).forEach(r => { if (+r.dimension === 1) loc.set(String(r.entity_id), [+r.x, +r.z]); });
+  (rows[BC_HERD_TABLE] || []).forEach(r => {
+    const id = String(r.entity_id); s.herdIds.add(id);
+    if (+r.crumb_trail_entity_id) return;   // a prospecting prize herd: temporary, never respawns
+    const h = old.get(id) || bcHerdNew(id, +r.enemy_ai_params_desc_id);
+    bcHerdSetPop(h, +r.current_population, false); h.dormant = r.ignore_eagerness === true;
+    m.set(id, h);
+  });
+  bcHerd.herds[rg] = m; bcHerd.loc[rg] = loc;
+  bcHerdScheduleRebuild();
+}
+// herd_state deltas. A headcount change is delete(old)+insert(new) of one herd, possibly split across
+// update entries, so gather the whole table first: a delete with no insert is a herd that went away.
+function bcHerdOnDelta(c, t){
+  const rg = c.region, m = bcHerd.herds[rg], s = c.cre; if (!m) return;
+  const gone = new Set(), ins = [];
+  (t.updates || []).forEach(u => {
+    (u.deletes || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) gone.add(String(r.entity_id)); });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) ins.push(r); });
+  });
+  ins.forEach(r => {
+    const id = String(r.entity_id); gone.delete(id);
+    if (s) s.herdIds.add(id);
+    if (+r.crumb_trail_entity_id) return;
+    let h = m.get(id); if (!h){ h = bcHerdNew(id, +r.enemy_ai_params_desc_id); m.set(id, h); }
+    bcHerdSetPop(h, +r.current_population, true); h.dormant = r.ignore_eagerness === true;
+  });
+  gone.forEach(id => m.delete(id));
+  bcHerdScheduleRebuild();
+}
+// A herd created in this transaction has its location row in the same one, in any table order.
+function bcHerdPrescan(c, tables){
+  const s = c.cre; if (!s || !s.herdQid) return;
+  tables.forEach(t => { if (t.table_name === BC_HERD_TABLE) (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) s.herdIds.add(String(r.entity_id)); })); });
+}
+// Is this location row one of our herds' spawn points? (liveApplyDelta diverts those from the row cache.)
+function bcHerdOwns(c, table, r){ return table === 'location_state' && !!(c.cre && c.cre.herdIds && c.cre.herdIds.has(String(r.entity_id))); }
+function bcHerdOnLoc(c, kind, r){
+  const loc = bcHerd.loc[c.region] || (bcHerd.loc[c.region] = new Map()), id = String(r.entity_id);
+  if (kind === 'delete') loc.delete(id); else if (+r.dimension === 1) loc.set(id, [+r.x, +r.z]);
+  bcHerdScheduleRebuild();
+}
+// Every spawn on the roster sockets times its frequency's sweep, if we know which frequency that is.
+function bcHerdNoteSpawn(rg, herdId, type){
+  if (!bcHerd.params) return;
+  const h = bcHerd.herds[rg] && bcHerd.herds[rg].get(herdId), p = h && bcHerd.params.get(h.pid);
+  const f = p ? (p.night ? 0 : p.freqMs) : (bcHerd.typeFreq[type] || 0);
+  if (f >= 120000) bcHerdClockNote(rg, f, Date.now());   // receipt time, not the server's: the countdown runs on this clock
+}
+const bcHerdOffGrid = (t, at, f) => { const o = (((t - at) % f) + f) % f; return Math.min(o, f - o) > BC_HERD_GRID_TOL_MS; };
+function bcHerdClockNote(rg, f, now){
+  const byF = bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}), k = byF[f];
+  if (!k){ byF[f] = { at: now, last: now, live: true, gen: ++bcHerd.gen, alt: null }; bcHerdSaveClocks(); return; }
+  if (now - k.last <= BC_HERD_SWEEP_GAP_MS){ k.last = now; return; }   // the same sweep, still going
+  if (!bcHerdOffGrid(now, k.at, f) || !k.live){                       // the next sweep (or the first this session)
+    if (!k.live && bcHerdOffGrid(now, k.at, f)) k.gen = ++bcHerd.gen;  // the saved clock had moved on: re-time every wait
+    k.at = k.last = now; k.live = true; k.alt = null; bcHerdSaveClocks(); return;
+  }
+  // Off the grid of a clock this session has confirmed: a one-off (a herd being born, a den regrowing)
+  // unless a later sweep lands on ITS grid, which means the clock really moved (a server restart).
+  const a = k.alt;
+  if (a && now - a.last <= BC_HERD_SWEEP_GAP_MS){ a.last = now; return; }
+  if (a && !bcHerdOffGrid(now, a.at, f)){ k.at = k.last = now; k.gen = ++bcHerd.gen; k.alt = null; bcHerdSaveClocks(); return; }
+  k.alt = { at: now, last: now };
+}
+// The sweep this short-handed herd is waiting for: the first one at or after it went short (a spawn
+// that leaves it short moves shortSince on, so the wait becomes the sweep after). Re-timed whenever
+// its clock is re-anchored (gen).
+function bcHerdWatch(h, k, f, now){
+  if (!h.watchDue || h.watchGen !== k.gen){ const t = h.shortSince || now; h.watchDue = k.at + Math.ceil((t - k.at) / f) * f; h.watchGen = k.gen; }
+  if (h.spawnAt >= k.at && h.spawnAt - k.at < BC_HERD_SWEEP_GAP_MS) h.offset = h.spawnAt - k.at;   // its own slot within the sweep
+  return h.watchDue;
+}
+// Once a second: settle whole-herd sweeps, notice sweeps a herd missed, and refresh the countdowns.
+function bcHerdTickAll(){
+  const now = Date.now(); let changed = false;
+  if (bcHerd.params) Object.keys(bcHerd.herds).forEach(rg => bcHerd.herds[rg].forEach(h => {
+    if (h.settleAt && now >= h.settleAt){ h.settleAt = 0; if (h.pop > 0 && h.pop < h.peak){ h.peak = h.pop; changed = true; } }
+    if (h.dormant || !bcHerdShort(h)) return;
+    const p = bcHerd.params.get(h.pid); if (!p || p.night) return;
+    const k = bcHerd.clocks[rg] && bcHerd.clocks[rg][p.freqMs]; if (!k) return;
+    if (now <= bcHerdWatch(h, k, p.freqMs, now) + BC_HERD_GRACE_MS) return;
+    // Its sweep came and went with no spawn here (a spawn resets watchDue). One miss for a whole-herd
+    // type, three for a partial one, and the herd is either as full as it gets or not respawning at all.
+    // Only a clock this session has seen counts: a saved one may simply have drifted.
+    if (k.live && ++h.missed >= (p.eager >= 1 ? 1 : 3)){ if (h.pop > 0) h.peak = h.pop; else h.dead = true; }
+    h.watchDue += Math.ceil((now - BC_HERD_GRACE_MS - h.watchDue) / p.freqMs) * p.freqMs;
+    changed = true;
+  }));
+  if (changed) bcHerdScheduleRebuild();
+  if (bcMapShowing()) Object.values(bcHerd.markers).forEach(mk => bcHerdPaint(mk, now));
+}
+function bcHerdTickArm(){
+  const on = bcHerdWanted();
+  if (on && !bcHerd.tick) bcHerd.tick = setInterval(bcHerdTickAll, 1000);
+  else if (!on && bcHerd.tick){ clearInterval(bcHerd.tick); bcHerd.tick = null; }
+}
+const bcHerdMmss = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+// What one marker says right now: { text, cls, line } — line is the tooltip's status sentence.
+function bcHerdState(mk, now){
+  const h = mk.h, p = bcHerd.params.get(h.pid), fmin = Math.round(p.freqMs / 60000);
+  const k = bcHerd.clocks[mk.rg] && bcHerd.clocks[mk.rg][p.freqMs], est = k && !k.live ? '≈' : '';
+  if (h.dead) return { text: '✕', cls: 'dead', line: 'Didn\'t respawn on its last sweep, so something is blocking it (claimed land does)' };
+  if (p.night) return { text: 'night', cls: 'wait', line: 'Night-time herd: only respawns at night' };
+  if (!k) return { text: '≤' + fmin + 'm', cls: 'wait', line: `Waiting to see this region's ${fmin}-minute respawn sweep (at most ${fmin} min), then the countdown starts` };
+  const left = bcHerdWatch(h, k, p.freqMs, now) + h.offset - now;
+  if (left <= 0) return { text: 'due', cls: 'due', line: 'Respawning now (a sweep takes up to ~20 s to reach every herd)' };
+  return { text: est + bcHerdMmss(left), cls: '', line: `Respawns in ${bcHerdMmss(left)}${est ? ' (timing from an earlier visit, not yet confirmed)' : ''}` };
+}
+function bcHerdPaint(mk, now){
+  const st = bcHerdState(mk, now), el = mk.marker.getElement(), box = el && el.firstElementChild;
+  if (box && (st.text !== mk.text || st.cls !== mk.cls)){ box.lastElementChild.textContent = st.text; box.className = 'bc-herd' + (st.cls ? ' ' + st.cls : ''); mk.text = st.text; mk.cls = st.cls; }
+  if (mk.marker.isTooltipOpen()) mk.marker.setTooltipContent(bcHerdTipHtml(mk, st));
+}
+function bcHerdTipHtml(mk, st){
+  const h = mk.h, p = bcHerd.params.get(h.pid), t = bcTrackedRes[bcResKey('enemy', p.type)];
+  const fmin = Math.round(p.freqMs / 60000);
+  const count = h.pop === 0 ? 'None here' : `${h.pop} of ${h.peak} here`;
+  const lines = [count, st.line, p.eager >= 1 ? 'The whole herd comes back on each sweep' : 'Only part of the herd comes back each sweep', `This region's sweep: every ${fmin} min`];
+  return `<b>${escHtml(t ? t.name : 'Creature')} herd</b><div class="bc-herd-tip">${lines.map(escHtml).join('<br>')}</div>`;
+}
+const bcHerdIcon = color => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:${escHtml(color)}"><i></i><span></span></div>` });
+function bcHerdScheduleRebuild(){ if (bcHerd.rebuildT) return; bcHerd.rebuildT = setTimeout(() => { bcHerd.rebuildT = null; bcHerdRebuild(); }, 300); }
+// One marker per short-handed herd of a tracked type in the wanted regions; markers are kept across
+// rebuilds (keyed region:herd) so the countdowns don't flicker.
+function bcHerdRebuild(){
+  if (!bcHerd.layer) return;
+  const seen = new Set(), types = {};
+  if (bcHerdWanted() && bcHerd.params && bcMapActive()){
+    bcRelayEnemyTypes().forEach(t => types[+t.id] = t);
+    bcCreRegions().forEach(rg => {
+      const m = bcHerd.herds[rg], loc = bcHerd.loc[rg]; if (!m || !loc) return;
+      m.forEach(h => {
+        const p = bcHerd.params.get(h.pid), t = p && types[p.type], at = loc.get(h.id);
+        if (!t || !at || h.dormant || !bcHerdShort(h)) return;
+        const key = rg + ':' + h.id; seen.add(key);
+        let mk = bcHerd.markers[key];
+        if (!mk){
+          mk = bcHerd.markers[key] = { marker: L.marker(L.latLng(at[1], at[0]), { icon: bcHerdIcon(t.color), pane: 'bcHerd', keyboard: false, riseOnHover: true }), rg, h, color: t.color, text: '', cls: '' };
+          mk.marker.bindTooltip('', { direction: 'top', offset: [0, -9], className: 'bc-hover-tip', opacity: 1 });
+          mk.marker.on('tooltipopen', () => mk.marker.setTooltipContent(bcHerdTipHtml(mk, bcHerdState(mk, Date.now()))));
+          mk.marker.addTo(bcHerd.layer);
+        } else if (mk.color !== t.color){ mk.color = t.color; mk.marker.setIcon(bcHerdIcon(t.color)); mk.text = mk.cls = ''; }
+        mk.h = h;
+      });
+    });
+  }
+  Object.keys(bcHerd.markers).forEach(key => { if (!seen.has(key)){ bcHerd.layer.removeLayer(bcHerd.markers[key].marker); delete bcHerd.markers[key]; } });
+  const now = Date.now(); Object.values(bcHerd.markers).forEach(mk => bcHerdPaint(mk, now));
+  if (bcMapShowing()) bcUpdateResStatus();
+}
+function bcHerdZoomClass(){ const pn = bcMap && bcMap.getPane('bcHerd'); if (pn) pn.classList.toggle('bc-herd-far', bcMap.getZoom() < BC_HERD_LABEL_MIN_ZOOM); }
+// Layer visibility follows (timers on × map showing — its tab or the pop-out), like the resource overlay.
+function bcHerdApply(){
+  if (!bcMap) return;
+  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdZoomClass); bcHerdZoomClass(); }   // above markers (600), below tooltips (650)
+  if (!bcHerd.layer) bcHerd.layer = L.layerGroup();
+  const show = bcGrowthOn && bcMapActive();
+  if (show){ if (!bcMap.hasLayer(bcHerd.layer)) bcHerd.layer.addTo(bcMap); }
+  else if (bcMap.hasLayer(bcHerd.layer)) bcMap.removeLayer(bcHerd.layer);
+  bcHerdTickArm(); bcHerdScheduleRebuild();
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
