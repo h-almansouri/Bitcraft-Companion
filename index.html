@@ -789,10 +789,12 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-mp-status{margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45;flex-shrink:0}
 .bc-player-tip{background:rgba(13,15,20,.45)!important;border:none!important;color:rgba(255,255,255,.82)!important;font-size:9px!important;font-weight:500;padding:0 3px!important;box-shadow:none!important;text-shadow:0 1px 2px rgba(0,0,0,.9);border-radius:3px}
 .bc-player-tip::before{display:none!important}
-/* herd respawn timers (bcHerd*): one small tag per cluster of herds that respawn together, parked ABOVE the
-   cluster (its pointer marks the northernmost spawn point) so the live dots underneath stay visible */
+/* herd respawn timers (bcHerd*): one small tag per area and respawn moment, parked ABOVE the area (the lowest
+   tag's pointer marks its northernmost spawn point) so the live dots underneath stay visible; other moments in
+   the same area stack upward (--i), without pointers. Depleted-resource tags (bcGrowth*) share the look. */
 .bc-herd-ic{background:none;border:none}
-.bc-herd{position:absolute;left:0;top:0;transform:translate(-50%,calc(-100% - 4px));display:flex;align-items:center;gap:2px;padding:0 5px 0 3px;border-radius:6px;background:rgba(13,15,20,.66);color:#e8ecf2;font-size:10px;font-weight:600;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+.bc-herd.stk::after{display:none}
+.bc-herd{position:absolute;left:0;top:0;transform:translate(-50%,calc(-100% - 4px - var(--i,0) * 17px));display:flex;align-items:center;gap:2px;padding:0 5px 0 3px;border-radius:6px;background:rgba(13,15,20,.66);color:#e8ecf2;font-size:10px;font-weight:600;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(0,0,0,.35)}
 .bc-herd::after{content:'';position:absolute;left:50%;bottom:-4px;margin-left:-4px;border:4px solid transparent;border-bottom:0;border-top-color:rgba(13,15,20,.66)}
 .bc-herd i{font-size:10px;color:var(--c)}
 .bc-herd.due span{color:var(--amber-light)}
@@ -10903,7 +10905,7 @@ function bcCreOnRosterDelta(c, t){
   let resub = false, redraw = false;
   (t.updates || []).forEach(u => {
     (u.deletes || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const id = String(r.entity_id); ro.delete(id); const p = bcCre.pos[rg]; if (p && p.delete(id)) redraw = true; });
-    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; bcHerdNoteSpawn(rg, String(r.herd_entity_id), ty); });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; bcHerdNoteSpawn(rg, String(r.herd_entity_id)); });
   });
   if (redraw) bcCreScheduleRedraw();
   if (resub && !bcCre.resubT[rg]) bcCre.resubT[rg] = setTimeout(() => { delete bcCre.resubT[rg]; bcCreSyncSocket(liveConns[rg]); }, BC_CRE_RESUB_DEBOUNCE_MS);
@@ -10930,20 +10932,24 @@ function bcCreRebuild(){
   if (bcMapShowing()){ bcRedrawTracked(); bcUpdateResStatus(); bcRenderTrackedResList(); }
 }
 
-// ── Herd respawn timers: a countdown at the spawn point of every short-handed herd of a tracked type ──
+// ── Herd respawn timers: a countdown over every area of short-handed herds of a tracked type ─────────
 // Creatures do NOT come back a fixed time after they die (measured 2026-10-19, 30 min on r8 + r12, ~390
-// deaths / ~330 spawns). Every herd has a spawn frequency (enemy_ai_params_desc, per creature type × biome:
-// Sagi Bird 4/6/10 min, Nubi Goat 8, Yagi/Dromai/deer/boars 15, most monsters 60/120), and each region
-// tops up every short-handed herd of one frequency in a single sweep on a fixed clock: the 6-minute sweep
-// came every 360.0 s, the 8-minute one every 480.0 s, the 15-minute one crossed a whole region in 12–17 s
-// every 900 s. So the wait after a kill is "until that region's next sweep" (0.15–3.99 min for the
-// 4-minute group), and as the phase differs by region it is LEARNED from the spawns the roster sockets
-// already see, not computed. Eagerness-1 herds come back whole on their sweep (almost always); eagerness-
-// 0.5 herds (all deer and boars, Yagi in one biome) get only part of the gap back each sweep. A herd
-// still flagged ignore_eagerness has never spawned at all (enemy_spawn.rs clears it on the first spawn):
-// all 78 empty herds in the watch had it, none of 3,121 live ones did, and none refilled in 30 minutes,
-// so those spots are left off the map. A herd that misses its sweep is marked as not respawning (claimed
-// land, for one, blocks spawns). The spawner itself is an external service, not in the public module.
+// deaths / ~330 spawns). Every herd belongs to a spawn group — one enemy_ai_params_desc row, i.e. creature
+// type × biome — with a spawn frequency (Sagi Bird 4/6/10 min by biome, Nubi Goat 8, Yagi/Dromai/deer/
+// boars 15, most monsters 60/120), and each region tops up every short-handed herd of one GROUP in a single
+// sweep on that group's own fixed clock: the 6-minute sweep came every 360.0 s, the 8-minute one every
+// 480.0 s, a 15-minute one crossed a whole region in 12–17 s every 900 s. So the wait after a kill is "until
+// that group's next sweep" (0.15–3.99 min for a 4-minute group). The clock is per GROUP, not per frequency:
+// on r13 a 15-minute group swept at :03:39 and Yagi (also 15) at :05:17, 34 spawns in two seconds — a shared
+// per-frequency clock put the Yagi countdown 98 s early and then wrongly decided their herds were blocked.
+// Phases differ by region and group, so they are LEARNED from spawns into that group's own herds (which the
+// herd set below identifies), never computed or borrowed from another group. Eagerness-1 herds come back
+// whole on their sweep (almost always); eagerness-0.5 herds (all deer and boars, Yagi in one biome) get only
+// part of the gap back each sweep. A herd still flagged ignore_eagerness has never spawned at all
+// (enemy_spawn.rs clears it on the first spawn): all 78 empty herds in the watch had it, none of 3,121 live
+// ones did, and none refilled in 30 minutes, so those spots are left off the map. An empty herd that misses
+// two sweeps of a clock confirmed twice is treated as blocked (claimed land, for one, blocks spawns) and
+// dropped too. The spawner itself is an external service, not in the public module.
 // Data: one more named set per live socket while the timers are on and a creature type is tracked —
 //   herd_state WHERE enemy_ai_params_desc_id = P                 headcount of every herd of a tracked type (indexed)
 //   location_state JOIN herd_state ON entity_id … WHERE … = P    its spawn point: a herd keeps its location
@@ -10953,44 +10959,43 @@ function bcCreRebuild(){
 // a whole-herd sweep resets that to what the sweep brought back.
 const BC_HERD_TABLE = 'herd_state', BC_HERD_PARAMS_TABLE = 'enemy_ai_params_desc';
 const BC_HERD_PARAMS_KEY = 'bc_herd_params_v1', BC_HERD_PARAMS_TTL = 24 * 3600e3;
-const BC_HERD_CLOCKS_KEY = 'bc_herd_clocks_v1', BC_HERD_CLOCK_TTL = 3 * 3600e3;
-const BC_HERD_SWEEP_GAP_MS = 60000;   // spawns of one frequency closer than this are one sweep (a sweep takes ≤ ~20 s)
+const BC_HERD_CLOCKS_KEY = 'bc_herd_clocks_v2', BC_HERD_CLOCK_TTL = 3 * 3600e3;   // v2: per spawn group (v1 was per frequency, which was wrong)
+const BC_HERD_SWEEP_GAP_MS = 60000;   // spawns of one group closer than this are one sweep (a sweep takes ≤ ~20 s)
 const BC_HERD_GRID_TOL_MS = 30000;    // a sweep this close to the clock's grid confirms it (sweep starts jitter by a few seconds)
 const BC_HERD_GRACE_MS = 45000;       // a herd's sweep counts as come-and-gone this long after its predicted moment
 const BC_HERD_SETTLE_MS = 8000;       // one sweep's spawns into a herd land within ~1 s; after this it is as full as it gets
-const bcHerd = { params: null, typeFreq: {}, herds: {}, loc: {}, clocks: {}, gen: 0, paramsReq: null, layer: null, markers: {}, tick: null, rebuildT: null, saveT: null };
-// herds: region -> Map(herdId -> {id, pid, pop, peak, shortSince, spawnAt, settleAt, watchDue, watchGen, offset, missed, dead})
-// loc:   region -> Map(herdId -> [x, z])  (overworld only)    clocks: region -> {freqMs: {at, last, live, gen, alt}}
+const bcHerd = { params: null, herds: {}, loc: {}, clocks: {}, gen: 0, paramsReq: null, layer: null, markers: {}, tick: null, rebuildT: null, saveT: null };
+// herds:  region -> Map(herdId -> {id, pid, pop, peak, shortSince, spawnAt, settleAt, watchDue, watchGen, offset, missed, dead, dormant})
+// loc:    region -> Map(herdId -> [x, z])  (overworld only)
+// clocks: region -> {pid: {at, last, live, n, gen, alt}} — at = latest sweep start, n = sweeps seen on its grid
 const bcEnumIdx = e => Array.isArray(e) ? +e[0] : (e && typeof e === 'object') ? +Object.keys(e)[0] : +e;
 function bcHerdWanted(){ return bcGrowthOn && bcCreWanted(); }
 function bcHerdSetParams(rows){
-  const m = new Map(), freqs = {};
+  const m = new Map();
   rows.forEach(r => {
     const p = { id: +r.id, type: bcEnumIdx(r.enemy_type), biome: bcEnumIdx(r.biome), freqMs: Math.round((+r.spawn_frequency_minutes || 0) * 60000), eager: +r.spawn_eagerness || 0, night: +r.time_of_day_start !== +r.time_of_day_end };
     m.set(p.id, p);
-    if (p.biome !== 0) (freqs[p.type] || (freqs[p.type] = new Set())).add(p.night ? -1 : p.freqMs);   // biome 0 = interiors and special spawns
   });
   bcHerd.params = m;
-  // A type whose every overworld herd shares one frequency (and has no night variant) can time that
-  // frequency's sweep from ANY of its spawns, tracked or not — most of the 15-minute group, which is
-  // why that clock is usually known within one sweep.
-  bcHerd.typeFreq = {};
-  Object.keys(freqs).forEach(t => { const s = freqs[t]; if (s.size === 1){ const f = [...s][0]; if (f >= 120000) bcHerd.typeFreq[t] = f; } });
 }
 function bcHerdLoadSaved(){
   const now = Date.now();
   try { const v = JSON.parse(localStorage.getItem(BC_HERD_PARAMS_KEY) || 'null'); if (v && now - v.at < BC_HERD_PARAMS_TTL && Array.isArray(v.rows) && v.rows.length) bcHerdSetParams(v.rows); } catch(e){}
   try {
     const o = JSON.parse(localStorage.getItem(BC_HERD_CLOCKS_KEY) || 'null') || {};
-    Object.keys(o).forEach(rg => Object.keys(o[rg]).forEach(f => { const at = +o[rg][f]; if (at && now - at < BC_HERD_CLOCK_TTL) (bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}))[f] = { at, last: at, live: false, gen: ++bcHerd.gen, alt: null }; }));
+    Object.keys(o).forEach(rg => Object.keys(o[rg]).forEach(pid => {
+      const v = o[rg][pid], at = +(v && v.at);
+      if (at && now - at < BC_HERD_CLOCK_TTL) (bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}))[pid] = { at, last: at, cnt: 0, live: false, n: +v.n || 1, gen: ++bcHerd.gen, alt: null };
+    }));
   } catch(e){}
+  try { localStorage.removeItem('bc_herd_clocks_v1'); } catch(e){}
 }
 bcHerdLoadSaved();
 function bcHerdSaveClocks(){
   if (bcHerd.saveT) return;
   bcHerd.saveT = setTimeout(() => {
     bcHerd.saveT = null; const o = {};
-    Object.keys(bcHerd.clocks).forEach(rg => Object.keys(bcHerd.clocks[rg]).forEach(f => (o[rg] || (o[rg] = {}))[f] = bcHerd.clocks[rg][f].at));
+    Object.keys(bcHerd.clocks).forEach(rg => Object.keys(bcHerd.clocks[rg]).forEach(pid => { const k = bcHerd.clocks[rg][pid]; (o[rg] || (o[rg] = {}))[pid] = { at: k.at, n: k.n }; }));
     safeSetItem(BC_HERD_CLOCKS_KEY, JSON.stringify(o));
   }, 5000);
 }
@@ -11094,28 +11099,37 @@ function bcHerdOnLoc(c, kind, r){
   if (kind === 'delete') loc.delete(id); else if (+r.dimension === 1) loc.set(id, [+r.x, +r.z]);
   bcHerdScheduleRebuild();
 }
-// Every spawn on the roster sockets times its frequency's sweep, if we know which frequency that is.
-function bcHerdNoteSpawn(rg, herdId, type){
+// Every spawn into one of our herds times that herd's GROUP clock. Spawns into anything else (other
+// types, prize herds) say nothing about our clocks: groups sharing a frequency don't share a phase.
+function bcHerdNoteSpawn(rg, herdId){
   if (!bcHerd.params) return;
   const h = bcHerd.herds[rg] && bcHerd.herds[rg].get(herdId), p = h && bcHerd.params.get(h.pid);
-  const f = p ? (p.night ? 0 : p.freqMs) : (bcHerd.typeFreq[type] || 0);
-  if (f >= 120000) bcHerdClockNote(rg, f, Date.now());   // receipt time, not the server's: the countdown runs on this clock
+  if (p && !p.night && p.freqMs >= 120000) bcHerdClockNote(rg, h.pid, p.freqMs, Date.now());   // receipt time, not the server's: the countdown runs on this clock
 }
 const bcHerdOffGrid = (t, at, f) => { const o = (((t - at) % f) + f) % f; return Math.min(o, f - o) > BC_HERD_GRID_TOL_MS; };
-function bcHerdClockNote(rg, f, now){
-  const byF = bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}), k = byF[f];
-  if (!k){ byF[f] = { at: now, last: now, live: true, gen: ++bcHerd.gen, alt: null }; bcHerdSaveClocks(); return; }
-  if (now - k.last <= BC_HERD_SWEEP_GAP_MS){ k.last = now; return; }   // the same sweep, still going
-  if (!bcHerdOffGrid(now, k.at, f) || !k.live){                       // the next sweep (or the first this session)
-    if (!k.live && bcHerdOffGrid(now, k.at, f)) k.gen = ++bcHerd.gen;  // the saved clock had moved on: re-time every wait
-    k.at = k.last = now; k.live = true; k.alt = null; bcHerdSaveClocks(); return;
-  }
-  // Off the grid of a clock this session has confirmed: a one-off (a herd being born, a den regrowing)
-  // unless a later sweep lands on ITS grid, which means the clock really moved (a server restart).
+// Stray spawns off a group's clock happen (r13 Nubi Goats: sweeps at :10:38 and :18:38, one lone spawn at
+// :12:12), so a clock keeps one rival candidate (alt) and the next sweep decides: landing on the clock's
+// grid confirms it (n++), landing on the rival's makes the rival the clock. Until a clock is confirmed,
+// whichever of the two had more spawns is shown — a real sweep tops up many herds, a stray brings one.
+// A confirmed clock (n ≥ 2) only moves when a second sweep backs the rival (a server restart).
+function bcHerdClockNote(rg, pid, f, now){
+  const byP = bcHerd.clocks[rg] || (bcHerd.clocks[rg] = {}), k = byP[pid];
+  const anchor = n => { byP[pid] = { at: now, last: now, cnt: 1, live: true, n, gen: ++bcHerd.gen, alt: null }; bcHerdSaveClocks(); };
+  if (!k) return anchor(1);
+  if (now - k.last <= BC_HERD_SWEEP_GAP_MS){ k.last = now; k.cnt++; return; }   // the clock's sweep, still going
   const a = k.alt;
-  if (a && now - a.last <= BC_HERD_SWEEP_GAP_MS){ a.last = now; return; }
-  if (a && !bcHerdOffGrid(now, a.at, f)){ k.at = k.last = now; k.gen = ++bcHerd.gen; k.alt = null; bcHerdSaveClocks(); return; }
-  k.alt = { at: now, last: now };
+  if (a && now - a.last <= BC_HERD_SWEEP_GAP_MS){                               // the rival's sweep, still going
+    a.last = now; a.cnt++;
+    if (k.n < 2 && a.cnt > k.cnt){ byP[pid] = { at: a.at, last: a.last, cnt: a.cnt, live: true, n: 1, gen: ++bcHerd.gen, alt: { at: k.at, last: k.last, cnt: k.cnt } }; bcHerdSaveClocks(); }
+    return;
+  }
+  if (!bcHerdOffGrid(now, k.at, f)){                                    // the next sweep, on time
+    k.n = k.live ? k.n + 1 : Math.max(2, k.n + 1);                      // a saved clock that kept time counts as confirmed
+    k.at = k.last = now; k.cnt = 1; k.live = true; k.alt = null; bcHerdSaveClocks(); return;
+  }
+  if (a && !bcHerdOffGrid(now, a.at, f)) return anchor(2);             // the rival was the real clock
+  if (!k.live) return anchor(1);                                       // a saved clock that has drifted: the new sweep wins
+  k.alt = { at: now, last: now, cnt: 1 };                              // a new rival (replaces an older one)
 }
 // The sweep this short-handed herd is waiting for: the first one at or after it went short (a spawn
 // that leaves it short moves shortSince on, so the wait becomes the sweep after). Re-timed whenever
@@ -11125,6 +11139,7 @@ function bcHerdWatch(h, k, f, now){
   if (h.spawnAt >= k.at && h.spawnAt - k.at < BC_HERD_SWEEP_GAP_MS) h.offset = h.spawnAt - k.at;   // its own slot within the sweep
   return h.watchDue;
 }
+const bcHerdClock = (rg, h) => bcHerd.clocks[rg] && bcHerd.clocks[rg][h.pid];
 // Once a second: settle whole-herd sweeps, notice sweeps a herd missed, and refresh the countdowns.
 function bcHerdTickAll(){
   const now = Date.now(); let changed = false;
@@ -11132,17 +11147,21 @@ function bcHerdTickAll(){
     if (h.settleAt && now >= h.settleAt){ h.settleAt = 0; if (h.pop > 0 && h.pop < h.peak){ h.peak = h.pop; changed = true; } }
     if (h.dormant || !bcHerdShort(h)) return;
     const p = bcHerd.params.get(h.pid); if (!p || p.night) return;
-    const k = bcHerd.clocks[rg] && bcHerd.clocks[rg][p.freqMs]; if (!k) return;
+    const k = bcHerdClock(rg, h); if (!k) return;
     if (now <= bcHerdWatch(h, k, p.freqMs, now) + BC_HERD_GRACE_MS) return;
-    // Its sweep came and went with no spawn here (a spawn resets watchDue). One miss for a whole-herd
-    // type, three for a partial one, and the herd is either as full as it gets or not respawning at all.
-    // Only a clock this session has seen counts: a saved one may simply have drifted.
-    if (k.live && ++h.missed >= (p.eager >= 1 ? 1 : 3)){ if (h.pop > 0) h.peak = h.pop; else h.dead = true; }
+    // Its sweep came and went with no spawn here (a spawn resets watchDue). Judged only against a clock
+    // this session has seen keep time twice — one wrong guess must never hide a herd. Then: a partly
+    // killed whole-herd type that got nothing is as full as it gets; an empty one that misses twice is
+    // blocked; a partial-refill type gets three chances.
+    if (k.live && k.n >= 2){
+      h.missed++;
+      if (p.eager < 1 ? h.missed >= 3 : (h.pop > 0 || h.missed >= 2)){ if (h.pop > 0) h.peak = h.pop; else h.dead = true; }
+    }
     h.watchDue += Math.ceil((now - BC_HERD_GRACE_MS - h.watchDue) / p.freqMs) * p.freqMs;
     changed = true;
   }));
   if (changed) bcHerdScheduleRebuild();
-  if (bcMapShowing()) Object.values(bcHerd.markers).forEach(mk => bcHerdPaint(mk, now));
+  if (bcMapShowing()) Object.values(bcHerd.markers).forEach(g => bcHerdPaint(g, now));
 }
 function bcHerdTickArm(){
   const on = bcHerdWanted();
@@ -11150,87 +11169,120 @@ function bcHerdTickArm(){
   else if (!on && bcHerd.tick){ clearInterval(bcHerd.tick); bcHerd.tick = null; }
 }
 const bcHerdMmss = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
-// ONE timer per cluster of herds that respawn together — same region, same sweep, near each other on
-// screen — parked just above the cluster with a small pointer, so it never sits on the live dots. (A pill
-// on every spawn point covered the very animals you were looking for.) Clusters are re-formed on zoom,
-// so zooming out merges neighbours and zooming in splits them.
-const BC_HERD_GROUP_PX = 80;   // herds waiting for the same sweep closer than this on screen share a timer
-// The sweep a short-handed herd waits for, as a grouping key (region · frequency · sweep moment).
-function bcHerdWaitKey(rg, h, now){
-  const p = bcHerd.params.get(h.pid), f = p.freqMs;
-  if (p.night) return `${rg}|${f}|night`;
-  const k = bcHerd.clocks[rg] && bcHerd.clocks[rg][f];
-  return k ? `${rg}|${f}|${bcHerdWatch(h, k, f, now)}` : `${rg}|${f}|wait`;
+// ONE timer per AREA for everything there that respawns at the same moment, parked just above the area
+// with a small pointer so it never sits on the live dots. (A pill on every spawn point covered the very
+// animals you were looking for; grouping by SCREEN distance then split one hunting ground into several
+// identical timers, more of them the further you zoomed in.) An area is a region's short-handed herds
+// chained within BC_HERD_AREA_TILES of each other on the ground, so it never depends on the zoom: Yagi
+// herds sit ~50 tiles apart (median nearest neighbour, r13) and a whole mountain range of them spans a few
+// thousand, so one hunting ground stays one area and only genuinely separate places (another range, an
+// island) get their own. Inside an area, herds whose respawns land within a minute of each other share one
+// tag; different moments (another creature group, a herd killed just after its sweep) stack above it.
+// Zoomed far out, areas that would overlap merge too; zooming back in only splits them into areas again.
+const BC_HERD_AREA_TILES = 1500;    // short-handed herds closer than this on the ground (chained) = one area
+const BC_HERD_MERGE_PX = 70;        // zoomed out, areas whose tags are closer than this on screen merge
+const BC_HERD_TOGETHER_MS = 60000;  // respawns this close together read as one moment: one tag
+// What a short-handed herd is waiting for: a sweep at a known moment, its first sweep this session, or night.
+function bcHerdWait(rg, h, now){
+  const p = bcHerd.params.get(h.pid);
+  if (p.night) return { kind: 'night', f: p.freqMs };
+  const k = bcHerdClock(rg, h);
+  return k ? { kind: 'due', f: p.freqMs, due: bcHerdWatch(h, k, p.freqMs, now) } : { kind: 'wait', f: p.freqMs };
 }
-// What one group's timer says right now: { text, cls, line } — line is the tooltip's status sentence.
+// What one tag says right now: { text, cls, line } — line is the tooltip's status sentence.
 function bcHerdGroupState(g, now){
-  const p = bcHerd.params.get(g.members[0].pid), f = p.freqMs, fmin = Math.round(f / 60000);
-  const k = bcHerd.clocks[g.rg] && bcHerd.clocks[g.rg][f];
-  if (p.night) return { text: 'night', cls: 'wait', line: 'Night-time herds: they only respawn at night' };
-  if (!k) return { text: '≤' + fmin + 'm', cls: 'wait', line: `Waiting to see this region's ${fmin}-minute respawn sweep (at most ${fmin} min), then the countdown starts` };
-  const at = Math.min(...g.members.map(h => bcHerdWatch(h, k, f, now) + h.offset)), left = at - now, est = k.live ? '' : '≈';
+  const fmin = Math.round(g.f / 60000);
+  if (g.kind === 'night') return { text: 'night', cls: 'wait', line: 'Night-time herds: they only respawn at night' };
+  let at = Infinity, est = false;
+  if (g.kind === 'due') g.members.forEach(m => { const k = bcHerdClock(m.rg, m.h), p = bcHerd.params.get(m.h.pid); if (!k) return; at = Math.min(at, bcHerdWatch(m.h, k, p.freqMs, now) + m.h.offset); if (!k.live) est = true; });
+  if (at === Infinity) return { text: '≤' + fmin + 'm', cls: 'wait', line: `Waiting for this group's first ${fmin}-minute respawn sweep (at most ${fmin} min), then the countdown starts` };
+  const left = at - now, clock = new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
   if (left <= 0) return { text: 'now', cls: 'due', line: 'Respawning now (a sweep takes up to ~20 s to reach every herd)' };
-  return { text: est + bcHerdMmss(left), cls: '', line: `Respawn in ${bcHerdMmss(left)}${est ? ' (timing from an earlier visit, not yet confirmed)' : ''}` };
+  return { text: (est ? '≈' : '') + bcHerdMmss(left), cls: '', line: `Respawn in ${bcHerdMmss(left)} (${clock})${est ? ', timing from an earlier visit, not yet confirmed' : ''}` };
 }
+// Compared against the DOM, not a cached copy: hiding the layer (leaving the Map tab) and showing it again
+// rebuilds every icon from scratch, blank.
 function bcHerdPaint(g, now){
   const st = bcHerdGroupState(g, now), el = g.marker.getElement(), box = el && el.firstElementChild;
-  if (box && (st.text !== g.text || st.cls !== g.cls)){ box.lastElementChild.textContent = st.text; box.className = 'bc-herd' + (st.cls ? ' ' + st.cls : ''); g.text = st.text; g.cls = st.cls; }
+  const cls = 'bc-herd' + (g.i ? ' stk' : '') + (st.cls ? ' ' + st.cls : '');
+  if (box){ if (box.lastElementChild.textContent !== st.text) box.lastElementChild.textContent = st.text; if (box.className !== cls) box.className = cls; }
   if (g.marker.isTooltipOpen()) g.marker.setTooltipContent(bcHerdTipHtml(g, st));
 }
 function bcHerdTipHtml(g, st){
-  const byType = {}, ps = g.members.map(h => bcHerd.params.get(h.pid));
+  const byType = {}, ps = g.members.map(m => bcHerd.params.get(m.h.pid));
   ps.forEach(p => byType[p.type] = (byType[p.type] || 0) + 1);
   const names = Object.keys(byType).map(t => { const tr = bcTrackedRes[bcResKey('enemy', t)]; return (tr ? tr.name : 'Creature') + (byType[t] > 1 ? ' ×' + byType[t] : ''); });
   const whole = ps.filter(p => p.eager >= 1).length, n = ps.length;
   const back = whole === n ? (n > 1 ? 'Whole herds come back on the sweep' : 'The whole herd comes back on the sweep')
              : whole === 0 ? 'Only part of a herd comes back each sweep' : 'Some herds come back whole, some only partly';
-  const lines = [st.line, back, `This region's sweep: every ${Math.round(ps[0].freqMs / 60000)} min`];
+  const mins = [...new Set(ps.map(p => Math.round(p.freqMs / 60000)))].sort((a, b) => a - b).join(' / ');
+  const lines = [st.line, back, `Respawn sweep every ${mins} min`];
   return `<b>${escHtml(names.join(', '))}</b> <span class="bc-herd-tip">· ${n} herd${n > 1 ? 's' : ''} missing animals</span><div class="bc-herd-tip">${lines.map(escHtml).join('<br>')}</div>`;
 }
-const bcHerdIcon = color => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:${escHtml(color)}"><i class="ti ti-hourglass-high"></i><span></span></div>` });
+// i = place in the stack above the area's anchor (0 = lowest, the one with the pointer).
+const bcHerdIcon = (color, i) => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd${i ? ' stk' : ''}" style="--c:${escHtml(color)};--i:${i}"><i class="ti ti-hourglass-high"></i><span></span></div>` });
 function bcHerdScheduleRebuild(){ if (bcHerd.rebuildT) return; bcHerd.rebuildT = setTimeout(() => { bcHerd.rebuildT = null; bcHerdRebuild(); }, 300); }
-// Short-handed herds of tracked types → buckets by the sweep they wait for → single-link clusters on
-// screen. A timer whose cluster is unchanged keeps its marker (keyed by sweep + member ids), so the
-// countdowns don't flicker; a passing sweep re-keys everything once.
+// Single-link clustering: the lists of `items` joined whenever near(a, b).
+function bcHerdLink(items, near){
+  const up = items.map((_, i) => i), root = i => up[i] === i ? i : (up[i] = root(up[i]));
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) if (root(i) !== root(j) && near(items[i], items[j])) up[root(i)] = root(j);
+  const out = {}; items.forEach((it, i) => (out[root(i)] || (out[root(i)] = [])).push(it));
+  return Object.values(out);
+}
+// Centred over a set of spawn points, at the northernmost one (the tags sit above that).
+const bcHerdAnchor = list => L.latLng(Math.max(...list.map(x => x.ll.lat)), list.reduce((s, x) => s + x.ll.lng, 0) / list.length);
+// One area's herds → its tags: due moments ascending (within BC_HERD_TOGETHER_MS = one tag), then the
+// groups still waiting for a first sweep (one per frequency), then night herds.
+function bcHerdMoments(list){
+  const due = list.filter(x => x.w.kind === 'due').sort((a, b) => a.w.due - b.w.due), out = [];
+  due.forEach(x => { const g = out[out.length - 1]; if (g && x.w.due - g.due <= BC_HERD_TOGETHER_MS) g.list.push(x); else out.push({ kind: 'due', due: x.w.due, f: x.w.f, list: [x] }); });
+  ['wait', 'night'].forEach(kind => {
+    const byF = {}; list.forEach(x => { if (x.w.kind === kind) (byF[x.w.f] || (byF[x.w.f] = [])).push(x); });
+    Object.keys(byF).sort((a, b) => a - b).forEach(f => out.push({ kind, due: 0, f: +f, list: byF[f] }));
+  });
+  return out;
+}
+// Short-handed herds of tracked types → areas on the ground (per region) → areas whose tags would overlap
+// at this zoom → one tag per respawn moment. A tag whose herds and moment are unchanged keeps its marker,
+// so countdowns don't flicker; a passing sweep re-keys that area's tags once.
 function bcHerdRebuild(){
   if (!bcHerd.layer) return;
-  const groups = {}, now = Date.now();
+  const tags = {}, now = Date.now();
   if (bcHerdWanted() && bcHerd.params && bcMapActive()){
     const types = {}; bcRelayEnemyTypes().forEach(t => types[+t.id] = t);
-    const z = bcMap.getZoom(), buckets = {};
+    const z = bcMap.getZoom(), T2 = BC_HERD_AREA_TILES * BC_HERD_AREA_TILES, P2 = BC_HERD_MERGE_PX * BC_HERD_MERGE_PX;
+    let areas = [];
     bcCreRegions().forEach(rg => {
       const m = bcHerd.herds[rg], loc = bcHerd.loc[rg]; if (!m || !loc) return;
+      const items = [];
       m.forEach(h => {
         if (h.dormant || h.dead || !bcHerdShort(h)) return;   // never-spawned and blocked herds aren't coming back: no timer
         const p = bcHerd.params.get(h.pid), at = loc.get(h.id);
         if (!p || !types[p.type] || !at) return;
-        const ll = L.latLng(at[1], at[0]), bk = bcHerdWaitKey(rg, h, now);
-        (buckets[bk] || (buckets[bk] = [])).push({ h, ll, px: bcMap.project(ll, z) });
+        items.push({ h, rg, x: at[0], z: at[1], ll: L.latLng(at[1], at[0]), w: bcHerdWait(rg, h, now) });
       });
+      areas = areas.concat(bcHerdLink(items, (a, b) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2 < T2));
     });
-    Object.keys(buckets).forEach(bk => {
-      const pts = buckets[bk], up = pts.map((_, i) => i);
-      const root = i => up[i] === i ? i : (up[i] = root(up[i]));
-      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) if (pts[i].px.distanceTo(pts[j].px) < BC_HERD_GROUP_PX) up[root(i)] = root(j);
-      const cl = {}; pts.forEach((pt, i) => (cl[root(i)] || (cl[root(i)] = [])).push(pt));
-      Object.values(cl).forEach(list => { groups[bk + '|' + list.map(x => x.h.id).sort().join(',')] = { rg: +bk.split('|')[0], list }; });
+    areas = areas.map(list => ({ list, px: bcMap.project(bcHerdAnchor(list), z) }));
+    bcHerdLink(areas, (a, b) => (a.px.x - b.px.x) ** 2 + (a.px.y - b.px.y) ** 2 < P2).forEach(merged => {
+      const list = [].concat(...merged.map(a => a.list)), anchor = bcHerdAnchor(list);
+      const ids = list.map(x => x.h.id).sort().join(',');
+      bcHerdMoments(list).forEach((mo, i) => { tags[`${ids}|${mo.kind}|${mo.due}|${mo.f}|${mo.list.map(x => x.h.id).sort().join(',')}|${i}`] = { anchor, i, mo }; });
     });
   }
-  Object.keys(bcHerd.markers).forEach(key => { if (!groups[key]){ bcHerd.layer.removeLayer(bcHerd.markers[key].marker); delete bcHerd.markers[key]; } });
-  Object.keys(groups).forEach(key => {
-    const { rg, list } = groups[key];
-    const ts = [...new Set(list.map(x => bcHerd.params.get(x.h.pid).type))], tr = bcTrackedRes[bcResKey('enemy', ts[0])];
-    const color = ts.length === 1 && tr ? tr.color : '#cbd5e1';   // several types in one sweep: neutral
+  Object.keys(bcHerd.markers).forEach(key => { if (!tags[key]){ bcHerd.layer.removeLayer(bcHerd.markers[key].marker); delete bcHerd.markers[key]; } });
+  Object.keys(tags).forEach(key => {
+    const { anchor, i, mo } = tags[key];
+    const ts = [...new Set(mo.list.map(x => bcHerd.params.get(x.h.pid).type))], tr = bcTrackedRes[bcResKey('enemy', ts[0])];
+    const color = ts.length === 1 && tr ? tr.color : '#cbd5e1';   // several types at one moment: neutral
     let g = bcHerd.markers[key];
     if (!g){
-      // anchor: centred over the cluster, at its northernmost spawn point (the pill sits above that)
-      const anchor = L.latLng(Math.max(...list.map(x => x.ll.lat)), list.reduce((s, x) => s + x.ll.lng, 0) / list.length);
-      g = bcHerd.markers[key] = { marker: L.marker(anchor, { icon: bcHerdIcon(color), pane: 'bcHerd', keyboard: false, riseOnHover: true }), rg, color, members: [], text: '', cls: '' };
-      g.marker.bindTooltip('', { direction: 'top', offset: [0, -22], className: 'bc-hover-tip', opacity: 1 });
+      g = bcHerd.markers[key] = { marker: L.marker(anchor, { icon: bcHerdIcon(color, i), pane: 'bcHerd', keyboard: false, riseOnHover: true }), color, i };
+      g.marker.bindTooltip('', { direction: 'top', offset: [0, -22 - 17 * i], className: 'bc-hover-tip', opacity: 1 });
       g.marker.on('tooltipopen', () => g.marker.setTooltipContent(bcHerdTipHtml(g, bcHerdGroupState(g, Date.now()))));
       g.marker.addTo(bcHerd.layer);
-    } else if (g.color !== color){ g.color = color; g.marker.setIcon(bcHerdIcon(color)); g.text = g.cls = ''; }
-    g.members = list.map(x => x.h);
+    } else if (g.color !== color){ g.color = color; g.marker.setIcon(bcHerdIcon(color, i)); }
+    Object.assign(g, { kind: mo.kind, f: mo.f, members: mo.list.map(x => ({ h: x.h, rg: x.rg })) });
   });
   Object.values(bcHerd.markers).forEach(g => bcHerdPaint(g, now));
   if (bcMapShowing()) bcUpdateResStatus();
@@ -11239,7 +11291,7 @@ const bcHerdShortCount = () => Object.values(bcHerd.markers).reduce((s, g) => s 
 // Layer visibility follows (timers on × map showing — its tab or the pop-out), like the resource overlay.
 function bcHerdApply(){
   if (!bcMap) return;
-  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdScheduleRebuild); }   // above markers (600), below tooltips (650); zoom re-forms the clusters
+  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdScheduleRebuild); }   // above markers (600), below tooltips (650); zoom decides which far-apart areas share a tag
   if (!bcHerd.layer) bcHerd.layer = L.layerGroup();
   const show = bcGrowthOn && bcMapActive();
   if (show){ if (!bcMap.hasLayer(bcHerd.layer)) bcHerd.layer.addTo(bcMap); }
@@ -11248,8 +11300,10 @@ function bcHerdApply(){
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
-// growth_timers is sparse (~tens/region), so these are real Leaflet markers (not canvas dots) with a
-// live countdown tooltip. Streamed from the same relay connection; toggled from the Live-map panel.
+// growth_timers is sparse (~tens/region — in practice Depleted Hexite Deposits, which grow back over
+// 2–7 days), so each is a real Leaflet marker: the same tag as the herd timers, with the countdown ON the
+// map. (They used to be bare teal rings whose name and time only showed in a tiny hover label, so they
+// read as unexplained dots.) Streamed from the prism relay connection; toggled from the Live-map panel.
 let bcGrowthOn = (() => { try { return localStorage.getItem('bc_growth_on') === '1'; } catch(e){ return false; } })();
 let bcGrowthLayer = null, bcGrowthSub = null, bcGrowthSubRegion = null;
 let bcGrowthMarkers = {};          // entityId -> { marker, endMs, name }
@@ -11266,23 +11320,36 @@ function bcGrowthRebuild(){
       const endMs = bcGrowthEndMs(r.endTimestamp);
       let m = bcGrowthMarkers[key];
       if (!m){
-        const marker = L.circleMarker(L.latLng(r.z, r.x), { radius:5, color:'#5eead4', weight:1.5, fillColor:'#0d9488', fillOpacity:.45 });
-        marker.bindTooltip('', { direction:'top', offset:[0,-4], className:'bc-player-tip' });
+        const name = bcGrowthName(r.resourceId);
+        const marker = L.marker(L.latLng(r.z, r.x), { icon: bcGrowthIcon(name), keyboard: false, riseOnHover: true });
+        m = bcGrowthMarkers[key] = { marker, endMs, name };
+        marker.bindTooltip('', { direction: 'top', offset: [0, -22], className: 'bc-hover-tip', opacity: 1 });
+        marker.on('tooltipopen', () => marker.setTooltipContent(bcGrowthTipHtml(m, m.endMs - Date.now())));
         marker.addTo(bcGrowthLayer);
-        m = bcGrowthMarkers[key] = { marker, endMs, name: bcGrowthName(r.resourceId) };
       } else { m.endMs = endMs; }
     }
   } catch(e){ return; }
   for (const key in bcGrowthMarkers){ if (!seen[key]){ try { bcGrowthLayer.removeLayer(bcGrowthMarkers[key].marker); } catch(e){} delete bcGrowthMarkers[key]; } }
   bcGrowthUpdateTooltips();
 }
+// Countdown that stays short on a tag: "3d 4h", "5h 12m", "12:05".
+const bcLeftShort = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); if (s >= 86400) return Math.floor(s / 86400) + 'd ' + Math.floor(s % 86400 / 3600) + 'h'; if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm'; return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const bcGrowthIcon = name => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:#5eead4"><i class="ti ${/hexite/i.test(name) ? 'ti-hexagon' : 'ti-pick'}"></i><span></span></div>` });
+function bcGrowthTipHtml(m, ms){
+  const grown = m.name.replace(/^Depleted\s+/i, ''), when = new Date(m.endMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const line = ms <= 0 ? 'Growing back now (on the game\'s next growth tick)'
+             : `${grown !== m.name ? 'Grows back into a ' + grown : 'Respawns'} in ${bcLeftShort(ms)} (${when})`;
+  return `<b>${escHtml(m.name)}</b><div class="bc-herd-tip">${escHtml(line)}</div>`;
+}
+// The tag's text and state are compared against the DOM, not a cached copy: hiding the layer (leaving the
+// Map tab) and showing it again rebuilds every icon from scratch, blank.
 function bcGrowthUpdateTooltips(){
   const now = Date.now();
   for (const key in bcGrowthMarkers){
-    const m = bcGrowthMarkers[key]; const ms = m.endMs - now;
-    m.marker.setTooltipContent(ms > 0
-      ? `<b>${escHtml(m.name)}</b><br><span style="color:var(--teal-light)">respawns in ${fmtDuration(ms / 1000)}</span>`
-      : `<b>${escHtml(m.name)}</b><br><span style="color:var(--amber-light)">ready</span>`);
+    const m = bcGrowthMarkers[key], ms = m.endMs - now, text = ms > 0 ? bcLeftShort(ms) : 'now';
+    const el = m.marker.getElement(), box = el && el.firstElementChild, cls = 'bc-herd' + (ms > 0 ? '' : ' due');
+    if (box){ if (box.lastElementChild.textContent !== text) box.lastElementChild.textContent = text; if (box.className !== cls) box.className = cls; }
+    if (m.marker.isTooltipOpen()) m.marker.setTooltipContent(bcGrowthTipHtml(m, ms));
   }
 }
 function bcGrowthClear(){ if (bcGrowthLayer) bcGrowthLayer.clearLayers(); bcGrowthMarkers = {}; }
