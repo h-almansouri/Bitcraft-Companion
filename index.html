@@ -789,16 +789,14 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-mp-status{margin-top:6px;font-size:10px;color:var(--text3);line-height:1.45;flex-shrink:0}
 .bc-player-tip{background:rgba(13,15,20,.45)!important;border:none!important;color:rgba(255,255,255,.82)!important;font-size:9px!important;font-weight:500;padding:0 3px!important;box-shadow:none!important;text-shadow:0 1px 2px rgba(0,0,0,.9);border-radius:3px}
 .bc-player-tip::before{display:none!important}
-/* herd respawn timers (bcHerd*): a pill at the herd's spawn point, ringed in the tracked type's colour */
+/* herd respawn timers (bcHerd*): one small tag per cluster of herds that respawn together, parked ABOVE the
+   cluster (its pointer marks the northernmost spawn point) so the live dots underneath stay visible */
 .bc-herd-ic{background:none;border:none}
-.bc-herd{position:absolute;transform:translate(-50%,-50%);display:flex;align-items:center;gap:3px;padding:1px 5px 1px 3px;border-radius:9px;background:rgba(13,15,20,.8);border:1px solid var(--c);color:#e8ecf2;font-size:10px;font-weight:600;line-height:13px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 4px rgba(0,0,0,.5)}
-.bc-herd i{width:7px;height:7px;border-radius:50%;background:var(--c);flex-shrink:0}
+.bc-herd{position:absolute;left:0;top:0;transform:translate(-50%,calc(-100% - 4px));display:flex;align-items:center;gap:2px;padding:0 5px 0 3px;border-radius:6px;background:rgba(13,15,20,.66);color:#e8ecf2;font-size:10px;font-weight:600;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(0,0,0,.35)}
+.bc-herd::after{content:'';position:absolute;left:50%;bottom:-4px;margin-left:-4px;border:4px solid transparent;border-bottom:0;border-top-color:rgba(13,15,20,.66)}
+.bc-herd i{font-size:10px;color:var(--c)}
 .bc-herd.due span{color:var(--amber-light)}
 .bc-herd.wait span{color:#9aa3b2;font-weight:500}
-.bc-herd.dead{opacity:.55;border-style:dashed}
-.bc-herd.dead span{color:var(--red-light)}
-.bc-herd-far .bc-herd{padding:2px}
-.bc-herd-far .bc-herd span{display:none}
 .bc-herd-tip{font-weight:400;color:var(--text2);margin-top:1px}
 /* resource list */
 .bc-res-list{flex:1;min-height:0;overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
@@ -10561,7 +10559,7 @@ function bcUpdateResStatus(){
   if (bcRelayDown && bcRelayResourceTypes().length) notes.push('resource relay down — retrying');
   if (bcCreWanted()){ const lag = bcCreRegions().filter(rg => { const c = liveConns[rg]; return c && c.ws && c.ws.readyState === 1 && !(c.cre && c.cre.posReady); }).length; if (lag) notes.push(`creatures: ${lag} region${lag > 1 ? 's' : ''} loading`); }
   if (!bcMapRegion && ts.some(t => (t.count || 0) > BC_BIG_HINT)) notes.push('big type — pick a region to lighten it');
-  if (bcHerdWanted() && bcHerd.params){ const n = Object.keys(bcHerd.markers).length; notes.push(`${n.toLocaleString()} herd${n === 1 ? '' : 's'} respawning`); }
+  if (bcHerdWanted() && bcHerd.params){ const n = bcHerdShortCount(); notes.push(`${n.toLocaleString()} herd${n === 1 ? '' : 's'} respawning`); }
   status.textContent = `${ts.length} tracked · ${total.toLocaleString()} nodes · ${new Date().toLocaleTimeString()}` + notes.map(n => ' · ' + n).join('');
 }
 function bcToggleMapItem(kind, id){
@@ -10960,7 +10958,6 @@ const BC_HERD_SWEEP_GAP_MS = 60000;   // spawns of one frequency closer than thi
 const BC_HERD_GRID_TOL_MS = 30000;    // a sweep this close to the clock's grid confirms it (sweep starts jitter by a few seconds)
 const BC_HERD_GRACE_MS = 45000;       // a herd's sweep counts as come-and-gone this long after its predicted moment
 const BC_HERD_SETTLE_MS = 8000;       // one sweep's spawns into a herd land within ~1 s; after this it is as full as it gets
-const BC_HERD_LABEL_MIN_ZOOM = -1.5;  // further out, the markers shrink to dots
 const bcHerd = { params: null, typeFreq: {}, herds: {}, loc: {}, clocks: {}, gen: 0, paramsReq: null, layer: null, markers: {}, tick: null, rebuildT: null, saveT: null };
 // herds: region -> Map(herdId -> {id, pid, pop, peak, shortSince, spawnAt, settleAt, watchDue, watchGen, offset, missed, dead})
 // loc:   region -> Map(herdId -> [x, z])  (overworld only)    clocks: region -> {freqMs: {at, last, live, gen, alt}}
@@ -11153,64 +11150,96 @@ function bcHerdTickArm(){
   else if (!on && bcHerd.tick){ clearInterval(bcHerd.tick); bcHerd.tick = null; }
 }
 const bcHerdMmss = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
-// What one marker says right now: { text, cls, line } — line is the tooltip's status sentence.
-function bcHerdState(mk, now){
-  const h = mk.h, p = bcHerd.params.get(h.pid), fmin = Math.round(p.freqMs / 60000);
-  const k = bcHerd.clocks[mk.rg] && bcHerd.clocks[mk.rg][p.freqMs], est = k && !k.live ? '≈' : '';
-  if (h.dead) return { text: '✕', cls: 'dead', line: 'Didn\'t respawn on its last sweep, so something is blocking it (claimed land does)' };
-  if (p.night) return { text: 'night', cls: 'wait', line: 'Night-time herd: only respawns at night' };
+// ONE timer per cluster of herds that respawn together — same region, same sweep, near each other on
+// screen — parked just above the cluster with a small pointer, so it never sits on the live dots. (A pill
+// on every spawn point covered the very animals you were looking for.) Clusters are re-formed on zoom,
+// so zooming out merges neighbours and zooming in splits them.
+const BC_HERD_GROUP_PX = 80;   // herds waiting for the same sweep closer than this on screen share a timer
+// The sweep a short-handed herd waits for, as a grouping key (region · frequency · sweep moment).
+function bcHerdWaitKey(rg, h, now){
+  const p = bcHerd.params.get(h.pid), f = p.freqMs;
+  if (p.night) return `${rg}|${f}|night`;
+  const k = bcHerd.clocks[rg] && bcHerd.clocks[rg][f];
+  return k ? `${rg}|${f}|${bcHerdWatch(h, k, f, now)}` : `${rg}|${f}|wait`;
+}
+// What one group's timer says right now: { text, cls, line } — line is the tooltip's status sentence.
+function bcHerdGroupState(g, now){
+  const p = bcHerd.params.get(g.members[0].pid), f = p.freqMs, fmin = Math.round(f / 60000);
+  const k = bcHerd.clocks[g.rg] && bcHerd.clocks[g.rg][f];
+  if (p.night) return { text: 'night', cls: 'wait', line: 'Night-time herds: they only respawn at night' };
   if (!k) return { text: '≤' + fmin + 'm', cls: 'wait', line: `Waiting to see this region's ${fmin}-minute respawn sweep (at most ${fmin} min), then the countdown starts` };
-  const left = bcHerdWatch(h, k, p.freqMs, now) + h.offset - now;
-  if (left <= 0) return { text: 'due', cls: 'due', line: 'Respawning now (a sweep takes up to ~20 s to reach every herd)' };
-  return { text: est + bcHerdMmss(left), cls: '', line: `Respawns in ${bcHerdMmss(left)}${est ? ' (timing from an earlier visit, not yet confirmed)' : ''}` };
+  const at = Math.min(...g.members.map(h => bcHerdWatch(h, k, f, now) + h.offset)), left = at - now, est = k.live ? '' : '≈';
+  if (left <= 0) return { text: 'now', cls: 'due', line: 'Respawning now (a sweep takes up to ~20 s to reach every herd)' };
+  return { text: est + bcHerdMmss(left), cls: '', line: `Respawn in ${bcHerdMmss(left)}${est ? ' (timing from an earlier visit, not yet confirmed)' : ''}` };
 }
-function bcHerdPaint(mk, now){
-  const st = bcHerdState(mk, now), el = mk.marker.getElement(), box = el && el.firstElementChild;
-  if (box && (st.text !== mk.text || st.cls !== mk.cls)){ box.lastElementChild.textContent = st.text; box.className = 'bc-herd' + (st.cls ? ' ' + st.cls : ''); mk.text = st.text; mk.cls = st.cls; }
-  if (mk.marker.isTooltipOpen()) mk.marker.setTooltipContent(bcHerdTipHtml(mk, st));
+function bcHerdPaint(g, now){
+  const st = bcHerdGroupState(g, now), el = g.marker.getElement(), box = el && el.firstElementChild;
+  if (box && (st.text !== g.text || st.cls !== g.cls)){ box.lastElementChild.textContent = st.text; box.className = 'bc-herd' + (st.cls ? ' ' + st.cls : ''); g.text = st.text; g.cls = st.cls; }
+  if (g.marker.isTooltipOpen()) g.marker.setTooltipContent(bcHerdTipHtml(g, st));
 }
-function bcHerdTipHtml(mk, st){
-  const h = mk.h, p = bcHerd.params.get(h.pid), t = bcTrackedRes[bcResKey('enemy', p.type)];
-  const fmin = Math.round(p.freqMs / 60000);
-  const count = h.pop === 0 ? 'None here' : `${h.pop} of ${h.peak} here`;
-  const lines = [count, st.line, p.eager >= 1 ? 'The whole herd comes back on each sweep' : 'Only part of the herd comes back each sweep', `This region's sweep: every ${fmin} min`];
-  return `<b>${escHtml(t ? t.name : 'Creature')} herd</b><div class="bc-herd-tip">${lines.map(escHtml).join('<br>')}</div>`;
+function bcHerdTipHtml(g, st){
+  const byType = {}, ps = g.members.map(h => bcHerd.params.get(h.pid));
+  ps.forEach(p => byType[p.type] = (byType[p.type] || 0) + 1);
+  const names = Object.keys(byType).map(t => { const tr = bcTrackedRes[bcResKey('enemy', t)]; return (tr ? tr.name : 'Creature') + (byType[t] > 1 ? ' ×' + byType[t] : ''); });
+  const whole = ps.filter(p => p.eager >= 1).length, n = ps.length;
+  const back = whole === n ? (n > 1 ? 'Whole herds come back on the sweep' : 'The whole herd comes back on the sweep')
+             : whole === 0 ? 'Only part of a herd comes back each sweep' : 'Some herds come back whole, some only partly';
+  const lines = [st.line, back, `This region's sweep: every ${Math.round(ps[0].freqMs / 60000)} min`];
+  return `<b>${escHtml(names.join(', '))}</b> <span class="bc-herd-tip">· ${n} herd${n > 1 ? 's' : ''} missing animals</span><div class="bc-herd-tip">${lines.map(escHtml).join('<br>')}</div>`;
 }
-const bcHerdIcon = color => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:${escHtml(color)}"><i></i><span></span></div>` });
+const bcHerdIcon = color => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:${escHtml(color)}"><i class="ti ti-hourglass-high"></i><span></span></div>` });
 function bcHerdScheduleRebuild(){ if (bcHerd.rebuildT) return; bcHerd.rebuildT = setTimeout(() => { bcHerd.rebuildT = null; bcHerdRebuild(); }, 300); }
-// One marker per short-handed herd of a tracked type in the wanted regions; markers are kept across
-// rebuilds (keyed region:herd) so the countdowns don't flicker.
+// Short-handed herds of tracked types → buckets by the sweep they wait for → single-link clusters on
+// screen. A timer whose cluster is unchanged keeps its marker (keyed by sweep + member ids), so the
+// countdowns don't flicker; a passing sweep re-keys everything once.
 function bcHerdRebuild(){
   if (!bcHerd.layer) return;
-  const seen = new Set(), types = {};
+  const groups = {}, now = Date.now();
   if (bcHerdWanted() && bcHerd.params && bcMapActive()){
-    bcRelayEnemyTypes().forEach(t => types[+t.id] = t);
+    const types = {}; bcRelayEnemyTypes().forEach(t => types[+t.id] = t);
+    const z = bcMap.getZoom(), buckets = {};
     bcCreRegions().forEach(rg => {
       const m = bcHerd.herds[rg], loc = bcHerd.loc[rg]; if (!m || !loc) return;
       m.forEach(h => {
-        const p = bcHerd.params.get(h.pid), t = p && types[p.type], at = loc.get(h.id);
-        if (!t || !at || h.dormant || !bcHerdShort(h)) return;
-        const key = rg + ':' + h.id; seen.add(key);
-        let mk = bcHerd.markers[key];
-        if (!mk){
-          mk = bcHerd.markers[key] = { marker: L.marker(L.latLng(at[1], at[0]), { icon: bcHerdIcon(t.color), pane: 'bcHerd', keyboard: false, riseOnHover: true }), rg, h, color: t.color, text: '', cls: '' };
-          mk.marker.bindTooltip('', { direction: 'top', offset: [0, -9], className: 'bc-hover-tip', opacity: 1 });
-          mk.marker.on('tooltipopen', () => mk.marker.setTooltipContent(bcHerdTipHtml(mk, bcHerdState(mk, Date.now()))));
-          mk.marker.addTo(bcHerd.layer);
-        } else if (mk.color !== t.color){ mk.color = t.color; mk.marker.setIcon(bcHerdIcon(t.color)); mk.text = mk.cls = ''; }
-        mk.h = h;
+        if (h.dormant || h.dead || !bcHerdShort(h)) return;   // never-spawned and blocked herds aren't coming back: no timer
+        const p = bcHerd.params.get(h.pid), at = loc.get(h.id);
+        if (!p || !types[p.type] || !at) return;
+        const ll = L.latLng(at[1], at[0]), bk = bcHerdWaitKey(rg, h, now);
+        (buckets[bk] || (buckets[bk] = [])).push({ h, ll, px: bcMap.project(ll, z) });
       });
     });
+    Object.keys(buckets).forEach(bk => {
+      const pts = buckets[bk], up = pts.map((_, i) => i);
+      const root = i => up[i] === i ? i : (up[i] = root(up[i]));
+      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) if (pts[i].px.distanceTo(pts[j].px) < BC_HERD_GROUP_PX) up[root(i)] = root(j);
+      const cl = {}; pts.forEach((pt, i) => (cl[root(i)] || (cl[root(i)] = [])).push(pt));
+      Object.values(cl).forEach(list => { groups[bk + '|' + list.map(x => x.h.id).sort().join(',')] = { rg: +bk.split('|')[0], list }; });
+    });
   }
-  Object.keys(bcHerd.markers).forEach(key => { if (!seen.has(key)){ bcHerd.layer.removeLayer(bcHerd.markers[key].marker); delete bcHerd.markers[key]; } });
-  const now = Date.now(); Object.values(bcHerd.markers).forEach(mk => bcHerdPaint(mk, now));
+  Object.keys(bcHerd.markers).forEach(key => { if (!groups[key]){ bcHerd.layer.removeLayer(bcHerd.markers[key].marker); delete bcHerd.markers[key]; } });
+  Object.keys(groups).forEach(key => {
+    const { rg, list } = groups[key];
+    const ts = [...new Set(list.map(x => bcHerd.params.get(x.h.pid).type))], tr = bcTrackedRes[bcResKey('enemy', ts[0])];
+    const color = ts.length === 1 && tr ? tr.color : '#cbd5e1';   // several types in one sweep: neutral
+    let g = bcHerd.markers[key];
+    if (!g){
+      // anchor: centred over the cluster, at its northernmost spawn point (the pill sits above that)
+      const anchor = L.latLng(Math.max(...list.map(x => x.ll.lat)), list.reduce((s, x) => s + x.ll.lng, 0) / list.length);
+      g = bcHerd.markers[key] = { marker: L.marker(anchor, { icon: bcHerdIcon(color), pane: 'bcHerd', keyboard: false, riseOnHover: true }), rg, color, members: [], text: '', cls: '' };
+      g.marker.bindTooltip('', { direction: 'top', offset: [0, -22], className: 'bc-hover-tip', opacity: 1 });
+      g.marker.on('tooltipopen', () => g.marker.setTooltipContent(bcHerdTipHtml(g, bcHerdGroupState(g, Date.now()))));
+      g.marker.addTo(bcHerd.layer);
+    } else if (g.color !== color){ g.color = color; g.marker.setIcon(bcHerdIcon(color)); g.text = g.cls = ''; }
+    g.members = list.map(x => x.h);
+  });
+  Object.values(bcHerd.markers).forEach(g => bcHerdPaint(g, now));
   if (bcMapShowing()) bcUpdateResStatus();
 }
-function bcHerdZoomClass(){ const pn = bcMap && bcMap.getPane('bcHerd'); if (pn) pn.classList.toggle('bc-herd-far', bcMap.getZoom() < BC_HERD_LABEL_MIN_ZOOM); }
+const bcHerdShortCount = () => Object.values(bcHerd.markers).reduce((s, g) => s + g.members.length, 0);
 // Layer visibility follows (timers on × map showing — its tab or the pop-out), like the resource overlay.
 function bcHerdApply(){
   if (!bcMap) return;
-  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdZoomClass); bcHerdZoomClass(); }   // above markers (600), below tooltips (650)
+  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdScheduleRebuild); }   // above markers (600), below tooltips (650); zoom re-forms the clusters
   if (!bcHerd.layer) bcHerd.layer = L.layerGroup();
   const show = bcGrowthOn && bcMapActive();
   if (show){ if (!bcMap.hasLayer(bcHerd.layer)) bcHerd.layer.addTo(bcMap); }
