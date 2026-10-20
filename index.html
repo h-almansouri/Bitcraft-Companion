@@ -794,11 +794,13 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
    the same area stack upward (--i), without pointers. Depleted-resource tags (bcGrowth*) share the look. */
 .bc-herd-ic{background:none;border:none}
 .bc-herd.stk::after{display:none}
-.bc-herd{position:absolute;left:0;top:0;transform:translate(-50%,calc(-100% - 4px - var(--i,0) * 17px));display:flex;align-items:center;gap:2px;padding:0 5px 0 3px;border-radius:6px;background:rgba(13,15,20,.66);color:#e8ecf2;font-size:10px;font-weight:600;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(0,0,0,.35)}
-.bc-herd::after{content:'';position:absolute;left:50%;bottom:-4px;margin-left:-4px;border:4px solid transparent;border-bottom:0;border-top-color:rgba(13,15,20,.66)}
-.bc-herd i{font-size:10px;color:var(--c)}
+/* Sized in em off --bc-tag-fs, which bcTagZoom grows a little with the zoom (the upscaled close-up terrain is
+   busy); near-opaque, ringed in the type colour so a tag still reads against blocky tiles. */
+.bc-herd{position:absolute;left:0;top:0;transform:translate(-50%,calc(-100% - .45em - var(--i,0) * 1.85em));display:flex;align-items:center;gap:.25em;padding:.1em .5em .1em .35em;border-radius:.6em;background:rgba(10,12,17,.86);border:1px solid rgba(255,255,255,.18);border-color:color-mix(in srgb,var(--c) 60%,transparent);color:#f4f6f9;font-size:var(--bc-tag-fs,11px);font-weight:600;line-height:1.35;white-space:nowrap;font-variant-numeric:tabular-nums;box-shadow:0 1px 5px rgba(0,0,0,.55)}
+.bc-herd::after{content:'';position:absolute;left:50%;bottom:-.45em;margin-left:-.4em;border:.4em solid transparent;border-bottom:0;border-top-color:rgba(10,12,17,.86)}
+.bc-herd i{font-size:1em;color:var(--c)}
 .bc-herd.due span{color:var(--amber-light)}
-.bc-herd.wait span{color:#9aa3b2;font-weight:500}
+.bc-herd.wait span{color:#b3bac6;font-weight:500}
 .bc-herd-tip{font-weight:400;color:var(--text2);margin-top:1px}
 /* resource list */
 .bc-res-list{flex:1;min-height:0;overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg)}
@@ -11278,8 +11280,8 @@ function bcHerdRebuild(){
     let g = bcHerd.markers[key];
     if (!g){
       g = bcHerd.markers[key] = { marker: L.marker(anchor, { icon: bcHerdIcon(color, i), pane: 'bcHerd', keyboard: false, riseOnHover: true }), color, i };
-      g.marker.bindTooltip('', { direction: 'top', offset: [0, -22 - 17 * i], className: 'bc-hover-tip', opacity: 1 });
-      g.marker.on('tooltipopen', () => g.marker.setTooltipContent(bcHerdTipHtml(g, bcHerdGroupState(g, Date.now()))));
+      g.marker.bindTooltip('', { direction: 'top', offset: [0, -24], className: 'bc-hover-tip', opacity: 1 });
+      g.marker.on('tooltipopen', () => bcTagTip(g.marker, bcHerdTipHtml(g, bcHerdGroupState(g, Date.now()))));
       g.marker.addTo(bcHerd.layer);
     } else if (g.color !== color){ g.color = color; g.marker.setIcon(bcHerdIcon(color, i)); }
     Object.assign(g, { kind: mo.kind, f: mo.f, members: mo.list.map(x => ({ h: x.h, rg: x.rg })) });
@@ -11288,10 +11290,21 @@ function bcHerdRebuild(){
   if (bcMapShowing()) bcUpdateResStatus();
 }
 const bcHerdShortCount = () => Object.values(bcHerd.markers).reduce((s, g) => s + g.members.length, 0);
+// Respawn tags (herds and depleted resources) grow a little as you zoom in, where the upscaled terrain gets
+// busy: 11px at zoom 0 and below, up to 13.5px from about zoom 3. One CSS variable on the map container,
+// which every pane inherits (the pop-out too — the container moves with the map).
+function bcTagZoom(){ if (bcMap) bcMap.getContainer().style.setProperty('--bc-tag-fs', Math.max(11, Math.min(13.5, 11 + bcMap.getZoom() * 0.8)).toFixed(1) + 'px'); }
+// A tag's hover card opens just above the tag itself: tags change size with the zoom and stack, so a
+// fixed offset would sit on top of them. (The icon element is 0×0 at the anchor point.)
+function bcTagTip(marker, html){
+  const el = marker.getElement(), box = el && el.firstElementChild, tt = marker.getTooltip();
+  if (box && tt) tt.options.offset = L.point(0, Math.round(box.getBoundingClientRect().top - el.getBoundingClientRect().top) - 2);
+  marker.setTooltipContent(html);
+}
 // Layer visibility follows (timers on × map showing — its tab or the pop-out), like the resource overlay.
 function bcHerdApply(){
   if (!bcMap) return;
-  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdScheduleRebuild); }   // above markers (600), below tooltips (650); zoom decides which far-apart areas share a tag
+  if (!bcMap.getPane('bcHerd')){ bcMap.createPane('bcHerd').style.zIndex = 640; bcMap.on('zoomend', bcHerdScheduleRebuild); bcMap.on('zoomend', bcTagZoom); bcTagZoom(); }   // above markers (600), below tooltips (650); zoom decides which far-apart areas share a tag, and the tags' size
   if (!bcHerd.layer) bcHerd.layer = L.layerGroup();
   const show = bcGrowthOn && bcMapActive();
   if (show){ if (!bcMap.hasLayer(bcHerd.layer)) bcHerd.layer.addTo(bcMap); }
@@ -11324,7 +11337,7 @@ function bcGrowthRebuild(){
         const marker = L.marker(L.latLng(r.z, r.x), { icon: bcGrowthIcon(name), keyboard: false, riseOnHover: true });
         m = bcGrowthMarkers[key] = { marker, endMs, name };
         marker.bindTooltip('', { direction: 'top', offset: [0, -22], className: 'bc-hover-tip', opacity: 1 });
-        marker.on('tooltipopen', () => marker.setTooltipContent(bcGrowthTipHtml(m, m.endMs - Date.now())));
+        marker.on('tooltipopen', () => bcTagTip(marker, bcGrowthTipHtml(m, m.endMs - Date.now())));
         marker.addTo(bcGrowthLayer);
       } else { m.endMs = endMs; }
     }
