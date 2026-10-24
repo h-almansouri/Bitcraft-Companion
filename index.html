@@ -10005,7 +10005,7 @@ async function bcFocusClaim(c){   // c = { id, name, x, z, crafts }
   bcMap.setView(ll, 2);
   m.openPopup();
 }
-function bcPlacePlayer(id, x, z, dest){
+function bcPlacePlayer(id, x, z, dest, inside){
   const t = bcTracked[id]; if (!t || x == null || z == null) return;
   const ll = L.latLng(z, x);
   t.last = ll;
@@ -10013,6 +10013,7 @@ function bcPlacePlayer(id, x, z, dest){
     t.marker = L.marker(ll, { icon: bcPlayerIcon(t.color), zIndexOffset:1000 }).addTo(bcMap);
     t.marker.bindTooltip(t.name, { permanent:true, direction:'top', className:'bc-player-tip', offset:[0,-10] });
   } else { t.marker.setLatLng(ll); }
+  if (!!inside !== !!t.inside){ t.inside = !!inside; t.marker.setTooltipContent(t.inside ? t.name + ' (inside)' : t.name); }   // at a door (bcDoor)
   if (dest && dest.x != null && dest.z != null && (dest.x || dest.z)){
     const dll = L.latLng(dest.z, dest.x);
     if (!t.line) t.line = L.polyline([ll, dll], { color:t.color, weight:1.5, dashArray:'5,5', opacity:.7 }).addTo(bcMap);
@@ -10043,25 +10044,73 @@ const BC_RELAY_QUIET_MS = 10000;
 function bcRelayRow(id){
   const byRegion = liveCache.mobile_entity_state; let row = null, rg = null;
   if (byRegion) Object.keys(byRegion).forEach(k => { const r = byRegion[k].get(id); if (r && (!row || +r.timestamp > +row.timestamp)){ row = r; rg = k; } });
-  return row && { row, live: !!(liveConns[rg] && liveConns[rg].status === 'live') };
+  return row && { row, region: +rg, live: !!(liveConns[rg] && liveConns[rg].status === 'live') };
 }
-// A movement row from either feed (same columns; location/destination in ×1000 map units). Indoors — any
-// dimension but the overworld's 1 — the coordinates are the interior's own (a player who logged out in
-// their house reads x 3, z 9 on both feeds), so the marker stays where they went in.
-function bcPlaceFromRow(id, r){
-  if (r.dimension != null && +r.dimension !== 1) return;
-  bcPlacePlayer(id, r.location_x / 1000, r.location_z / 1000, { x: r.destination_x / 1000, z: r.destination_z / 1000 });
+// ── Indoors: the marker waits at the door ──
+// Inside a house, cave, ruin or dungeon a movement row's coordinates are the interior's own, so the marker
+// goes to the place's entrance instead: one lookup per (region, dimension), on a scratch socket in the
+// region the player is in (relayFetchOnce), two rounds —
+//   1. the dimension's network, as semijoins on dimension_description_state.dimension_id (indexed). A cave,
+//      ruin or dungeon names its entrance in dimension_network_state.building_id; a HOUSE's network building
+//      is a placeholder with no position, and its door is player_housing_state.entrance_building_entity_id;
+//   2. location_state of those buildings — overworld x/z are map units as they stand (the herd timers plot
+//      them the same way). An entrance that is itself indoors resolves again from its own dimension.
+// Measured 2026-10-24: Large Elenvar Cave and Large Rathium Cave (r8, dimension type ancientRuin) and
+// Velcruza's house (r19, buildingInterior), ~0.7s a lookup. Cached for BC_DOOR_TTL_MS rather than for good:
+// ruins collapse and respawn, so a dimension number isn't promised to keep meaning the same place.
+const BC_DOOR_TTL_MS = 10 * 60 * 1000, BC_DOOR_RETRY_MS = 30000;
+const bcDoors = new Map();   // 'region:dimension' → { at, ttl, pos: {x, z} | null, p: the lookup in flight }
+function bcDoor(rg, dim, depth = 0){
+  const k = rg + ':' + dim, c = bcDoors.get(k);
+  if (c && (c.p || Date.now() - c.at < c.ttl)) return c.p || Promise.resolve(c.pos);
+  const e = { at: 0, ttl: BC_DOOR_TTL_MS, pos: null, p: null };
+  e.p = bcFindDoor(rg, dim, depth)
+    .catch(() => { e.ttl = BC_DOOR_RETRY_MS; return null; })   // the relay didn't answer: ask again soon, not in 10 minutes
+    .then(pos => { e.at = Date.now(); e.pos = pos; e.p = null; return pos; });
+  bcDoors.set(k, e);
+  return e.p;
+}
+async function bcFindDoor(rg, dim, depth){
+  const via = (t, col) => `SELECT ${t}.* FROM ${t} JOIN dimension_description_state ON ${t}.${col} = dimension_description_state.dimension_network_entity_id WHERE dimension_description_state.dimension_id = ${dim}`;
+  const a = await relayFetchOnce(rg, [via('player_housing_state', 'network_entity_id'), via('dimension_network_state', 'entity_id')]);
+  const house = (a.player_housing_state || [])[0], net = (a.dimension_network_state || [])[0];
+  const ids = [house && house.entrance_building_entity_id, net && net.building_id].filter(Boolean).map(String);   // a house's door first
+  if (!ids.length) return null;
+  const b = await relayFetchOnce(rg, ids.map(id => `SELECT * FROM location_state WHERE entity_id = ${id}`));
+  const loc = ids.map(id => (b.location_state || []).find(r => String(r.entity_id) === id)).find(Boolean);
+  if (!loc) return null;
+  if (+loc.dimension === 1) return { x: +loc.x, z: +loc.z };
+  return depth < 2 ? bcDoor(rg, +loc.dimension, depth + 1) : null;
+}
+// A movement row from either feed (same columns; location/destination in ×1000 map units), and the region
+// it came from. Indoors — any dimension but the overworld's 1 — the coordinates are the interior's own (a
+// player who logged out in their house reads x 3, z 9 on both feeds), so the marker goes to the door
+// (bcDoor), labelled "(inside)". t.dim is where the LATEST row has them: a door that resolves after they've
+// stepped back out is dropped.
+function bcPlaceFromRow(id, r, rg){
+  const t = bcTracked[id]; if (!t) return;
+  const dim = r.dimension == null ? 1 : +r.dimension;
+  t.dim = dim;
+  if (dim === 1) return bcPlacePlayer(id, r.location_x / 1000, r.location_z / 1000, { x: r.destination_x / 1000, z: r.destination_z / 1000 });
+  if (rg) bcDoor(rg, dim).then(pos => { const u = bcTracked[id]; if (pos && u && u.dim === dim) bcPlacePlayer(id, pos.x, pos.z, null, true); });
 }
 function bcRelayPlace(id){
   const h = bcMap && bcRelayRow(id);
-  if (h) bcPlaceFromRow(id, h.row);
+  if (h) bcPlaceFromRow(id, h.row, h.region);
   return !!h;
 }
 function bcBitjitaMayPlace(id){
   const t = bcTracked[id], h = bcRelayRow(id);
   return !h || !h.live || !t.relayAt || Date.now() - t.relayAt > BC_RELAY_QUIET_MS;
 }
-function bcRestWanted(id){ const t = bcTracked[id]; return !!t && !t.relayAt && !bcRelayRow(id); }
+// REST also waits out a fresh track's relay dial (~1–2s) while the live layer is up: it serves an indoor
+// player's interior coordinates with no dimension to tell (a cave read x 21, z 53), so answering first it
+// flashed the marker in the map's corner before the relay moved it to the door.
+const BC_REST_WAIT_MS = 6000;
+function bcRestWanted(id){
+  const t = bcTracked[id];
+  return !!t && !t.relayAt && !bcRelayRow(id) && !(liveOn() && Date.now() - t.trackedAt < BC_REST_WAIT_MS);
+}
 function bcPlaceFromRest(id, r){   // REST's locationX/Z are already in map units
   if (r && r.x != null && r.z != null && bcRestWanted(id)) bcPlacePlayer(id, r.x, r.z);
 }
@@ -10208,7 +10257,7 @@ function bcWsHandle(raw){
   if (!t || typeof d.location_x !== 'number' || typeof d.location_z !== 'number') return;
   // the same mobile_entity_state row the relay carries (ws coords are ×1000 of the map-space coords used by
   // /api/players) — it moves the marker only while the relay is down or quiet on this player
-  if (bcBitjitaMayPlace(id)) bcPlaceFromRow(id, d);
+  if (bcBitjitaMayPlace(id)) bcPlaceFromRow(id, d, +d.region_id);
 }
 // Feed the fallback rows into the SAME handlers the relay drives, so there is one alert implementation
 // and not two that can drift. The alert channels are never pruned (the protocol's `unsubscribe` is only
@@ -10247,7 +10296,7 @@ function bcMapTrackedIds(){ return [...new Set([...Object.keys(bcTracked), ...bc
 function bcTrackPlayer(id, name, color, follow){
   id = String(id); if (!id || bcTracked[id]) return;
   color = color || bcPlayerColors[Object.keys(bcTracked).length % bcPlayerColors.length];
-  bcTracked[id] = { name: name || ('Player '+id), marker:null, line:null, last:null, follow:!!follow, color, relayAt:0 };
+  bcTracked[id] = { name: name || ('Player '+id), marker:null, line:null, last:null, follow:!!follow, color, relayAt:0, trackedAt:Date.now() };
   bcEnsureSocket();
   bcWsSubscribe();
   bcStartPlayerPoll();
@@ -10256,11 +10305,11 @@ function bcTrackPlayer(id, name, color, follow){
   // map list already is, from boot); a roster player's row is in the cache already.
   liveStart();
   bcRelayPlace(id);
-  // REST for the name, and for the position only while the relay has none.
+  // REST for the name, and for the position only while the relay has none (after its wait — bcRestWanted).
   bcFetchPlayerPos(id).then(r => {
     const t = bcTracked[id]; if (!t || !r) return;
     if (r.username) t.name = r.username;
-    bcPlaceFromRest(id, r);
+    setTimeout(() => bcPlaceFromRest(id, r), liveOn() ? Math.max(0, t.trackedAt + BC_REST_WAIT_MS - Date.now()) : 0);
     bcSaveTrackedPlayers();
     bcRenderTrackedList();
   });
