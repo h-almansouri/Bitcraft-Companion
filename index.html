@@ -4866,6 +4866,7 @@ const LIVE_TABLES_PLAYERCOL = ['traveler_task_state','equipment_preset_state']; 
 const LIVE_CONTAINERS_KEY = 'bcLiveContainers2';   // v2: house interiors discovered by dimension cell, not by builder (old sets carried builder-rule ids)
 let liveRefs = { containers: [], buildings: [], networks: [], chunks: [], regionHint: {} };   // discovered ids the subscription covers
 let liveRosterIds = [];      // player ids the current subscription covers
+let liveMapIds = [];         // …and players tracked only on the map, whose movement rows drive the map markers (bcRelayPlace)
 // Everything the app needs that ISN'T matched by a player-id filter: the buildings behind bank/house
 // containers and craft stations (they belong to other people, or carry no owner column), their
 // nicknames and claim names, and the house-interior scope. All of it is DISCOVERABLE from rows the base
@@ -5041,12 +5042,13 @@ function liveQuerySet(ids, region){
   // log of it (houseLogSql). One indexed query per cell — see the location_state scan warning above for why never
   // an OR-chain.
   (liveRefs.chunks || []).forEach(k => { const [rg, c] = k.split(':'); if (+rg === region && /^\d+$/.test(c || '')) sqls.push(`SELECT * FROM location_state WHERE chunk_index = ${c}`, houseLogSql(k, c)); });
-  // Movement feed for the idle alert's activity veto (see liveActivity): one row per tracked player,
-  // a handful of deltas per move segment, silence while stationary — measured 4 deltas/50s in normal
-  // play, snapshot = 1 row. perId (indexed), NEVER chunked — the location-family scan trap above.
+  // Movement feed for the idle alert's activity veto (see liveActivity) and for the map's player markers
+  // (bcRelayPlace), so it also covers players tracked only on the map: one row per player, a handful of
+  // deltas per move segment, silence while stationary — measured 4 deltas/50s in normal play, snapshot =
+  // 1 row. perId (indexed), NEVER chunked — the location-family scan trap above.
   // NOT here()-filtered: players roam regions and the row lives in whichever mirror they're standing
   // in, so every region subscribes the id — 12 of the 13 return nothing, for free.
-  perId(ids, 'entity_id', 'mobile_entity_state');
+  perId([...ids, ...liveMapIds], 'entity_id', 'mobile_entity_state');
   return {
     sqls,
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
@@ -5067,7 +5069,8 @@ function liveRegionName(rg){
 function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
   const cKey = trackedClaims.map(c => String(c.entityId)).sort().join(',');
-  if (!ids.length && !cKey && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer, a tracked creature type or a tracked claim alone keeps the sockets up
+  const mapIds = bcMapTrackedIds().filter(id => !ids.includes(id)).sort();   // tracked on the map but not in the roster: their movement rows only
+  if (!ids.length && !cKey && !mapIds.length && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer, a player tracked on the map, a tracked creature type or a tracked claim alone keeps the sockets up
   const pKey = ids.join(',');
   // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
@@ -5082,12 +5085,12 @@ function liveStart(){
   // save-on-change-only path meant a cleared (or never-written) blob stayed empty forever, so every
   // refresh paid a cold discovery round it should have skipped.
   if (!saved || liveRefsKey(saved) !== liveRefsKey(liveRefs)) liveSaveRefs(pKey, liveRefs);
-  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey() + '#claims:' + cKey;   // the layer's on/off + region scope and the tracked claims are part of the query set
+  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey() + '#claims:' + cKey + '#map:' + mapIds.join(',');   // the layer's on/off + region scope, the tracked claims and the map-only players are part of the query set
   // roster/ref redial → kick the doorbells again once re-complete, and re-arm the settle gate so the
   // NEXT first-flip (a roster change re-enters the boot path) waits for discovery all over again
   if (key !== liveRosterKey){ _liveCompleteKicked = false; _liveRefsSettled = false; }
   if (!_liveLayerStartedAt) _liveLayerStartedAt = Date.now();   // starts the degraded-mode grace period
-  liveRosterKey = key; liveRosterIds = ids;
+  liveRosterKey = key; liveRosterIds = ids; liveMapIds = mapIds;
   // ⚠️ NO STAGGER. §8.1's cliff is at 26 sockets, not 13 — 13 at once was always fine, and spacing them
   // 40ms apart only delayed the later regions AND spread out their replies, which the discovery debounce
   // then had to wait out. Measured, twice: simultaneous puts the LAST snapshot at 647-812ms with a
@@ -9919,9 +9922,10 @@ function bcSyncMaster(prefix){
   const m = document.getElementById('bc-lgm-'+prefix); if (m) m.checked = any;
 }
 
-// ===== Phase 2: live player tracking (wss://live.bitjita.com) =====
-// Initial position comes from /api/players/{id} (locationX/locationZ, already in map space);
-// the websocket then pushes movement updates (location_x/z in ×1000 units).
+// ===== Phase 2: live player tracking =====
+// Markers follow the relay's movement rows (bcRelayPlace — the live layer subscribes every map-tracked
+// player). bitjita is the fallback: wss://live.bitjita.com pushes the same rows (location_x/z in ×1000
+// units) and /api/players/{id} gives locationX/locationZ, already in map space.
 let bcPlayerSocket = null, bcTracked = {}, bcWsReconnect = null, bcWsPing = null, bcWsManualClose = false;
 let bcLastWsMsg = 0; // ms timestamp of the last message received — used to detect a stale/half-open socket
 let bcPlayerSearchResults = [];
@@ -9996,12 +10000,63 @@ function bcPlacePlayer(id, x, z, dest){
   if (t.follow) bcMap.panTo(ll);
   bcRenderTrackedList();
 }
+// ── The relay drives the markers; bitjita is the fallback ──
+// Each map-tracked player's movement row on the bitcraftsync relay (liveQuerySet subscribes it on every
+// mirror) places their marker; bitjita's live socket and the 15s REST poll only stand in for it.
+// Measured 2026-10-24: bitjita stopped ingesting region 8 for hours — its socket sent 0 movement events for
+// 12 players the relay saw move 398 times in 60s, and /api/players kept serving their old positions — while
+// regions 9 and 19 matched the relay. The marker, bitjita-only then, sat still while its player walked.
+// ⚠️ "Newest wins" across the two feeds can't work: the row's `timestamp` is the player's CLIENT clock
+// (player_move.rs stores request.timestamp; the server accepts anything from 8s behind to 1s ahead of its
+// own), and bitjita's events carry a stamp of their own — 1–53ms off the relay's for the same 15 moves,
+// never equal. So it's an order of trust instead:
+//   · the relay places on every event that mentions the player (snapshot or delta);
+//   · bitjita's socket places only while the relay isn't live for them — no row in a live mirror, or nothing
+//     from the relay for BC_RELAY_QUIET_MS while bitjita reports them moving (a stalled mirror looks exactly
+//     like bitjita did: socket open, nothing arriving);
+//   · REST places only a player the relay has never reported. A signed-out player keeps their row
+//     (verified), so logging out doesn't hand the marker back to a stale REST position either.
+const BC_RELAY_QUIET_MS = 10000;
+// The freshest copy (mid-teleport two mirrors can hold it, and a reconnecting one keeps its stale slice), and
+// whether the mirror it came from is live right now.
+function bcRelayRow(id){
+  const byRegion = liveCache.mobile_entity_state; let row = null, rg = null;
+  if (byRegion) Object.keys(byRegion).forEach(k => { const r = byRegion[k].get(id); if (r && (!row || +r.timestamp > +row.timestamp)){ row = r; rg = k; } });
+  return row && { row, live: !!(liveConns[rg] && liveConns[rg].status === 'live') };
+}
+// A movement row from either feed (same columns; location/destination in ×1000 map units). Indoors — any
+// dimension but the overworld's 1 — the coordinates are the interior's own (a player who logged out in
+// their house reads x 3, z 9 on both feeds), so the marker stays where they went in.
+function bcPlaceFromRow(id, r){
+  if (r.dimension != null && +r.dimension !== 1) return;
+  bcPlacePlayer(id, r.location_x / 1000, r.location_z / 1000, { x: r.destination_x / 1000, z: r.destination_z / 1000 });
+}
+function bcRelayPlace(id){
+  const h = bcMap && bcRelayRow(id);
+  if (h) bcPlaceFromRow(id, h.row);
+  return !!h;
+}
+function bcBitjitaMayPlace(id){
+  const t = bcTracked[id], h = bcRelayRow(id);
+  return !h || !h.live || !t.relayAt || Date.now() - t.relayAt > BC_RELAY_QUIET_MS;
+}
+function bcRestWanted(id){ const t = bcTracked[id]; return !!t && !t.relayAt && !bcRelayRow(id); }
+function bcPlaceFromRest(id, r){   // REST's locationX/Z are already in map units
+  if (r && r.x != null && r.z != null && bcRestWanted(id)) bcPlacePlayer(id, r.x, r.z);
+}
+onLiveChange(evs => {
+  if (!bcMap) return;
+  const seen = new Set();
+  evs.forEach(ev => { if (ev.table === 'mobile_entity_state') ev.rows.concat(ev.deletes || []).forEach(r => { const id = String(r.entity_id); if (bcTracked[id]) seen.add(id); }); });
+  seen.forEach(id => { bcTracked[id].relayAt = Date.now(); bcRelayPlace(id); });
+});
 function bcStartPlayerPoll(){
   if (bcPlayerPollTimer) return;
-  // Fallback refresh so stationary/just-logged-in players still update even without ws movement events.
+  // Fallback refresh for players the relay hasn't reported. Everyone else is placed by the relay — its
+  // snapshot covers the stationary and just-logged-in players bitjita's change-only socket never sends.
   bcPlayerPollTimer = setInterval(() => {
     if (document.hidden && !bcPipWin) return;
-    Object.keys(bcTracked).forEach(id => bcFetchPlayerPos(id).then(r => { if (r && r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z); }));
+    Object.keys(bcTracked).forEach(id => { if (bcRestWanted(id)) bcFetchPlayerPos(id).then(r => bcPlaceFromRest(id, r)); });
   }, 15000);
 }
 function bcStopPlayerPoll(){ if (bcPlayerPollTimer){ clearInterval(bcPlayerPollTimer); bcPlayerPollTimer = null; } }
@@ -10047,8 +10102,9 @@ document.addEventListener('visibilitychange', () => {
   if (Object.keys(bcTracked).length){
     const stale = !bcPlayerSocket || bcPlayerSocket.readyState !== 1 || (bcLastWsMsg && Date.now() - bcLastWsMsg > 90000);
     if (stale) bcForceReconnect(); else bcWsSubscribe();
-    // Snap markers to current positions via REST without waiting for the 15s fallback poll.
-    Object.keys(bcTracked).forEach(id => bcFetchPlayerPos(id).then(r => { if (r && r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z); }));
+    // Snap markers without waiting for the 15s fallback poll: REST for players the relay hasn't reported —
+    // the rest are current already, or will be the moment the live layer's own redial snapshots.
+    Object.keys(bcTracked).forEach(id => { if (bcRestWanted(id)) bcFetchPlayerPos(id).then(r => bcPlaceFromRest(id, r)); });
   }
 });
 // ═══ THIS SOCKET IS ALSO THE ALERT FALLBACK ═══
@@ -10129,9 +10185,9 @@ function bcWsHandle(raw){
   if (table && table !== 'mobile_entity_state') return bcAlertEvent(table, id, d);
   const t = bcTracked[id];
   if (!t || typeof d.location_x !== 'number' || typeof d.location_z !== 'number') return;
-  // ws coords are ×1000 of the map-space coords used by /api/players
-  bcPlacePlayer(id, d.location_x/1000, d.location_z/1000,
-    (typeof d.destination_x === 'number' && typeof d.destination_z === 'number') ? { x:d.destination_x/1000, z:d.destination_z/1000 } : null);
+  // the same mobile_entity_state row the relay carries (ws coords are ×1000 of the map-space coords used by
+  // /api/players) — it moves the marker only while the relay is down or quiet on this player
+  if (bcBitjitaMayPlace(id)) bcPlaceFromRow(id, d);
 }
 // Feed the fallback rows into the SAME handlers the relay drives, so there is one alert implementation
 // and not two that can drift. The alert channels are never pruned (the protocol's `unsubscribe` is only
@@ -10163,22 +10219,30 @@ function bcAlertEvent(table, id, d){
 }
 function bcSaveTrackedPlayers(){ safeSetItem('bc_map_tracked_players_v1', JSON.stringify(Object.entries(bcTracked).map(([id,t]) => ({ id, name:t.name, color:t.color, follow:t.follow })))); }
 function bcLoadTrackedPlayers(){ try { const v = localStorage.getItem('bc_map_tracked_players_v1'); return v ? JSON.parse(v) : []; } catch(e){ return []; } }
+// Whose movement rows the live layer subscribes on the map's behalf (liveStart). The saved list counts too:
+// the map only restores it when the tab first opens, and the boot dial should already cover those players
+// rather than redial all 13 sockets the moment the map appears.
+function bcMapTrackedIds(){ return [...new Set([...Object.keys(bcTracked), ...bcLoadTrackedPlayers().map(p => String(p.id))])]; }
 function bcTrackPlayer(id, name, color, follow){
   id = String(id); if (!id || bcTracked[id]) return;
   color = color || bcPlayerColors[Object.keys(bcTracked).length % bcPlayerColors.length];
-  bcTracked[id] = { name: name || ('Player '+id), marker:null, line:null, last:null, follow:!!follow, color };
+  bcTracked[id] = { name: name || ('Player '+id), marker:null, line:null, last:null, follow:!!follow, color, relayAt:0 };
   bcEnsureSocket();
   bcWsSubscribe();
   bcStartPlayerPoll();
-  // Immediate position from REST (handles online-but-stationary players the ws won't emit for).
+  bcSaveTrackedPlayers();
+  // A player who isn't in the roster joins the relay's position queries (a no-op once covered — a restored
+  // map list already is, from boot); a roster player's row is in the cache already.
+  liveStart();
+  bcRelayPlace(id);
+  // REST for the name, and for the position only while the relay has none.
   bcFetchPlayerPos(id).then(r => {
     const t = bcTracked[id]; if (!t || !r) return;
     if (r.username) t.name = r.username;
-    if (r.x != null && r.z != null) bcPlacePlayer(id, r.x, r.z);
+    bcPlaceFromRest(id, r);
     bcSaveTrackedPlayers();
     bcRenderTrackedList();
   });
-  bcSaveTrackedPlayers();
   bcRenderTrackedList();
 }
 function bcTrackMe(){ if (currentPlayer) bcTrackPlayer(currentPlayer.entityId, currentPlayer.username || currentPlayer.userName || 'Me'); }
@@ -10189,6 +10253,7 @@ function bcUntrackPlayer(id){
   delete bcTracked[id];
   bcSaveTrackedPlayers();
   bcRenderTrackedList();
+  liveStart();   // a player tracked only on the map leaves the relay's position queries (a no-op for a roster player)
   if (!Object.keys(bcTracked).length){
     bcStopPlayerPoll();
     // Don't hang up if the ALERT fallback is still using this socket — the map and the alerts share one.
