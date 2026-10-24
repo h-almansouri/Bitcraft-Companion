@@ -4417,7 +4417,7 @@ function craftingContentHtml(craftData) {
     const outArr  = Array.isArray(rawOut) ? rawOut : [rawOut].filter(Boolean);
     const output  = outArr[0] || null;
     const outId   = output?.item_id ?? output?.itemId ?? output?.id ?? null;
-    const item    = outId ? itemMap[outId] : null;
+    const item    = outId ? itemMap[craftOutKey(output)] : null;
     const baseName = item ? itemLabel(item, outId, 0)
                           : (c.recipeName || c.name || (c.recipeId ? 'Recipe #'+c.recipeId : 'Unknown craft'));
     // Prepend craft count: "2,000x T2 - Simple Spool of Thread"
@@ -5305,6 +5305,16 @@ function syncRelayPlaces(){
   });
   if (n) saveRelayPlaces();
 }
+// A craft output's key in a crafts itemMap. Item and cargo ids overlap — 50 ids are both, e.g. 1958049442 is the
+// item "Sentinel's Stone Brazier" AND the cargo "Peerless Raw Pelt Package" — so cargo files under
+// GAME_CARGO_ID_BASE + id, the crafting data's convention. Reads the relay path's item_type (0/1) and bitjita's
+// ("item"/"cargo").
+function craftOutKey(o){
+  const id = o && (o.item_id ?? o.itemId ?? o.id);
+  if (id == null) return undefined;
+  const t = o.item_type ?? o.itemType;
+  return (t === 1 || /^cargo$/i.test(t)) ? GAME_CARGO_ID_BASE + +id : id;
+}
 // Crafts for MANY players — assembled from the LIVE CACHE, no network. The held subscriptions keep the
 // cache current, so a "fetch" is a local read plus (rarely) a place-name resolve for buildings we've
 // never seen. Returns { playerId: {active, done, passive, itemMap} } — IDENTICAL to the old
@@ -5347,11 +5357,20 @@ async function fetchCraftsRelayMulti(ids){
     // The game's own crafted_item_stacks[0] wins: the scraped craftingData pre-expands bundle items
     // into their contents (recipe 210018 really crafts "Simple Wispweave Products", not Seeds+Filament),
     // and headlining a different item than bitjita made the card flicker names at the fallback handoff.
+    // Each output keeps its type and is read from its own table. Looking every id up as an item first named 23
+    // package crafts after whichever item shares the id: 77x Peerless Raw Pelt Package said Sentinel's Stone Brazier.
     const t = defs.recipeOuts && defs.recipeOuts[recipeId];
     const rec = recipes[recipeId];
-    const outs = t ? [{ itemId: t[0], quantity: t[1] }] : ((rec && rec.outputs) || []);
-    outs.forEach(o => { const m = defs.items[o.itemId] || defs.cargos[o.itemId]; if (m) itemMap[o.itemId] = m; });
-    return outs.map(o => ({ item_id: o.itemId, quantity: o.quantity, item_type: 0 }));
+    // craftingData numbers cargo from GAME_CARGO_ID_BASE up, so it can tell for a recipeOuts payload from before the
+    // cargo flag (t[3]) — the browser keeps /itemdefs for a day, and an old proxy serves the new page
+    const cdCargo = id => !!(rec && (rec.outputs || []).some(o => o.itemId === GAME_CARGO_ID_BASE + id));
+    const outs = t ? [{ id: t[0], quantity: t[1], cargo: t.length > 3 ? !!t[3] : cdCargo(t[0]) }]
+      : ((rec && rec.outputs) || []).map(o => o.itemId >= GAME_CARGO_ID_BASE ? { id: o.itemId - GAME_CARGO_ID_BASE, quantity: o.quantity, cargo: true } : { id: o.itemId, quantity: o.quantity, cargo: false });
+    return outs.map(o => {
+      const out = { item_id: o.id, quantity: o.quantity, item_type: o.cargo ? 1 : 0 };
+      const m = (o.cargo ? defs.cargos : defs.items)[o.id]; if (m) itemMap[craftOutKey(out)] = m;
+      return out;
+    });
   };
   prog.forEach(r => {
     const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
@@ -5403,9 +5422,10 @@ async function fetchPlayerCraftsBitjita(id){
     apiFetch(`/api/players/${id}/passive-crafts?status=all`),
     loadCraftingData().catch(()=>{})
   ]);
-  const itemMap = {};
-  const addItems = d => { if (!d) return; if (Array.isArray(d)) d.forEach(i => { if (i?.id) itemMap[i.id] = i; }); else if (typeof d === 'object') Object.assign(itemMap, d); };
-  addItems(acData.items); addItems(acData.cargos); addItems(pcData.items); addItems(pcData.cargos);
+  const itemMap = {};   // cargo under its own key (craftOutKey) — it used to overwrite the item sharing its id
+  const addItems = (d, cargo) => { if (!d) return; const put = (id, i) => { itemMap[cargo ? GAME_CARGO_ID_BASE + +id : id] = i; };
+    if (Array.isArray(d)) d.forEach(i => { if (i?.id) put(i.id, i); }); else if (typeof d === 'object') Object.keys(d).forEach(id => put(id, d[id])); };
+  addItems(acData.items); addItems(acData.cargos, true); addItems(pcData.items); addItems(pcData.cargos, true);
   const rawCrafts = acData.craftResults || acData.crafts || acData.activeCrafts || (Array.isArray(acData) ? acData : []);
   const isCraftDone = c => !!(c.completed || c.isCompleted || c.status === 'complete' || c.status === 'completed');
   const active = rawCrafts.filter(c => !isCraftDone(c)), done = rawCrafts.filter(c => isCraftDone(c));
@@ -6620,7 +6640,7 @@ function renderPassiveCraftsHtml(passive, itemMap) {
     const outArr = Array.isArray(rawOut) ? rawOut : [rawOut].filter(Boolean);
     const out = outArr[0] || null;
     const outId = out?.item_id ?? out?.itemId ?? out?.id ?? null;
-    const item = outId ? itemMap[outId] : null;
+    const item = outId ? itemMap[craftOutKey(out)] : null;
     if (item) return { name: itemLabel(item, outId, 0), tier: item.tier || 0, baseName: item.name || '' };
     const nm = c.recipeName || c.name || (c.recipeId ? 'Recipe #'+c.recipeId : 'Unknown craft');
     return { name: nm, tier: 0, baseName: nm };
@@ -6781,7 +6801,7 @@ function ocTierBadge(t, suffix, extraClass){
   return `<span class="skill-tier-badge ${extraClass||''}" style="--tc:${col.c}">${t?('T'+t):'—'}${suffix||''}</span>`;
 }
 function ocProfId(cr){ const l = (cr.levelRequirements&&cr.levelRequirements[0]) || (cr.experiencePerProgress&&cr.experiencePerProgress[0]); return l ? l.skill_id : 0; }
-function ocTierOf(cr){ const it = openCraftAll.itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id]; return it && it.tier > 0 ? it.tier : 0; }
+function ocTierOf(cr){ const it = openCraftAll.itemMap[craftOutKey(cr.craftedItem && cr.craftedItem[0])]; return it && it.tier > 0 ? it.tier : 0; }
 function ocClaimDist(g){ if (!ocHome || g.x == null || g.z == null) return Infinity; const dx = (+g.x) - (+ocHome.x), dz = (+g.z) - (+ocHome.z); return Math.sqrt(dx*dx + dz*dz); }
 
 function renderOpenCraftsTab(){
@@ -6831,7 +6851,7 @@ function ocGroups(){
   else if (ocScope!=='all'){ crafts=crafts.filter(c=>String(c.claimEntityId)===ocScope); }
   if (ocFilterRegions.size) crafts=crafts.filter(c=>ocFilterRegions.has(c.regionId));
   if (ocFilterSkills.size)  crafts=crafts.filter(c=>ocFilterSkills.has(ocProfId(c)));
-  if (ocFilterTiers.size)   crafts=crafts.filter(c=>{ const it=openCraftAll.itemMap[c.craftedItem&&c.craftedItem[0]&&c.craftedItem[0].item_id]; return ocFilterTiers.has(it&&it.tier>0?it.tier:0); });
+  if (ocFilterTiers.size)   crafts=crafts.filter(c=>{ const it=openCraftAll.itemMap[craftOutKey(c.craftedItem&&c.craftedItem[0])]; return ocFilterTiers.has(it&&it.tier>0?it.tier:0); });
   const byClaim={};
   crafts.forEach(c=>{ const id=String(c.claimEntityId); (byClaim[id] = byClaim[id] || { id, name:c.claimName||'Claim', regionId:c.regionId, x:c.claimLocationX, z:c.claimLocationZ, crafts:[] }).crafts.push(c); });
   const groups = Object.values(byClaim);
@@ -6891,7 +6911,7 @@ async function ocFetchGlobal(force){
     const d = await apiFetch('/api/crafts');
     const itemMap = {};
     (d.items||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
-    (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
+    (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[GAME_CARGO_ID_BASE + +it.id] = it; });   // own key (craftOutKey): item and cargo ids overlap
     const crafts = (d.craftResults || []).filter(c => !c.completed);
     openCraftAll = { crafts, itemMap, loading:false, error:null, ts:Date.now() };
   } catch(e){ openCraftAll = { ...openCraftAll, loading:false, error: e.message || 'Failed to load crafts' }; }
@@ -6902,7 +6922,7 @@ async function ocFetchGlobal(force){
 function ocFacets(){
   const tiers={}, skills={}, regions={};
   openCraftAll.crafts.forEach(c => {
-    const it = openCraftAll.itemMap[c.craftedItem && c.craftedItem[0] && c.craftedItem[0].item_id];
+    const it = openCraftAll.itemMap[craftOutKey(c.craftedItem && c.craftedItem[0])];
     const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0)+1;
     const s = ocProfId(c); skills[s] = (skills[s]||0)+1;
     regions[c.regionId] = (regions[c.regionId]||0)+1;
@@ -7048,7 +7068,7 @@ const OC_STATION_TIER = { rough:1, simple:2, sturdy:3, fine:4, exquisite:5, peer
 function ocStationTier(name){ const m = (name||'').match(/^([A-Za-z]+)/); return (m && OC_STATION_TIER[m[1].toLowerCase()]) || 0; }
 function ocStationLabel(name){ if (!name) return ''; const t = ocStationTier(name); return t ? `T${t} ${name}` : name; }
 function ocCraftCard(cr, itemMap, now){
-  const it = itemMap[cr.craftedItem && cr.craftedItem[0] && cr.craftedItem[0].item_id];
+  const it = itemMap[craftOutKey(cr.craftedItem && cr.craftedItem[0])];
   const name = it ? (it.name || ('Item '+cr.craftedItem[0].item_id)) : (cr.recipeName || ('Recipe #'+cr.recipeId));
   const tier = it && it.tier > 0 ? it.tier : 0;
   const total = cr.totalActionsRequired || 0, done = cr.progress || 0;
@@ -7081,7 +7101,7 @@ function ocClaimCardHtml(g){
     const left = cs.reduce((s,c) => s + Math.max(0, (c.totalActionsRequired||0) - (c.progress||0)), 0);
     const active = cs.filter(c => c.lockExpiration && new Date(c.lockExpiration).getTime() > now).length;
     const tiers = {};
-    cs.forEach(c => { const it = openCraftAll.itemMap[c.craftedItem && c.craftedItem[0] && c.craftedItem[0].item_id]; const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0) + 1; });
+    cs.forEach(c => { const it = openCraftAll.itemMap[craftOutKey(c.craftedItem && c.craftedItem[0])]; const t = it && it.tier > 0 ? it.tier : 0; tiers[t] = (tiers[t]||0) + 1; });
     return { sid, cs, left, active, tiers, name: ocSkillName(sid) };
   }).sort((a,b) => b.left - a.left);
   const bodyInner = profs.map(p => {
@@ -7162,11 +7182,12 @@ async function loadGameItemDefs(){
     // ?v busts the 24h browser cache when the payload gains fields. rout2, not rout1: a dev server
     // briefly served rout1 WITHOUT recipeOuts (the route dropped the field), and that empty payload
     // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh. plc1 added placeables; plc2 gave
-    // them tier, kind, icon, growth timing and actions; act1 added each recipe's actions per craft to recipeOuts.
-    const d = await apiFetch('/itemdefs?v=act1');   // compact [name, tier, rarityIdx, tag, icon]
+    // them tier, kind, icon, growth timing and actions; act1 added each recipe's actions per craft to recipeOuts; cgo1
+    // added the headline's cargo flag.
+    const d = await apiFetch('/itemdefs?v=cgo1');   // compact [name, tier, rarityIdx, tag, icon]
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
     gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
-      recipeOuts: d.recipeOuts || {},     // recipeId -> [headlineItemId, qty, actionsRequired] — the game's own crafted_item_stacks[0]
+      recipeOuts: d.recipeOuts || {},     // recipeId -> [headlineItemId, qty, actionsRequired, isCargo] — the game's own crafted_item_stacks[0]
       placeables: d.placeables || {} };   // placeableId -> [name, tier, kind, icon, growth, actions] — see plInfo / slimPlaceables
     _gameItemDefsP = null; return gameItemDefs;
   } catch(e){ _gameItemDefsP = null; _gameItemDefsFailAt = Date.now(); throw e; } })();

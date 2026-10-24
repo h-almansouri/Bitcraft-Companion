@@ -283,13 +283,15 @@ function slimBuildings(rows) {
   (Array.isArray(rows) ? rows : []).forEach(x => { if (x && x.id != null && x.name) out[x.id] = x.name; });
   return out;
 }
-// crafting_recipe_desc → { recipeId: [headlineItemId, qty] } — the game's OWN crafted_item_stacks[0].
+// crafting_recipe_desc → { recipeId: [headlineItemId, qty, actionsRequired, isCargo] } — the game's OWN crafted_item_stacks[0].
 // The scraped craftingData.json lies about some outputs: it pre-expands bundle items into their
 // contents (e.g. recipe 210018 "Husk into {0}" really crafts 1x "Simple Wispweave Products" 2220023,
 // but the scrape lists Seeds x3 + Filament x3 — the bundle's UNPACKED contents). bitjita headlines the
 // real stack, so the crafts tab flickered between names as the fallback handed over to the relay path.
 // This map is the authoritative headline; the scraped outputs stay for the Planner's crafting trees.
-// Stack shape (SATS): [item_id, quantity, [type_variant, []], [durability...]] — only [0] and [1] matter.
+// Stack shape (SATS): [item_id, quantity, [type_variant, []], [durability...]] — the variant is 0 for an item, 1 for a
+// cargo, and the client needs it: the two id spaces overlap. Without it the Crafts tab read cargo 1958049442 "Peerless
+// Raw Pelt Package" as item 1958049442 "Sentinel's Stone Brazier" — 23 package recipes were misnamed that way.
 // Each entry also carries the recipe's actions_required: the crafts tab's backstop for totalling a craft whose
 // recipe is missing from the crafting data the page loaded (that file once sat two months stale, and the mushroom
 // Identify crafts rendered their raw action count as "2400% complete").
@@ -297,11 +299,11 @@ function slimRecipeOuts(rows) {
   const out = {};
   (Array.isArray(rows) ? rows : []).forEach(x => {
     const s = x && Array.isArray(x.crafted_item_stacks) ? x.crafted_item_stacks[0] : null;
-    if (x && x.id != null && Array.isArray(s) && s[0] != null) out[x.id] = [s[0], +s[1] || 1, +x.actions_required || 0];
+    if (x && x.id != null && Array.isArray(s) && s[0] != null) out[x.id] = [s[0], +s[1] || 1, +x.actions_required || 0, (Array.isArray(s[2]) ? s[2][0] : +s[2]) === 1 ? 1 : 0];
   });
   return out;
 }
-const RECIPE_OUTS_FORMAT = 2;   // bump with slimRecipeOuts' shape (2 = actions_required added), so an older disk cache is rebuilt
+const RECIPE_OUTS_FORMAT = 3;   // bump with slimRecipeOuts' shape (2 = actions_required added, 3 = the cargo flag), so an older disk cache is rebuilt
 // placeable_desc + placeable_growth_desc + placeable_interaction_desc → everything the Crafts tab's Placeables view
 // shows about a placeable (the relay only says WHICH placeable sits where), keyed by placeable id:
 //   [name, tier, kind (the game's tag: "Tree Seed", "Fishing Trap"…), icon, growth, actions]
