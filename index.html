@@ -848,6 +848,14 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-lgname{flex:1;cursor:pointer}
 .bc-lgchev{cursor:pointer;font-size:13px;color:var(--text3);transition:transform .15s}
 .bc-lgbody{padding-left:16px}
+/* landmark pins (quarries, giant berry bushes, hexite deposits, sunken ruins): game icon on a dark tile, tier badge */
+.bc-lm-ic{background:none;border:none}
+.bc-lm{position:relative;width:28px;height:28px;box-sizing:border-box;border-radius:8px;background:rgba(10,12,17,.84);border:1.5px solid var(--c);box-shadow:0 1px 5px rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;color:var(--c);font-size:16px}
+.bc-lm img{width:22px;height:22px}
+.bc-lm b{position:absolute;right:-8px;bottom:-6px;padding:0 3px;border-radius:5px;background:var(--c);color:#0a0c10;font-size:9px;font-weight:700;line-height:12px;white-space:nowrap}
+.bc-lm.dim img,.bc-lm.dim i{opacity:.4;filter:grayscale(.8)}
+.bc-region-name{background:none;border:none}
+.bc-region-name div{position:absolute;transform:translate(-50%,-50%);color:rgba(244,246,249,.92);font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;text-shadow:0 0 4px #000,0 0 2px #000;white-space:nowrap;pointer-events:none}
 /* live player pulse marker */
 .bc-player-icon{background:none;border:none}
 .bc-player-pulse{position:relative;width:12px;height:12px;border-radius:50%;background:var(--pc);border:2px solid #0a0c10;box-shadow:0 0 6px var(--pc)}
@@ -9494,6 +9502,14 @@ function bcFeatLatLng(f){
   if (!c || c.length < 2) return null;
   return L.latLng(c[1], c[0]);
 }
+// A map point as the game writes it ("Giant Skitch Dungeon (N: 3401, E: 3834)"): the large hex a small-hex map point
+// falls in. N is z ÷ 3 rounded; E is x ÷ 3 nudged by where the point sits in its large hex — this table, read off the
+// names of 8,115 world claims, reproduces every one of them (2026-10-27). Plain x ÷ 3 was off by one about a quarter of the time.
+const BC_NE_E = [[[0,0,0],[0,0,-3]], [[2,-1,-1],[-1,-1,-1]], [[1,1,1],[-2,-2,-2]]];   // [x mod 3][N odd][z − 3N + 1] → 3E − x
+function bcNE(ll){
+  const x = Math.round(ll.lng), z = Math.round(ll.lat), n = Math.round(z / 3);
+  return `N ${n} · E ${(x + BC_NE_E[((x % 3) + 3) % 3][n & 1][z - 3 * n + 1]) / 3}`;
+}
 
 function renderMap(){
   const host = document.getElementById('map-content');
@@ -9792,7 +9808,7 @@ async function bcInitMap(){
       const p = f.properties || {};
       const nm = p.name || p.popupText || label;
       const m = L.marker(ll, { icon, title: nm });
-      m.bindPopup(`<b>${escHtml(nm)}</b><br><span style="color:var(--text3)">${label} · N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
+      m.bindPopup(`<b>${escHtml(nm)}</b><br><span style="color:var(--text3)">${label} · ${bcNE(ll)}</span>`);
       m.addTo(layer);
     });
     return { layer, count: feats.length };
@@ -9802,6 +9818,9 @@ async function bcInitMap(){
   const ruined   = await poiLayer('ruined.geojson',   'ruinedCity.png',   28, 'Ruined City');
   const wonders  = await poiLayer('trees.geojson',    'travelerTree.svg', 26, 'Wonder');
   bcPoiCounts = { dungeons: dungeons.count, temples: temples.count, ruined: ruined.count, wonders: wonders.count };
+  bcRegionLayer = bcBuildRegions(await bcLoadGeo('grids.geojson'));
+  // ----- Landmarks the lists leave out (bcLm*): empty until their layer is switched on -----
+  Object.keys(BC_LM).concat('ancient').forEach(k => { bcLm.layers[k] = L.layerGroup(); });
   // ----- Roads (tiled overlay) -----
   bcRoadsLayer = L.tileLayer(`${BC_TILE_BASE}/${BC_TILE_PATH.roads}/{z}/{x}/{y}.webp{q}`, {
     minZoom:-5, maxZoom:5, minNativeZoom:-5, maxNativeZoom:0,
@@ -9811,7 +9830,7 @@ async function bcInitMap(){
 
   // ----- Custom layer control (Claims/Caves expand to per-tier toggles) -----
   bcLoadLayers();
-  bcLayerReg = { roads:bcRoadsLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer };
+  bcLayerReg = { roads:bcRoadsLayer, regions:bcRegionLayer, markets:bcMarketLayer, dungeons:dungeons.layer, temples:temples.layer, ruined:ruined.layer, wonders:wonders.layer, ...bcLm.layers };
   bcRegisterTierLayers();
   const lc = L.control({ position:'topright' });
   lc.onAdd = function(){
@@ -9846,6 +9865,7 @@ async function bcInitMap(){
   bcMap.on('mousemove', bcPlayersHover);   // …and hovering one: pointer cursor, plus the name when labels are off
   bcMap.on('mouseout', bcPlayersHoverOff);
   await bcLoadIndexes();
+  bcLmSync();   // landmark layers left on last time (their states need the index just loaded)
   bcLoadHidden();
   bcLoadMapRegion();
   bcInitRegionSelect();
@@ -9950,25 +9970,27 @@ function bcMakeClaim(f, ll, p, sig){
   m.feature = f; // lets leaflet-search read properties.name
   bcClaimHoverTip(m, p.name || 'Claim');
   const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ') || '—';
-  m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
-  // Waystone claims also get a distinct marker on the independent Waystones layer.
-  let wm = null;
-  if (p.has_waystone){
-    wm = L.marker(ll, { icon: bcClaimIcon(p.tier), alt: (p.name||'Claim')+' · Waystone', zIndexOffset: 600 });
-    bcClaimHoverTip(wm, (p.name||'Claim')+' · Waystone');
-    wm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--teal-light)">· Waystone</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
-  }
-  return { m, wm, sig };
+  m.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">${bcNE(ll)}</span><br>${escHtml(tags)}<br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+  // Waystone and market claims also get a distinct marker on their own filter layer (Waystones, Markets).
+  const filterMark = (what, color) => {
+    const fm = L.marker(ll, { icon: bcClaimIcon(p.tier), alt: (p.name||'Claim')+' · '+what, zIndexOffset: 600 });
+    bcClaimHoverTip(fm, (p.name||'Claim')+' · '+what);
+    fm.bindPopup(`<b>${escHtml(p.name||'Claim')}</b> <span style="color:${color}">· ${what}</span> <span style="color:var(--text3)">T${p.tier??'?'}</span><br><span style="color:var(--text3)">${bcNE(ll)}</span><br><a href="https://bitjita.com/claims/${escHtml(String(p.entityId||''))}" target="_blank">View on bitjita ↗</a>`);
+    return fm;
+  };
+  return { m, wm: p.has_waystone ? filterMark('Waystone', 'var(--teal-light)') : null, mm: p.has_market ? filterMark('Market', 'var(--amber-light)') : null, sig };
 }
 function bcDropClaim(e){
   Object.values(bcClaimTierLayers).forEach(g => g.removeLayer(e.m));
   if (e.wm && bcWaystoneLayer) bcWaystoneLayer.removeLayer(e.wm);
+  if (e.mm && bcMarketLayer) bcMarketLayer.removeLayer(e.mm);
 }
 function bcBuildClaims(feats){
   if (!bcWaystoneLayer) bcWaystoneLayer = L.layerGroup();
+  if (!bcMarketLayer) bcMarketLayer = L.layerGroup();
   if (!bcClaimSearchLayer) bcClaimSearchLayer = L.featureGroup();
   const next = new Map(), cull = [], count = {};
-  let waystones = 0;
+  let waystones = 0, markets = 0;
   feats.forEach(f => {
     const ll = bcFeatLatLng(f); if (!ll) return;
     const p = f.properties || {};
@@ -9983,11 +10005,12 @@ function bcBuildClaims(feats){
     count[tier] = (count[tier] || 0) + 1;
     cull.push({ m: e.m, ll, group: bcClaimTierLayers[tier] });   // added to its group on demand by bcCullMarkers
     if (e.wm){ waystones++; cull.push({ m: e.wm, ll, group: bcWaystoneLayer }); }
+    if (e.mm){ markets++; cull.push({ m: e.mm, ll, group: bcMarketLayer }); }
   });
   bcClaimMarks.forEach((e, k) => { if (!next.has(k)) bcDropClaim(e); });   // gone from the list
   bcClaimMarks = next;
   bcClaimSearchLayer.clearLayers(); next.forEach(e => bcClaimSearchLayer.addLayer(e.m));   // leaflet-search re-reads this on every keystroke
-  bcClaimTierCount = count; bcClaimTotal = next.size; bcWaystoneCount = waystones; bcCullClaims = cull;
+  bcClaimTierCount = count; bcClaimTotal = next.size; bcWaystoneCount = waystones; bcMarketCount = markets; bcCullClaims = cull;
 }
 function bcBuildCaves(feats){
   const next = new Map(), cull = [], count = {};
@@ -10000,7 +10023,7 @@ function bcBuildCaves(feats){
     let m = bcCaveMarks.get(key);
     if (!m){
       m = L.marker(ll, { icon: bcOreIcon(tier), title: p.name || 'Cave' });
-      m.bindPopup(`<b>${escHtml(p.name||'Cave')}</b><br><span style="color:var(--text3)">Cave T${p.tier??'?'} · N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}</span>`);
+      m.bindPopup(`<b>${escHtml(p.name||'Cave')}</b><br><span style="color:var(--text3)">Cave T${p.tier??'?'} · ${bcNE(ll)}</span>`);
     }
     next.set(key, m);
     if (!bcCaveTierLayers[tier]) bcCaveTierLayers[tier] = L.layerGroup();
@@ -10039,13 +10062,17 @@ function bcLayerControlHtml(){
   // the control's own div, so it survives bcRefreshLayerControl's re-renders.
   return `<div class="bc-lc-head" onclick="this.parentNode.classList.toggle('open')"><i class="ti ti-stack-2"></i> Layers<i class="ti ti-chevron-down bc-lc-chev"></i></div>` +
     flat('roads','Roads','<span class="bc-lsw" style="background:none;border-top:2px solid #d9b88a;height:0;width:13px;border-radius:0"></span>') +
+    flat('regions','Region borders','<span class="bc-lsw" style="background:none;border:1.5px solid var(--text2);border-radius:2px"></span>') +
     group('claim','Claims',bcClaimTotal,bcClaimTierLayers,bcClaimTierCount,'#9aa3ad',
-      `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#9aa3ad')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>`) +
+      `<label class="bc-lrow bc-lsub" style="margin-top:3px;border-top:1px solid var(--border);padding-top:5px"><input type="checkbox" ${bcWaystonesOn?'checked':''} onchange="bcToggleWaystones(this.checked)">${dot('#9aa3ad')}<span>Waystones</span> <span class="bc-lcount">(${bcWaystoneCount})</span></label>` +
+      `<label class="bc-lrow bc-lsub"><input type="checkbox" data-lk="markets" onchange="bcToggleLayer('markets',this.checked)">${dot('#9aa3ad')}<span>Markets</span> <span class="bc-lcount">(${bcMarketCount})</span></label>`) +
     group('cave','Caves',bcCaveTotal,bcCaveTierLayers,bcCaveTierCount,'#b07cc6') +
     flat('dungeons',`Dungeons (${bcPoiCounts.dungeons || 0})`,dot('#e0556e')) +
     flat('temples',`Temples (${bcPoiCounts.temples || 0})`,dot('#ffd580')) +
     flat('ruined',`Ruined Cities (${bcPoiCounts.ruined || 0})`,dot('#c8c8c8')) +
-    flat('wonders',`Wonders (${bcPoiCounts.wonders || 0})`,dot('#63c45a'));
+    flat('wonders',`Wonders (${bcPoiCounts.wonders || 0})`,dot('#63c45a')) +
+    Object.keys(BC_LM).map(k => flat(k, BC_LM[k].label + (bcLm.at ? ` (${bcLm.counts[k] || 0})` : ''), dot(BC_LM[k].color))).join('') +   // counts once loaded
+    flat('ancient', 'Ancient Ruins' + (bcLm.ruins ? ` (${bcLm.ruins.toLocaleString()})` : ''), dot(BC_RUIN_COLOR));
 }
 // Redraw the layer control's counts after a refresh, keeping which groups are expanded and every toggle as it was.
 // Looked up inside the control itself: while the map is popped out, it lives in the pop-out's document.
@@ -10065,6 +10092,7 @@ async function bcRefreshLists(){
   bcRegisterTierLayers();
   bcRefreshLayerControl();
   bcCullMarkers();
+  bcLmSync(true);   // quarry rocks, bush and deposit states: re-read with the lists while one of those layers is on
 }
 // Once a minute: while the map is showing (its tab, or the pop-out), re-read the lists when a new 15-minute slot
 // has started since the last read, and re-check the tile stamps every 10 minutes. Coming back to the map after a
@@ -10085,6 +10113,8 @@ setInterval(bcMapFreshTick, 60000);
 // Waystones: a filter layer (under Claims) showing only claims that have a waystone — find teleport points
 // without enabling every claim tier. Independent toggle (persisted), so you can turn all tiers off and keep it.
 let bcWaystoneLayer = null, bcWaystoneCount = 0;
+// Markets: the same kind of filter for claims with a marketplace, toggled like any other layer (bcLayerReg.markets).
+let bcMarketLayer = null, bcMarketCount = 0;
 let bcWaystonesOn = (() => { try { return localStorage.getItem('bc_map_waystones') === '1'; } catch(e){ return false; } })();
 function bcToggleWaystones(on){
   bcWaystonesOn = !!on; safeSetItem('bc_map_waystones', bcWaystonesOn ? '1' : '0');
@@ -10105,6 +10135,7 @@ function bcToggleLayer(k, on){
   else { bcLayersOn.delete(k); bcMap.removeLayer(l); }
   bcSaveLayers();
   bcCullMarkers();   // populate a freshly-shown claim/cave tier with just its in-view markers
+  if (on) bcLmSync();   // a landmark layer loads the first time it's switched on
 }
 function bcToggleLayerGroup(prefix, on){
   Object.keys(bcLayerReg).filter(k => k.startsWith(prefix)).forEach(k => {
@@ -10145,6 +10176,7 @@ function bcCullMarkers(){
   };
   sync(bcCullClaims);
   sync(bcCullCaves);
+  sync(bcCullRuins);
 }
 function bcExpandLayerGroup(gid){
   const b = document.getElementById('bc-lg-'+gid), c = document.getElementById('bc-lgchev-'+gid);
@@ -10154,6 +10186,188 @@ function bcExpandLayerGroup(gid){
 function bcSyncMaster(prefix){
   const any = Object.keys(bcLayerReg).filter(k => k.startsWith(prefix+'T')).some(k => { const cb = document.querySelector(`input[data-lk="${k}"]`); return cb && cb.checked; });
   const m = document.getElementById('bc-lgm-'+prefix); if (m) m.checked = any;
+}
+
+// Region borders: the outline of the regions (grids.geojson's heavy lines — its fine chunk grid is skipped) and each
+// mainland region's name at its centre. Loaded once: regions don't move.
+let bcRegionLayer = null;
+function bcBuildRegions(feats){
+  const layer = L.layerGroup();
+  feats.forEach(f => {
+    const g = f.geometry || {}, p = f.properties || {};
+    if (g.type === 'MultiLineString' && (p.weight || 0) >= 1)
+      L.polyline(g.coordinates.map(line => line.map(c => [c[1], c[0]])), { color: '#0a0c10', weight: 2, opacity: .7, interactive: false }).addTo(layer);
+    else if (g.type === 'Point' && p.popupText)
+      L.marker(bcFeatLatLng(f), { icon: L.divIcon({ className: 'bc-region-name', iconSize: [0, 0], html: `<div>${escHtml(p.popupText)}</div>` }), interactive: false, keyboard: false }).addTo(layer);
+  });
+  return layer;
+}
+
+// ===== Landmarks the map lists leave out: quarries, giant berry bushes, hexite deposits, sunken ruins, ancient ruins =====
+// prism builds its lists (dungeons, temples, caves…) from the game's world claims, sorted by the building that anchors
+// each claim, and drops every claim type its exporter doesn't name — so these reached no map at all. prism's own relay
+// carries every one of them in claim_meta (position + anchoring building, indexed by building): one scratch socket reads
+// them world-wide with the resources standing on them, ~60 KB, re-read with the 15-minute lists while one of these layers
+// is on. That resource is the landmark's state: a giant bush and a hexite deposit sit exactly on their claim, a quarry's
+// rocks within ~18 units of it — and a T1 quarry holds T1–T3 rocks, a T4 one T4–T6, a T7 one T7–T9 (measured 2026-10-27).
+// The 4,281 ancient ruins (~470 KB) load only with their layer and are remembered for three days; they don't move.
+const BC_LM = {
+  quarries: { label:'Quarries', color:'#c9b38f', icon:'GeneratedIcons/Other/QuarryRock',
+              b:{ 1008512330:[1,'Quarry'], 1632191797:[4,'Quarry'], 1671738347:[7,'Quarry'] } },
+  berries:  { label:'Giant Berry Bushes', color:'#f0609a', icon:'GeneratedIcons/Other/BushStrawberry',
+              b:{ 967548084:[1,'Giant Strawberry Bush'], 285371337:[2,'Giant Savory Berry Bush'], 912126889:[3,'Giant Zesty Berry Bush'] } },
+  hexite:   { label:'Hexite Deposits', color:'#5eead4', glyph:'ti-hexagon',   // its game icon (ArgentOre) isn't on bitjita
+              b:{ 421789207:[0,'Hexite Deposit'] } },
+  sunken:   { label:'Sunken Ruins', color:'#60a5fa', glyph:'ti-building-arch',
+              b:{ 1320058140:[0,'North Western Sunken Ruin'], 1907229466:[0,'North Eastern Sunken Ruin'], 148750481:[0,'South Western Sunken Ruin'], 988692715:[0,'South Eastern Sunken Ruin'] } },
+};
+const BC_RUINS = { 1441436391:'Ancient Crumbled Pillar', 1842388176:'Ancient Crumbled Platform' }, BC_RUIN_COLOR = '#d6b56d';
+const BC_RUINS_KEY = 'bc_map_ruins_v1', BC_RUINS_TTL = 3*24*60*60*1000;
+const bcLm = { layers:{}, marks:new Map(), counts:{}, at:0, busy:false, ruins:0, ruinsBusy:false };
+let bcCullRuins = [];   // {m, ll, group} like claims and caves: only the in-view dots are on the map
+// One snapshot from the prism relay over a scratch socket: subscribe, take the initial rows, hang up. Raw v1 JSON —
+// the vendored SDK (bcRelayLib) only knows the five tables the tracker uses.
+function bcPrismFetchOnce(sqls, timeoutMs = 15000){
+  return new Promise((resolve, reject) => {
+    let ws;
+    try { ws = new WebSocket(`${BC_RELAY_URI.replace(/^http/, 'ws')}/v1/database/${BC_RELAY_MODULE}/subscribe`, ['v1.json.spacetimedb']); }
+    catch(e){ return reject(e); }
+    const t = setTimeout(() => { try { ws.close(); } catch(e){} reject(new Error('prism fetch timeout')); }, timeoutMs);
+    ws.onerror = () => { try { ws.close(); } catch(e){} };
+    ws.onclose = () => { clearTimeout(t); reject(new Error('prism fetch closed')); };   // no-op once settled
+    ws.onmessage = ev => {
+      if (typeof ev.data !== 'string') return;
+      let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+      if (m.IdentityToken){ try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: sqls } })); } catch(e){} return; }
+      if (m.SubscriptionError){ try { ws.close(); } catch(e){} return; }   // onclose rejects
+      if (!m.InitialSubscription) return;
+      clearTimeout(t);
+      const byTable = {};
+      ((m.InitialSubscription.database_update || {}).tables || []).forEach(tb => {
+        const list = byTable[tb.table_name] || (byTable[tb.table_name] = []);
+        (tb.updates || []).forEach(u => (u.inserts || []).forEach(raw => { try { list.push(typeof raw === 'string' ? JSON.parse(raw) : raw); } catch(e){} }));
+      });
+      ws.onclose = null; try { ws.close(); } catch(e){}
+      resolve(byTable);
+    };
+  });
+}
+// Load what the switched-on landmark layers still need. `refresh` (the 15-minute lists) re-reads the small set.
+function bcLmSync(refresh){
+  if (!bcMap) return;
+  if (Object.keys(BC_LM).some(k => bcLayersOn.has(k)) && (refresh || !bcLm.at)) bcLmLoad();
+  if (bcLayersOn.has('ancient') && !bcLm.ruins) bcLmLoadRuins();
+}
+// The resources that give a landmark its state, from the track list's index: a giant bush's three states, a hexite
+// deposit's two, and every quarry rock (any variant — Glittering, Hardened, Cracked… — is a rock still standing).
+function bcLmStateTypes(){
+  const t = {};
+  for (const id in bcResourceIndex){
+    const r = bcResourceIndex[id], n = r.name || '';
+    if (r.tag === 'Bountiful Berry Bush') t[id] = { kind:'berries', state: /^Withering/.test(n) ? 'withering' : /^Citric/.test(n) ? 'citric' : 'bountiful' };
+    else if (/^(Depleted )?Hexite Deposit$/.test(n)) t[id] = { kind:'hexite', state: /^Depleted/.test(n) ? 'depleted' : 'ready' };
+    else if (/ Quarry Rock$/.test(n)) t[id] = { kind:'quarries', tier: r.tier };
+  }
+  return t;
+}
+async function bcLmLoad(){
+  if (bcLm.busy) return;
+  bcLm.busy = true;
+  try {
+    const types = bcLmStateTypes();
+    const sqls = Object.values(BC_LM).flatMap(d => Object.keys(d.b)).map(b => `SELECT * FROM claim_meta WHERE building_desc_id = ${b}`)
+      .concat(Object.keys(types).map(id => `SELECT * FROM resource_location WHERE resource_id = ${id}`));
+    const got = await bcPrismFetchOnce(sqls);
+    if (!(got.claim_meta || []).length) throw new Error('no landmarks');   // keep what's drawn
+    bcLm.at = Date.now();   // before the build: its layer-control redraw shows the counts once this is set
+    bcLmBuild(got.claim_meta, got.resource_location || [], types);
+  } catch(e){ /* keep what's drawn: the next 15-minute slot, or switching a layer on, tries again */ }
+  finally { bcLm.busy = false; }
+}
+function bcLmBuild(metas, res, types){
+  const kindOf = {}; for (const k in BC_LM) for (const b in BC_LM[k].b) kindOf[b] = k;
+  const lms = metas.filter(c => kindOf[c.building_desc_id]).map(c => {
+    const kind = kindOf[c.building_desc_id], [tier, name] = BC_LM[kind].b[c.building_desc_id];
+    return { kind, tier, name, x: c.x, z: c.z, rocks: null, state: null };
+  });
+  const onSpot = new Map(lms.map(l => [l.x + ',' + l.z, l])), quarries = lms.filter(l => l.kind === 'quarries');
+  if (Object.values(types).some(t => t.kind === 'quarries')) quarries.forEach(q => q.rocks = {});   // no index, no rock count
+  res.forEach(r => {
+    const t = types[r.resource_id]; if (!t) return;
+    if (t.kind === 'quarries'){
+      const q = quarries.find(q => Math.abs(q.x - r.x) <= 30 && Math.abs(q.z - r.z) <= 30);
+      if (q && q.rocks) q.rocks[t.tier] = (q.rocks[t.tier] || 0) + 1;
+    } else {
+      const l = onSpot.get(r.x + ',' + r.z);
+      if (l && l.kind === t.kind) l.state = t.state;
+    }
+  });
+  // In place, like the claims: a landmark still there keeps its marker (an open popup stays open, and updates).
+  const next = new Map(), counts = {};
+  lms.forEach(l => {
+    const key = l.kind + '@' + l.x + ',' + l.z, ll = L.latLng(l.z, l.x), html = bcLmIconHtml(l);
+    let e = bcLm.marks.get(key);
+    if (!e){ e = { m: L.marker(ll, { icon: bcLmIcon(html), title: l.kind === 'quarries' ? `Quarry · T${l.tier}–T${l.tier + 2} rocks` : l.name }).bindPopup(''), html, kind: l.kind }; bcLm.layers[l.kind].addLayer(e.m); }
+    else if (e.html !== html){ e.m.setIcon(bcLmIcon(html)); e.html = html; }
+    e.m.setPopupContent(bcLmPopup(l, ll));
+    next.set(key, e); counts[l.kind] = (counts[l.kind] || 0) + 1;
+  });
+  bcLm.marks.forEach((e, k) => { if (!next.has(k)) bcLm.layers[e.kind].removeLayer(e.m); });
+  bcLm.marks = next; bcLm.counts = counts;
+  bcRefreshLayerControl();
+}
+const bcLmIcon = html => L.divIcon({ className: 'bc-lm-ic', html, iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -14] });
+function bcLmIconHtml(l){
+  const d = BC_LM[l.kind];
+  const badge = l.kind === 'quarries' ? `T${l.tier}–${l.tier + 2}` : l.tier ? `T${l.tier}` : '';
+  const dim = l.state === 'withering' || l.state === 'depleted' || (l.rocks && !Object.keys(l.rocks).length);   // nothing to take right now
+  return `<div class="bc-lm${dim ? ' dim' : ''}" style="--c:${d.color}">${d.icon ? `<img src="${gameIconUrl(d.icon)}" alt="">` : `<i class="ti ${d.glyph}"></i>`}${badge ? `<b>${badge}</b>` : ''}</div>`;
+}
+function bcLmPopup(l, ll){
+  const ok = s => `<span style="color:var(--teal-light)">${s}</span>`, wait = s => `<span style="color:var(--amber-light)">${s}</span>`;
+  let h = `<b>${escHtml(l.name)}</b>`;
+  if (l.kind === 'quarries'){
+    h += ` <span style="color:var(--text3)">T${l.tier}–T${l.tier + 2} rocks</span>`;
+    if (l.rocks){
+      const n = Object.values(l.rocks).reduce((s, v) => s + v, 0);
+      h += '<br>' + (n ? ok(`${n} rock${n === 1 ? '' : 's'} left`) + ': ' + Object.keys(l.rocks).sort((a, b) => a - b).map(t => `T${t} ${l.rocks[t]}`).join(' · ') : wait('Mined out'));
+    }
+  } else if (l.kind === 'berries'){
+    h += ` <span style="color:var(--text3)">T${l.tier}</span>`;
+    if (l.state === 'withering') h += '<br>' + wait('Withering') + ': hydrate it with Nutrient Rich Water from the Gentle Springs beside it';
+    else if (l.state === 'citric') h += '<br>' + ok('Citric') + ': ready to gather, with citric berries';
+    else if (l.state === 'bountiful') h += '<br>' + ok('Bountiful') + ': ready to gather';
+  } else if (l.kind === 'hexite' && l.state){
+    h += '<br>' + (l.state === 'ready' ? ok('Ready to extract') : wait('Depleted'));
+  }
+  return h + `<br><span style="color:var(--text3)">${bcNE(ll)}</span>`;
+}
+// Ancient ruins: small dots (the map draws them on its canvas), kept to the view like the claims and caves.
+async function bcLmLoadRuins(){
+  if (bcLm.ruinsBusy) return;
+  bcLm.ruinsBusy = true;
+  try {
+    let pts = null;
+    try { const c = JSON.parse(localStorage.getItem(BC_RUINS_KEY) || 'null'); if (c && Date.now() - c.at < BC_RUINS_TTL && Array.isArray(c.p) && c.p.length) pts = c.p; } catch(e){}
+    const kinds = Object.keys(BC_RUINS);
+    if (!pts){
+      const got = await bcPrismFetchOnce(kinds.map(b => `SELECT * FROM claim_meta WHERE building_desc_id = ${b}`), 30000);
+      pts = (got.claim_meta || []).map(c => [c.x, c.z, kinds.indexOf(String(c.building_desc_id))]);
+      if (!pts.length) throw new Error('no ruins');
+      safeSetItem(BC_RUINS_KEY, JSON.stringify({ at: Date.now(), p: pts }));
+    }
+    const layer = bcLm.layers.ancient;
+    layer.clearLayers();
+    bcCullRuins = pts.map(([x, z, k]) => {
+      const ll = L.latLng(z, x);
+      const m = L.circleMarker(ll, { radius: 4, weight: 1, color: '#0a0c10', fillColor: BC_RUIN_COLOR, fillOpacity: .9 });
+      m.bindPopup(`<b>${escHtml(BC_RUINS[kinds[k]] || 'Ancient Ruin')}</b><br><span style="color:var(--text3)">${bcNE(ll)}</span>`);
+      return { m, ll, group: layer };
+    });
+    bcLm.ruins = pts.length;
+    bcRefreshLayerControl(); bcCullMarkers();
+  } catch(e){ /* switching the layer on again tries again */ }
+  finally { bcLm.ruinsBusy = false; }
 }
 
 // ===== Phase 2: live player tracking =====
@@ -10206,7 +10420,7 @@ async function bcFocusClaim(c){   // c = { id, name, x, z, crafts }
   const tags = [p.has_bank?'Bank':null, p.has_market?'Market':null, p.has_waystone?'Waystone':null].filter(Boolean).join(' · ');
   const crafts = c.crafts != null ? ` · ${c.crafts} open craft${c.crafts !== 1 ? 's' : ''}` : '';
   m.bindPopup(`<b>${escHtml(c.name || p.name || 'Claim')}</b> ${p.tier != null ? `<span style="color:var(--text3)">T${p.tier}</span>` : ''}<br>
-    <span style="color:var(--text3)">N ${Math.round(ll.lat)} · E ${Math.round(ll.lng)}${crafts}</span>${tags ? `<br>${escHtml(tags)}` : ''}<br>
+    <span style="color:var(--text3)">${bcNE(ll)}${crafts}</span>${tags ? `<br>${escHtml(tags)}` : ''}<br>
     <a href="https://bitjita.com/claims/${escHtml(id)}" target="_blank">View on bitjita ↗</a>
     <div style="display:flex;gap:.7rem;margin-top:.4rem;font-size:11px">
       <a href="#" onclick="event.preventDefault();switchTab('opencrafts')">← Back to open crafts</a>

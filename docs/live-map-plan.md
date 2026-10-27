@@ -204,6 +204,29 @@ npx esbuild entry.ts --bundle --format=esm --platform=browser --target=es2020 --
 `index.html` loads it via `import(`${API}/mapassets/prism-relay.js`)` (proxy serves `.js` as
 `text/javascript` with `Access-Control-Allow-Origin: *`, so the cross-origin module import works).
 
+### Landmarks the geojson lists leave out (`bcLm*`, 2026-10-27)
+
+prism's geojson lists come from the game's world claims, sorted by the building that anchors each claim
+(`prism-features/src/features.ts`); claim types its switch doesn't name are dropped. Live mainland types it drops:
+**Quarry Building Center** T1/T4/T7 (32; a T1 quarry holds T1–T3 Quarry Rocks within ~18 units, T4 → T4–T6,
+T7 → T7–T9), **Giant Berry Bush Event** T1/T2/T3 (24, one of each per region: Strawberry, Savory, Zesty),
+**Sunken Ruins** (4, one per corner region) and **Ancient Crumbled Pillar / Platform** (3,371 + 910 — bitjita's
+"ruins"). Hexite Deposits *are* in `empireResources.geojson`, but the layer reads them with the rest. Maker's Trees,
+Volcanic Geysers, Hermit Crab Dens and the other Uncharted sites only exist on the dead island regions.
+
+The prism relay has them all in **`claim_meta`** (`entity_id, region_id, x, z, building_desc_id`, btree on
+`building_desc_id`) — not in our vendored bindings, so the map reads it over a raw v1.json scratch socket
+(`bcPrismFetchOnce`): `claim_meta` per building + `resource_location` for the 9 giant-bush states, the 2 hexite states
+and the 50 quarry rocks ≈ 60 KB, re-read with the 15-minute lists while a layer is on. A bush and a deposit sit exactly
+on their claim, so the resource at the claim's spot is its state (Withering = needs Nutrient Rich Water from the three
+Gentle Springs 2–3 tiles away; Bountiful/Citric = gatherable). Ancient ruins (~470 KB) load with their layer and are
+cached in localStorage (`bc_map_ruins_v1`, 67 KB, three days). Region borders come from prism's `grids.geojson`
+(the weight-2 lines + the nine name points; its fine chunk grid is skipped). Markets is a claim filter like Waystones
+(`has_market` in `claims.geojson`, 455 of 1,856).
+
+Popup coordinates (`bcNE`) are the game's: N = round(z/3); E = (x + table[x mod 3][N odd][z − 3N + 1]) / 3 — fitted to
+the names of 8,115 world claims, all matching. The popups printed raw map units (3× the game's) until then.
+
 ## References
 
 - Relay consumer / bindings: https://github.com/BitCraftToolBox/bitcraftmap
