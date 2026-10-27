@@ -524,6 +524,7 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .oc-cust-x:hover{color:var(--red-light,#e06666);background:var(--bg2)}
 /* browse layout */
 .oc-count{font-size:11px;color:var(--text3);margin-bottom:.6rem}
+.oc-warn{color:var(--amber-light)}
 .oc-cols{display:flex;gap:1rem;align-items:flex-start}
 .oc-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:1rem}
 .oc-claim-block .craft-location-card{margin-bottom:0}
@@ -1499,7 +1500,7 @@ function clearMarketCache() {
 
 // Optional, regenerable snapshots that may be evicted to free quota for critical user preferences.
 function _evictOptionalCaches() {
-  ['bc_deals_cache_v1', 'bc_market_cache_v1'].forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
+  ['bc_deals_cache_v1', 'bc_market_cache_v1', 'bcOcPlaces', 'bcOcOwners'].forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
   try { Object.keys(localStorage).filter(k => k.startsWith('bc_mkt_')).forEach(k => localStorage.removeItem(k)); } catch(e){}
 }
 // Persist a critical preference. If the quota is full, evict the big regenerable snapshots and retry
@@ -5315,6 +5316,28 @@ function craftOutKey(o){
   const t = o.item_type ?? o.itemType;
   return (t === 1 || /^cargo$/i.test(t)) ? GAME_CARGO_ID_BASE + +id : id;
 }
+// A recipe's output stacks as a relay craft row carries them ({item_id, quantity, item_type 0/1}), filing each
+// one's item or cargo definition into itemMap. Shared by the Crafts tab and Open Crafts.
+// The game's own crafted_item_stacks[0] wins: the scraped craftingData pre-expands bundle items
+// into their contents (recipe 210018 really crafts "Simple Wispweave Products", not Seeds+Filament),
+// and headlining a different item than bitjita made the card flicker names at the fallback handoff.
+// Each output keeps its type and is read from its own table. Looking every id up as an item first named 23
+// package crafts after whichever item shares the id: 77x Peerless Raw Pelt Package said Sentinel's Stone Brazier.
+function relayCraftOutputs(recipeId, itemMap){
+  const defs = gameItemDefs || { items:{}, cargos:{} };
+  const t = defs.recipeOuts && defs.recipeOuts[recipeId];
+  const rec = ((craftingData && craftingData.recipesById) || {})[recipeId];
+  // craftingData numbers cargo from GAME_CARGO_ID_BASE up, so it can tell for a recipeOuts payload from before the
+  // cargo flag (t[3]) — the browser keeps /itemdefs for a day, and an old proxy serves the new page
+  const cdCargo = id => !!(rec && (rec.outputs || []).some(o => o.itemId === GAME_CARGO_ID_BASE + id));
+  const outs = t ? [{ id: t[0], quantity: t[1], cargo: t.length > 3 ? !!t[3] : cdCargo(t[0]) }]
+    : ((rec && rec.outputs) || []).map(o => o.itemId >= GAME_CARGO_ID_BASE ? { id: o.itemId - GAME_CARGO_ID_BASE, quantity: o.quantity, cargo: true } : { id: o.itemId, quantity: o.quantity, cargo: false });
+  return outs.map(o => {
+    const out = { item_id: o.id, quantity: o.quantity, item_type: o.cargo ? 1 : 0 };
+    const m = (o.cargo ? defs.cargos : defs.items)[o.id]; if (m) itemMap[craftOutKey(out)] = m;
+    return out;
+  });
+}
 // Crafts for MANY players — assembled from the LIVE CACHE, no network. The held subscriptions keep the
 // cache current, so a "fetch" is a local read plus (rarely) a place-name resolve for buildings we've
 // never seen. Returns { playerId: {active, done, passive, itemMap} } — IDENTICAL to the old
@@ -5353,25 +5376,7 @@ async function fetchCraftsRelayMulti(ids){
       regionName: liveRegionName(rg)   // bitjita rows carry this pre-joined; without it the "Zephra" subtitle vanished at handoff
     };
   };
-  const outputsOf = (recipeId, itemMap) => {
-    // The game's own crafted_item_stacks[0] wins: the scraped craftingData pre-expands bundle items
-    // into their contents (recipe 210018 really crafts "Simple Wispweave Products", not Seeds+Filament),
-    // and headlining a different item than bitjita made the card flicker names at the fallback handoff.
-    // Each output keeps its type and is read from its own table. Looking every id up as an item first named 23
-    // package crafts after whichever item shares the id: 77x Peerless Raw Pelt Package said Sentinel's Stone Brazier.
-    const t = defs.recipeOuts && defs.recipeOuts[recipeId];
-    const rec = recipes[recipeId];
-    // craftingData numbers cargo from GAME_CARGO_ID_BASE up, so it can tell for a recipeOuts payload from before the
-    // cargo flag (t[3]) — the browser keeps /itemdefs for a day, and an old proxy serves the new page
-    const cdCargo = id => !!(rec && (rec.outputs || []).some(o => o.itemId === GAME_CARGO_ID_BASE + id));
-    const outs = t ? [{ id: t[0], quantity: t[1], cargo: t.length > 3 ? !!t[3] : cdCargo(t[0]) }]
-      : ((rec && rec.outputs) || []).map(o => o.itemId >= GAME_CARGO_ID_BASE ? { id: o.itemId - GAME_CARGO_ID_BASE, quantity: o.quantity, cargo: true } : { id: o.itemId, quantity: o.quantity, cargo: false });
-    return outs.map(o => {
-      const out = { item_id: o.id, quantity: o.quantity, item_type: o.cargo ? 1 : 0 };
-      const m = (o.cargo ? defs.cargos : defs.items)[o.id]; if (m) itemMap[craftOutKey(out)] = m;
-      return out;
-    });
-  };
+  const outputsOf = relayCraftOutputs;
   prog.forEach(r => {
     const bucket = out[String(r.owner_entity_id)]; if (!bucket) return;
     const rec = recipes[r.recipe_id] || {};
@@ -6748,10 +6753,11 @@ function renderPassiveCraftsHtml(passive, itemMap) {
 }
 
 // ── OPEN CRAFTS (global craft browser) ──
-// Browses every active public craft (bitjita /api/crafts — ~2k crafts across ~650 claims), grouped by
-// claim then profession. Option A: fetch the full set ONCE, then filter entirely client-side (region /
-// tier / skill multi-select + claim scope). Each craft's profession is levelRequirements[0].skill_id.
-let openCraftAll = { crafts:[], itemMap:{}, loading:false, error:null, ts:0 };  // cached global set
+// Browses every unfinished public craft (~1.2k crafts across ~480 claims, read from the relay — see ocRelayLoad),
+// grouped by claim then profession. Option A: fetch the full set ONCE, then filter entirely client-side (region /
+// tier / skill multi-select + claim scope). Each craft's profession is levelRequirements[0].skill_id: the relay
+// path builds its rows in bitjita's shape, so the bitjita fallback renders through the same code.
+let openCraftAll = { crafts:[], itemMap:{}, loading:false, error:null, ts:0 };  // cached global set; + source 'relay'|'bitjita', missing regions, asOf
 let openCraftClaims = [];          // pinned claims [{entityId,name,regionName,regionId}] (persisted)
 let ocCustomClaims = [];           // custom claim list [{entityId,name,regionId,regionName}] (persisted) — built by searching
 let ocLastClaimResults = [];       // last claim-search results, so adding one can re-render the list without a refetch
@@ -6814,12 +6820,10 @@ function renderOpenCraftsTab(){
   if (!window.__ocResizeBound){ window.__ocResizeBound = true; let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (currentTab==='opencrafts') ocRenderBrowse(); }, 150); }); }  // re-balance the masonry columns on resize
   ocRenderFilterBar();
   ocRenderBrowse();
-  ocFetchGlobal();
-  // region names for the Region filter (reuse the app's regions list)
-  if (!Object.keys(ocRegions).length) apiFetch('/api/regions').then(d => { (Array.isArray(d)?d:(d.regions||[])).forEach(r => { const id = r.regionId||r.id||r.entityId; if (id!=null) ocRegions[id] = r.name||r.regionName||('R'+id); }); ocRenderFilterBar(); }).catch(()=>{});
+  ocFetchGlobal();   // region names ride the same load (world_region_name_state)
   if (openCraftLive) startOpenCraftLive();
 }
-function ocRegionName(id){ const n = ocRegions[id]; return n ? `${n} (R${id})` : ('R' + id); }  // "Southern Islands (R3)" like the rest of the app
+function ocRegionName(id){ const n = ocRegions[id] || liveRegionName(id) || claimRegionNames[id]; return n ? `${n} (R${id})` : ('R' + id); }  // "Southern Islands (R3)" like the rest of the app
 function ocFilterLabel(kind){
   if (kind==='region') return ocFilterRegions.size ? [...ocFilterRegions].map(ocRegionName).join(', ') : 'All Regions';
   if (kind==='tier')   return ocFilterTiers.size ? [...ocFilterTiers].sort((a,b)=>a-b).map(t=>'T'+t).join(', ') : 'All Tiers';
@@ -6890,7 +6894,7 @@ function ocRenderBrowse(){
   const cards = `<div class="oc-cols">${cols.map(col=>`<div class="oc-col">${col.map(g=>`<div id="oc-claim-${g.id}" class="oc-claim-block">${ocClaimCardHtml(g)}</div>`).join('')}</div>`).join('')}</div>`;
   const more = (!showAll && groups.length > ocShowCount)
     ? `<div class="oc-more"><button class="btn ctrl-btn" onclick="ocShowMore()">Show ${Math.min(OC_PAGE, groups.length-ocShowCount)} more · ${groups.length-ocShowCount} claims hidden</button></div>` : '';
-  const count = `<div class="oc-count">${groups.length} claim${groups.length!==1?'s':''}${openCraftAll.loading?' · refreshing…':''}</div>`;
+  const count = `<div class="oc-count">${groups.length} claim${groups.length!==1?'s':''}${ocSourceNote()}${openCraftAll.loading?' · refreshing…':''}</div>`;
   host.innerHTML = count + cards + more;
 }
 function ocShowMore(){ ocShowCount += OC_PAGE; ocRenderBrowse(); }
@@ -6900,23 +6904,169 @@ function ocShowOnMap(id){
   const g = ocGroupsById[String(id)]; if (!g) return;
   bcFocusClaim({ id: g.id, name: g.name, x: g.x, z: g.z, crafts: (g.crafts||[]).length });
 }
-// Fetch the whole public craft board once (cached). All filtering is client-side (Option A).
+// Fetch the whole public craft board once (cached ~20 s). All filtering is client-side (Option A). The relay is the
+// source; bitjita's /api/crafts steps in only when no region of the relay answers at all.
 async function ocFetchGlobal(force){
   if (openCraftAll.loading) return;
   if (!force && openCraftAll.crafts.length && Date.now() - openCraftAll.ts < 20000){ ocRenderBrowse(); return; }
   openCraftAll = { ...openCraftAll, loading:true, error:null };
   ocRenderBrowse();
   try {
-    await loadCraftingData().catch(()=>{});   // skill names for the profession groups
-    const d = await apiFetch('/api/crafts');
-    const itemMap = {};
-    (d.items||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
-    (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[GAME_CARGO_ID_BASE + +it.id] = it; });   // own key (craftOutKey): item and cargo ids overlap
-    const crafts = (d.craftResults || []).filter(c => !c.completed);
-    openCraftAll = { crafts, itemMap, loading:false, error:null, ts:Date.now() };
+    await loadCraftingData().catch(()=>{});   // skill names for the profession groups; actions per craft on the relay path
+    let d;
+    try { d = await ocRelayLoad(); }
+    catch(e){ console.warn('[opencrafts] relay unavailable, using bitjita:', e && e.message); d = await ocBitjitaLoad(); }
+    openCraftAll = { ...d, loading:false, error:null, ts:Date.now() };
   } catch(e){ openCraftAll = { ...openCraftAll, loading:false, error: e.message || 'Failed to load crafts' }; }
   ocRenderBrowse();
   ocRenderFilterBar();
+  if (ocOpenDrop === 'claim'){ const sc = document.getElementById('oc-claim-scopes'); if (sc) sc.innerHTML = ocClaimScopesHtml(); }   // My Claims rode the load
+}
+async function ocBitjitaLoad(){
+  const d = await apiFetch('/api/crafts');
+  const itemMap = {};
+  (d.items||[]).forEach(it => { if (it && it.id) itemMap[it.id] = it; });
+  (d.cargos||[]).forEach(it => { if (it && it.id) itemMap[GAME_CARGO_ID_BASE + +it.id] = it; });   // own key (craftOutKey): item and cargo ids overlap
+  if (ocScope === 'my') ocLoadMyClaims(true);
+  if (!Object.keys(ocRegions).length) apiFetch('/api/regions').then(r => { (Array.isArray(r)?r:(r.regions||[])).forEach(x => { const id = x.regionId||x.id||x.entityId; if (id!=null) ocRegions[id] = x.name||x.regionName||('R'+id); }); ocRenderFilterBar(); }).catch(()=>{});
+  return { crafts: (d.craftResults || []).filter(c => !c.completed), itemMap, source:'bitjita', missing:[], asOf:Date.now() };
+}
+// ── Relay feed ──
+// The board comes straight from each region's mirror on the bitcraftsync relay. bitjita's /api/crafts refreshed
+// region by region: watched 2026-10-26, several regions ran minutes behind and r8 ~45 min.
+// One snapshot per load over scratch sockets (relayFetchOnce), not a named set held on the live sockets: dropping a
+// held set costs a second full copy (UnsubscribeMultiApplied carries every row again, measured), and holding it
+// streams ~120 KB/s of progress ticks world-wide, against ~1.9 MB per snapshot. Live mode re-snapshots every 30 s.
+//   round 1, per region: every public craft's progress row (a semijoin on public_progressive_action_state — ~4,700 of
+//            the ~5,900 are finished-but-uncollected and dropped here, as bitjita drops them), the region's display
+//            name, and the tracked players' claim memberships (My Claims).
+//   round 2, only for stations and claims not yet known: station → claim → name + map position. Remembered in
+//            localStorage (OC_PLACES_TTL), so a warm load is round 1 alone.
+// Owner names are fetched per card instead (ocOwnerName): a mirror only knows the players standing in its region.
+const OC_CRAFTS_SQL = 'SELECT progressive_action_state.* FROM progressive_action_state JOIN public_progressive_action_state ON progressive_action_state.entity_id = public_progressive_action_state.entity_id';
+const OC_PLACES_KEY = 'bcOcPlaces', OC_PLACES_TTL = 3*24*60*60*1000;   // age of the whole map: bounds how long a renamed claim keeps its old name
+// Scratch sockets at once. The live layer holds 13 — or is about to: booting straight onto this tab dials both at the
+// same moment, so counting the open ones isn't safe — and past ~22 a socket hangs in CONNECTING (§8.3).
+const OC_SCRATCH_MAX = 6;
+let ocPlaces = null;           // { born, b: {stationId: [claimId, buildingDescId]}, c: {claimId: [name, x, z]} }
+let ocRelayRegions = {};       // regionId -> { rows: unfinished progress rows, at } — each region's last good snapshot
+let ocMemberClaims = [];       // claim ids the tracked players belong to (round 1)
+function ocPlacesLoad(){
+  if (ocPlaces) return ocPlaces;
+  try { const d = JSON.parse(localStorage.getItem(OC_PLACES_KEY) || 'null'); if (d && d.b && d.c && Date.now() - d.born < OC_PLACES_TTL) return ocPlaces = d; } catch(e){}
+  return ocPlaces = { born: Date.now(), b: {}, c: {} };
+}
+// Actions per craft, read as the Crafts tab reads them: craftingData first, then /itemdefs' recipeOuts.
+function ocActionsPerItem(recipeId){
+  const rec = ((craftingData && craftingData.recipesById) || {})[recipeId], ro = gameItemDefs && gameItemDefs.recipeOuts && gameItemDefs.recipeOuts[recipeId];
+  return (rec && rec.actionsRequired) || (ro && ro[2]) || 0;
+}
+// claim_local_state.location is an Option on the wire: [0, {x, z, dimension}] when the claim has one.
+function ocLocOf(v){ const o = Array.isArray(v) ? (v[0] === 0 ? v[1] : null) : (v && v.some) || null; return o && o.x != null ? [+o.x, +o.z] : null; }
+// fn over every job, OC_SCRATCH_MAX at a time. One result per job, an Error where it failed — one silent mirror never
+// sinks the rest.
+async function ocRelayEach(jobs, fn){
+  const out = new Array(jobs.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(OC_SCRATCH_MAX, jobs.length) }, async () => {
+    while (next < jobs.length){ const i = next++; try { out[i] = await fn(jobs[i]); } catch(e){ out[i] = e instanceof Error ? e : new Error(String(e)); } }
+  }));
+  return out;
+}
+async function ocRelayLoad(){
+  await loadGameItemDefs();   // item names, tiers and recipe headlines — nothing to draw without them (throws → bitjita)
+  const regions = BC_REGIONS.slice();
+  const sqls = [OC_CRAFTS_SQL, 'SELECT * FROM world_region_name_state',
+    ...trackedPlayers.map(p => String(p.entityId)).filter(id => /^\d+$/.test(id)).map(id => `SELECT * FROM claim_member_state WHERE player_entity_id = ${id}`)];
+  const got = await ocRelayEach(regions, rg => relayFetchOnce(rg, sqls, 30000));
+  const failed = () => regions.filter((rg, i) => got[i] instanceof Error);
+  if (failed().length === regions.length) throw new Error('no region answered');
+  const retry = failed();   // a mirror mid-hiccup usually answers a second ask
+  if (retry.length){ const again = await ocRelayEach(retry, rg => relayFetchOnce(rg, sqls, 25000)); retry.forEach((rg, j) => { got[regions.indexOf(rg)] = again[j]; }); }
+  const silent = failed();
+  const members = new Set(ocMemberClaims.filter(id => silent.includes(regionOfEntity(id))));   // a silent region keeps the memberships it had
+  let named = false;
+  regions.forEach((rg, i) => {
+    const t = got[i]; if (t instanceof Error) return;
+    ocRelayRegions[rg] = { at: Date.now(), rows: (t.progressive_action_state || []).filter(r => {
+      const total = ocActionsPerItem(r.recipe_id) * (r.craft_count || 1);
+      return !(total > 0 && r.progress >= total);   // finished, waiting to be collected
+    }) };
+    (t.world_region_name_state || []).forEach(r => { const n = r.player_facing_name; if (!n) return; ocRegions[rg] = n; if (claimRegionNames[rg] !== n){ claimRegionNames[rg] = n; named = true; } });
+    (t.claim_member_state || []).forEach(r => members.add(String(r.claim_entity_id)));
+  });
+  if (named) safeSetItem('bc_region_names_v1', JSON.stringify(claimRegionNames));
+  ocMemberClaims = [...members];
+  // a region that didn't answer keeps its last good rows (stale beats blank) — ocSourceNote says so
+  const rows = [];
+  regions.forEach(rg => { const s = ocRelayRegions[rg]; if (s) s.rows.forEach(r => rows.push([rg, r])); });
+  await ocResolvePlaces(rows.map(([, r]) => String(r.building_entity_id || '0')), ocMemberClaims);
+  const itemMap = {};
+  const crafts = rows.map(([rg, r]) => ocRelayCraft(rg, r, itemMap));
+  ocMyClaims = ocMemberClaimList();
+  return { crafts, itemMap, source:'relay', missing: silent, asOf: Date.now() };
+}
+// Round 2: stations and claims ocPlaces doesn't know yet. Three indexed lookups per station — the station, then its
+// claim's name and position joined through it, so a cold load is two rounds, not three — and two per member claim.
+// Grouped by the region the id encodes (stations and claims never move), at most 300 queries per subscribe.
+async function ocResolvePlaces(stationIds, claimIds){
+  const P = ocPlacesLoad(), byRegion = {}, jobs = [];
+  const add = (id, sqls) => { const rg = regionOfEntity(id); if (rg != null) (byRegion[rg] = byRegion[rg] || []).push(sqls); };
+  [...new Set(stationIds)].filter(b => /^\d+$/.test(b) && b !== '0' && !P.b[b]).forEach(b => add(b, [
+    `SELECT * FROM building_state WHERE entity_id = ${b}`,
+    `SELECT claim_state.* FROM claim_state JOIN building_state ON claim_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`,
+    `SELECT claim_local_state.* FROM claim_local_state JOIN building_state ON claim_local_state.entity_id = building_state.claim_entity_id WHERE building_state.entity_id = ${b}`]));
+  [...new Set(claimIds)].filter(c => /^\d+$/.test(c) && c !== '0' && !P.c[c]).forEach(c => add(c, [
+    `SELECT * FROM claim_state WHERE entity_id = ${c}`, `SELECT * FROM claim_local_state WHERE entity_id = ${c}`]));
+  Object.keys(byRegion).forEach(rg => { const g = byRegion[rg]; for (let i = 0; i < g.length; i += 100) jobs.push({ rg: +rg, sqls: g.slice(i, i + 100).flat() }); });
+  if (!jobs.length) return;
+  const got = await ocRelayEach(jobs, j => relayFetchOnce(j.rg, j.sqls, 30000));
+  const names = {}, locs = {};
+  got.forEach((t, i) => { if (t instanceof Error) return;   // whatever didn't answer is asked again on the next load
+    (t.building_state || []).forEach(r => { P.b[String(r.entity_id)] = [String(r.claim_entity_id || '0'), r.building_description_id]; });
+    (t.claim_state || []).forEach(r => { names[String(r.entity_id)] = r.name || ''; });
+    (t.claim_local_state || []).forEach(r => { locs[String(r.entity_id)] = ocLocOf(r.location); });
+    // a claim asked by id that the mirror answered without: it's gone (deleted claims leave memberships behind) —
+    // remember that, so My Claims drops it and the next load doesn't ask again
+    jobs[i].sqls.forEach(s => { const m = /^SELECT \* FROM claim_state WHERE entity_id = (\d+)$/.exec(s); if (m && !(m[1] in names)) P.c[m[1]] = [null, null, null]; });
+  });
+  Object.keys(names).forEach(id => { const l = locs[id]; P.c[id] = [names[id], l ? l[0] : null, l ? l[1] : null]; });
+  safeSetItem(OC_PLACES_KEY, JSON.stringify(P));
+}
+// One relay progress row → a craft in bitjita's /api/crafts shape, so the board, filters and cards don't care which
+// source drew them.
+function ocRelayCraft(rg, r, itemMap){
+  const P = ocPlacesLoad(), rec = ((craftingData && craftingData.recipesById) || {})[r.recipe_id] || {};
+  const perItem = ocActionsPerItem(r.recipe_id);
+  const bid = String(r.building_entity_id || '0');
+  const b = P.b[bid];   // [claimId, descId] — missing only while round 2 couldn't reach the station
+  const claimId = b && b[0] !== '0' ? b[0] : null, cl = claimId && P.c[claimId];
+  return { entityId: String(r.entity_id), buildingEntityId: bid, ownerEntityId: String(r.owner_entity_id), regionId: rg,
+    progress: r.progress, recipeId: r.recipe_id, recipeName: rec.name || '', craftCount: r.craft_count,
+    lockExpiration: r.lock_expiration ? new Date(r.lock_expiration).toISOString() : null,
+    actionsRequiredPerItem: perItem, totalActionsRequired: perItem * (r.craft_count || 1),
+    craftedItem: relayCraftOutputs(r.recipe_id, itemMap),
+    levelRequirements: rec.skillId != null ? [{ level: rec.skillLevel, skill_id: rec.skillId }] : [],
+    buildingName: b ? ((gameItemDefs.buildings || {})[b[1]] || '') : '',   // the station TYPE, like bitjita: its tier adjective feeds ocStationLabel
+    // a station outside any claim, or one not looked up yet, still gets its card — in a group of its own per region
+    claimEntityId: claimId || (b ? `wild-${rg}` : `unknown-${rg}`),
+    claimName: cl ? cl[0] : claimId ? null : b ? 'Outside any claim' : 'Claim not found yet',
+    claimLocationX: cl ? cl[1] : null, claimLocationZ: cl ? cl[2] : null,
+    completed: false, isPublic: true };
+}
+function ocMemberClaimList(){
+  const P = ocPlacesLoad();
+  return ocMemberClaims.filter(id => !(P.c[id] && P.c[id][0] === null))   // gone (ocResolvePlaces)
+    .map(id => ({ entityId: id, name: (P.c[id] && P.c[id][0]) || 'Claim', regionId: regionOfEntity(id) }));
+}
+// The board's provenance, said only where it matters: when it was read, a region the relay didn't answer for this
+// time (shown from its last good copy, if any), or the bitjita fallback, which can run minutes to most of an hour behind.
+function ocSourceNote(){
+  const d = openCraftAll;
+  if (d.source === 'bitjita') return ` · <span class="oc-warn">relay unreachable — showing bitjita's copy, which can lag</span>`;
+  if (d.source !== 'relay') return '';
+  const miss = (d.missing || []).map(rg => ocRelayRegions[rg] ? `R${rg} from ${fmtAgo(ocRelayRegions[rg].at)}` : `R${rg} missing`);
+  return ` · as of ${new Date(d.asOf).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' })}`
+    + (miss.length ? ` · <span class="oc-warn">relay didn't answer: ${miss.join(', ')}</span>` : '');
 }
 // Option counts across the whole set, so each filter dropdown can show how many crafts it would match.
 function ocFacets(){
@@ -7007,18 +7157,29 @@ function ocSkillSearchInput(v){ ocSkillQuery=(v||'').toLowerCase().trim(); const
 function ocClaimSearchInput(v){
   clearTimeout(ocSearchTimer); ocClaimQuery = v || ''; const q=(v||'').trim();
   const box=document.getElementById('oc-claim-results'); if(!box) return;
-  if (q.length<2){ ocLastClaimResults=[]; box.innerHTML=''; return; }
+  if (q.length<3){ ocLastClaimResults=[]; box.innerHTML = q ? '<div class="oc-msg" style="color:var(--text3)">Keep typing…</div>' : ''; return; }
   ocSearchTimer=setTimeout(async()=>{
-    try{ const d=await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`); ocLastClaimResults=(d.claims||[]).slice(0,8); ocRenderClaimResults(); }
+    try{ const res=await ocSearchClaims(q); if (q !== ocClaimQuery.trim()) return; ocLastClaimResults=res; ocRenderClaimResults(); }   // a newer search owns the list
     catch(e){ ocLastClaimResults=[]; box.innerHTML=''; }
   },350);
+}
+// The relay's /claim?name= is a case-insensitive substring match that returns EVERY hit — 9,359 claims for "a" — so the
+// box waits for three letters. Ruins and landmarks (neutral claims) are dropped, and names that start with the query lead.
+async function ocSearchClaims(q){
+  const ql = q.toLowerCase(), starts = c => String(c.name || '').toLowerCase().startsWith(ql) ? 1 : 0;
+  let list;
+  try { const r = await fetch(`${RELAY_HTTP}/claim?name=${encodeURIComponent(q)}`); if (!r.ok) throw new Error('HTTP ' + r.status); list = await r.json(); }
+  catch(e){ const d = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`); return (d.claims || []).slice(0, 8); }   // relay down: bitjita's search
+  return (Array.isArray(list) ? list : []).filter(c => !c.neutral)
+    .sort((a, b) => (starts(b) - starts(a)) || ((+b.tier || 0) - (+a.tier || 0)) || String(a.name).localeCompare(String(b.name)))
+    .slice(0, 8).map(c => ({ entityId: String(c.entity_id), name: c.name, regionId: +c.region, regionName: ocRegions[c.region] || liveRegionName(+c.region) || claimRegionNames[c.region] || '' }));
 }
 // Render the claim-search results into #oc-claim-results (each row ADDS to the custom list). Kept separate
 // so adding a claim can re-render the rows (to flip "add" → "in list") without a refetch or losing focus.
 function ocRenderClaimResults(){
   const box=document.getElementById('oc-claim-results'); if(!box) return;
   const claims=ocLastClaimResults||[];
-  if (!claims.length){ box.innerHTML = (ocClaimQuery.trim().length>=2) ? '<div class="oc-msg" style="color:var(--text3)">No claims found</div>' : ''; return; }
+  if (!claims.length){ box.innerHTML = (ocClaimQuery.trim().length>=3) ? '<div class="oc-msg" style="color:var(--text3)">No claims found</div>' : ''; return; }
   box.innerHTML = claims.map(c=>{
     const inList = ocIsCustom(c.entityId);
     return `<div class="oc-drow oc-scope" onclick='ocAddCustom(${JSON.stringify(JSON.stringify({entityId:String(c.entityId),name:c.name,regionName:c.regionName,regionId:c.regionId}))})'><span class="oc-drow-l"><i class="ti ${inList?'ti-check oc-scope-chk':'ti-plus oc-drow-ico'}"></i> ${escHtml(c.name||'Claim')} <span class="oc-sub2">${escHtml(c.regionName||('R'+c.regionId))}</span></span>${inList?'<span class="oc-sub2" style="color:var(--teal-light)">in list</span>':''}</div>`;
@@ -7055,13 +7216,18 @@ function ocCycleSort(){
 }
 function ocToggleClaim(id){ id=String(id); if (openCraftCollapsed.has(id)) openCraftCollapsed.delete(id); else openCraftCollapsed.add(id); saveOpenCraftCollapsed(); ocRerenderCard(id); }
 function ocToggleProf(id, sid){ const k=id+':'+sid; if (openCraftProfOpen.has(k)) openCraftProfOpen.delete(k); else openCraftProfOpen.add(k); saveOpenCraftProfOpen(); ocRerenderCard(id); }
-async function ocLoadMyClaims(){
+// My Claims = the claims the tracked players are members of. The relay load reads the memberships along with the crafts
+// (claim_member_state); only the bitjita fallback asks bitjita.
+async function ocLoadMyClaims(fromBitjita){
   const players = (typeof trackedPlayers!=='undefined'?trackedPlayers:[]);
   if (!players.length){ ocMyClaims=[]; return; }
-  const seen={};
-  await Promise.all(players.map(async p=>{ try{ const d=await apiFetch(`/api/players/${p.entityId}`); ((d.player&&d.player.claims)||[]).forEach(c=>{ seen[String(c.entityId)]={entityId:String(c.entityId), name:c.name, regionId:c.regionId}; }); }catch(e){} }));
-  ocMyClaims=Object.values(seen);
+  if (fromBitjita || openCraftAll.source === 'bitjita'){
+    const seen={};
+    await Promise.all(players.map(async p=>{ try{ const d=await apiFetch(`/api/players/${p.entityId}`); ((d.player&&d.player.claims)||[]).forEach(c=>{ seen[String(c.entityId)]={entityId:String(c.entityId), name:c.name, regionId:c.regionId}; }); }catch(e){} }));
+    ocMyClaims=Object.values(seen);
+  } else ocMyClaims = ocMemberClaimList();
   if (ocOpenDrop==='claim'){ const d=document.getElementById('oc-drop'); if(d){ d.innerHTML=ocDropHtml('claim'); ocRenderClaimResults(); } }
+  if (ocScope==='my') ocRenderBrowse();
 }
 // Station tier is carried as the adjective in the building name (Rough=T1 … Flawless=T10).
 const OC_STATION_TIER = { rough:1, simple:2, sturdy:3, fine:4, exquisite:5, peerless:6, ornate:7, pristine:8, magnificent:9, flawless:10 };
@@ -7083,8 +7249,55 @@ function ocCraftCard(cr, itemMap, now){
     ${station}
     <div class="oc-card-bar"><div class="oc-card-fill${active?' on':''}" style="width:${pct}%"></div></div>
     <div class="oc-card-stat"><span>${fmtCount(left)} left</span><span class="oc-card-pct">${pct}%</span></div>
-    <div class="oc-card-owner">by ${escHtml(cr.ownerUsername||'?')}${active?' <span class="oc-active-tag">ACTIVE</span>':''}</div>
+    <div class="oc-card-owner">by ${escHtml(ocOwnerName(cr))}${active?' <span class="oc-active-tag">ACTIVE</span>':''}</div>
   </div>`;
+}
+// ── Owner names ("by farandal") ──
+// A mirror only knows the players whose rows sit in its region, so the crafts snapshot can't name an owner who is
+// somewhere else (32 of 72 crafts at one r9 claim). The relay's HTTP /player/<id> finds a player in any region: ask it
+// only for the cards on screen (owner names appear nowhere else in the tab), four at a time, and remember the answers.
+const OC_OWNERS_KEY = 'bcOcOwners', OC_OWNER_TTL = 7*24*60*60*1000, OC_OWNER_MAX = 3000;
+let ocOwners = null;                 // ownerId -> [name, fetchedAt]; name '' = the relay doesn't know them
+const ocOwnerWait = new Map();       // ownerId -> Set(claimIds whose cards read "…" until it answers)
+const ocOwnerQueue = [], ocOwnerFailAt = {}, ocOwnerPaint = new Set();
+let ocOwnerActive = 0, ocOwnerSaveT = null, ocOwnerPaintT = null;
+function ocOwnersLoad(){
+  if (ocOwners) return ocOwners;
+  ocOwners = {};
+  try { const d = JSON.parse(localStorage.getItem(OC_OWNERS_KEY) || '{}'), now = Date.now(); Object.keys(d).forEach(id => { if (Array.isArray(d[id]) && now - d[id][1] < OC_OWNER_TTL) ocOwners[id] = d[id]; }); } catch(e){}
+  liveRows('player_username_state', () => true).forEach(r => { const id = String(r.entity_id); if (r.username && !ocOwners[id]) ocOwners[id] = [r.username, Date.now()]; });   // the map's online layer already knows some
+  return ocOwners;
+}
+function ocOwnerName(cr){
+  if (cr.ownerUsername) return cr.ownerUsername;   // bitjita rows (the fallback) arrive with it joined in
+  const id = String(cr.ownerEntityId || ''), known = ocOwnersLoad()[id];
+  if (known) return known[0] || '?';
+  const p = trackedPlayers.find(x => String(x.entityId) === id); if (p && p.username) return p.username;
+  if (!/^\d+$/.test(id) || Date.now() - (ocOwnerFailAt[id] || 0) < 60000) return '?';
+  if (!ocOwnerWait.has(id)){ ocOwnerWait.set(id, new Set()); ocOwnerQueue.push(id); }
+  ocOwnerWait.get(id).add(String(cr.claimEntityId));
+  ocOwnerPump();
+  return '…';
+}
+function ocOwnerPump(){
+  while (ocOwnerActive < 4 && ocOwnerQueue.length){
+    const id = ocOwnerQueue.shift(); ocOwnerActive++;
+    fetch(`${RELAY_HTTP}/player/${id}`)
+      .then(r => r.ok ? r.json() : r.status === 404 ? {} : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(d => { ocOwners[id] = [String((d && d.username) || ''), Date.now()]; clearTimeout(ocOwnerSaveT); ocOwnerSaveT = setTimeout(ocOwnersSave, 2000); })
+      .catch(() => { ocOwnerFailAt[id] = Date.now(); })   // relay hiccup: "?" for a minute, then the next render asks again
+      .finally(() => {
+        (ocOwnerWait.get(id) || []).forEach(c => ocOwnerPaint.add(c)); ocOwnerWait.delete(id);
+        ocOwnerActive--; ocOwnerPump();
+        clearTimeout(ocOwnerPaintT);
+        ocOwnerPaintT = setTimeout(() => { if (currentTab === 'opencrafts') ocOwnerPaint.forEach(c => ocRerenderCard(c)); ocOwnerPaint.clear(); }, 150);
+      });
+  }
+}
+function ocOwnersSave(){
+  const ids = Object.keys(ocOwners);
+  if (ids.length > OC_OWNER_MAX) ids.sort((a, b) => ocOwners[a][1] - ocOwners[b][1]).slice(0, ids.length - OC_OWNER_MAX).forEach(id => delete ocOwners[id]);
+  safeSetItem(OC_OWNERS_KEY, JSON.stringify(ocOwners));
 }
 // Render one claim's card from a group {id,name,regionId,crafts}: profession rows (collapsed) → craft cards.
 function ocClaimCardHtml(g){

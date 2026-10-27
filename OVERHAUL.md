@@ -679,6 +679,15 @@ via the inventory fix.
 violates 9.1. One bitjita HTTP call beats 13 permanent unfiltered subscriptions.
 **Keep on bitjita.** If we ever want it live, scope it to pinned claims only.
 
+> **Superseded 2026-10-26: Open Crafts reads the relay, as snapshots, not held
+> subscriptions.** bitjita's copy ran minutes behind in most regions and ~45 min
+> in r8. Each load (and each 30 s Live tick) takes one snapshot per region over a
+> scratch socket — the public-craft semijoin, ~1.9 MB world-wide — and hangs up,
+> so nothing is held and 8.4 still stands. A held named set was measured and
+> rejected: its UnsubscribeMultiApplied carries every row again, and holding it
+> streams ~120 KB/s of progress ticks. bitjita remains the fallback when no
+> region answers. See `ocRelayLoad` in index.html.
+
 **Deals** — **MOVED to Group B by the 7.2 finding.** Previously assessed as
 "inherently a batch job, keep proxy-side". With the whole order book already in
 memory (7.2), the arbitrage sweep becomes **a client-side computation over data
@@ -767,7 +776,7 @@ region's connect time, not halve it.
 ### 8.4 Every held subscription must be filtered
 No held subscription without a bounded `WHERE`. `owner_entity_id = <our players>`
 is fine; `SELECT * FROM progressive_action_state` region-wide is not. This is
-what rules out Open Crafts (7.3).
+what rules out holding Open Crafts (7.3) — it takes snapshots instead.
 
 ### 8.5 ⚠️ A bounded `WHERE` is not enough — an `OR`-chain full-scans the table
 **Root-caused 2026-08-09, after twice wrongly concluding "it's not us".**
