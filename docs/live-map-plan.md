@@ -167,24 +167,29 @@ an instant fallback if the relay is down).
 
 ### Regenerating `untrackable.json`
 
-The authoritative "is this worth tracking?" signal is **how many nodes/spawns actually exist world-wide**
-in `bcmap-api` (the source the app fetches for both resources and enemies) — *not* tier or tag (Auric Ore
-is tier −1 / tag "Ore Vein" exactly like legit veins). Probe every `resourceIndex`/`creatureIndex` id across
-all 13 regions and sum `features[].geometry` points:
+`node build-map-index.js` rebuilds all three files: `resourceIndex.json` + `creatureIndex.json` from
+bitjita's `/api/resources` and `/api/creatures`, then `untrackable.json`. Re-run it after a game update
+(new types) or when a season turns.
 
-```
-for id in index:  total = Σ over region∈[3,7,8,9,11,12,13,14,15,17,18,19,23]
-                            of points in GET bcmap-api.bitjita.com/region{r}/{resource|enemy}/{id}
-```
+The authoritative "is this worth tracking?" signal is **how many nodes actually exist world-wide** — *not*
+tier or tag (Auric Ore is tier −1 / tag "Ore Vein" exactly like legit veins). The script counts them on the
+prism relay (`SELECT * FROM resource_location WHERE resource_id = X`, one per type, sequentially), but only
+for the types the list doesn't already show: the ones hidden last time and the ones new to the index
+(~540 types, ~25k rows, under a minute). Types already listed stay listed; recounting them would pull
+millions of rows (Sticks alone is 1.2M / 112 MB).
 
-Thresholds (picked from a real gap in the data — resources jump 14 → 24, and only Practice-Dummy-type
-creatures hit 0): **hide resources with < 15 nodes, creatures with 0 spawns.** That drops the named junk
-(Owl Feathers=4, Auric=5, Argent=12, fish schools, quest POIs, dens) while keeping every legit special
-(Hexite Deposit=27, Sparkstone=44, Beehive=191, mature trees). Output shape:
+Rules: **hide resources with < 5 live nodes**, plus the Depleted Resource / Hidden Resource tags whatever the
+count. **Seasonal tags (Seasonal, Seasonal Resource, Summer Resource) are never hidden for a low count** —
+out of season they have none, which is how the July build (bcmap-api counts, < 15 nodes) kept Pumpkin and
+Sunflower out of the list when they spawned in October. Their ids go in `seasonal`, and a tracked one with no
+nodes world-wide reads "off-season" instead of "none found". Why 5 and not July's 15: in October the
+counted types jump 3 → 7, and 15 would split the new Quarry Rock tiers (their counts move by ±10 within
+minutes). Creatures aren't counted (~50 types, all real): the four hidden in July (Practice Dummy, Swift
+Cervus, Enraged Alpha Jakyl, Giant Hexite Skitch) stay hidden and new creature types are listed. Output shape:
 
 ```json
-{ "_meta": { "source": "...", "resourceThreshold": 15, "enemyThreshold": 1, ... },
-  "resources": ["<id>", ...], "enemies": ["<id>", ...] }
+{ "_meta": { "source": "...", "built": "2026-10-27", "minNodes": 5, ... },
+  "resources": ["<id>", ...], "enemies": ["<id>", ...], "seasonal": ["<id>", ...] }
 ```
 
 ### Rebuilding the vendored bundle

@@ -10509,11 +10509,12 @@ function bcTrackFromSearch(i){
 // ===== Phase 3: live resources / enemies (prism-relay) =====
 // One model for every tracked type: a relay subscription (see the "Live positions via prism-relay" section).
 let bcResourceIndex = {}, bcCreatureIndex = {};
-// Resource/creature type ids that have too few nodes/spawns world-wide to be worth tracking (built offline
-// by counting bcmap-api points across all regions — see docs/live-map-plan.md). Resources under ~15 nodes
-// and creatures with 0 spawns are hidden so the list isn't cluttered with un-trackable entries (Depleted/
-// Spawner/Den/interior props, doors, planted saplings, ultra-rare drop-only ores like Auric/Argent, …).
-let bcUntrackable = { resources: new Set(), enemies: new Set() };
+// Resource/creature type ids that have too few nodes/spawns world-wide to be worth tracking (built by
+// build-map-index.js from live node counts on the prism relay — see docs/live-map-plan.md). Resources under
+// 5 live nodes are hidden so the list isn't cluttered with un-trackable entries (Depleted/Spawner/Den/
+// interior props, doors, drop-only ores like Auric, …) — except seasonal types, which have none at all out
+// of season. `seasonal` lists those, so a tracked one with no nodes anywhere reads "off-season".
+let bcUntrackable = { resources: new Set(), enemies: new Set(), seasonal: new Set() };
 let bcResourceLayer = null;
 let bcMapRegion = '';                  // '' = all regions; else a regionId (limits resource fetching)
 function bcLoadMapRegion(){ try { const v = localStorage.getItem('bc_map_region'); if (v != null) bcMapRegion = v; } catch(e){} }
@@ -10682,9 +10683,9 @@ function bcPointLayerClass(){
 }
 
 async function bcLoadIndexes(){
-  try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=sailing2`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
-  try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=sailing2`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
-  try { const r = await fetch(`${API}/mapassets/untrackable.json?v=2`); if (r.ok){ const u = await r.json(); bcUntrackable = { resources:new Set((u.resources||[]).map(String)), enemies:new Set((u.enemies||[]).map(String)) }; } } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/resourceIndex.json?v=seasons1`); if (r.ok) bcResourceIndex = await r.json(); } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/creatureIndex.json?v=seasons1`); if (r.ok) bcCreatureIndex = await r.json(); } catch(e){}
+  try { const r = await fetch(`${API}/mapassets/untrackable.json?v=3`); if (r.ok){ const u = await r.json(); bcUntrackable = { resources:new Set((u.resources||[]).map(String)), enemies:new Set((u.enemies||[]).map(String)), seasonal:new Set((u.seasonal||[]).map(String)) }; } } catch(e){}
   _bcAllEntries = null; // rebuild the combined list against the freshly loaded indexes
 }
 // One combined list of resources + enemies (each entry knows its kind). Cached — the indexes are
@@ -10872,8 +10873,10 @@ function bcRenderTrackedResList(){
   const ts = Object.values(bcTrackedRes);
   if (!ts.length){ el.innerHTML = ''; el.style.display = 'none'; return; }
   el.style.display = '';
+  const offSeason = t => t.count === 0 && !bcMapRegion && t.kind === 'resource' && bcUntrackable.seasonal.has(String(t.id));   // none anywhere, and it's a seasonal type
   const countCell = t => !t.applied   // subscription not applied yet (connecting, or a region switch rebuilding it)
     ? `<span class="bc-trk-ct" title="Loading from the relay…">…</span>`
+    : offSeason(t) ? `<span class="bc-trk-ct" title="None in the world right now: this one only spawns in its season">off-season</span>`
     : `<span class="bc-trk-ct"${t.count===0?' style="color:var(--red-light)"':''} title="${t.count.toLocaleString()} live${bcMapRegion?' in this region':' world-wide'}">${t.count===0?'none found':t.count.toLocaleString()}</span>`;
   // The relay redraw re-renders this list on every throttled update, and a tracked creature type moves
   // constantly — so while a colour picker is open on a row, rebuilding would replace its <input> and
