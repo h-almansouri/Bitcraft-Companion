@@ -7,6 +7,7 @@
  * (Early Access) world, now that the community relays have moved on to the 1.0 world.
  *
  *   node tools/oldworld-token-test.js            run the test (logs in first if no token is saved)
+ *   node tools/oldworld-token-test.js watch      stay connected and print live changes (--minutes N, default 15)
  *   node tools/oldworld-token-test.js login      throw away the saved token, log in again, run the test
  *   node tools/oldworld-token-test.js code       log in with a code that already arrived (requests no new one)
  *   node tools/oldworld-token-test.js forget     delete the saved token from this PC
@@ -18,6 +19,10 @@
  * What it does: connects with YOUR token, runs a few small indexed queries (your character, your
  * inventories and crafts, optionally one other player's), prints a summary, disconnects. It never
  * calls a reducer (a game action) — third-party tools must not.
+ *
+ * watch does the same reads but keeps the one connection open: it prints each change as the server
+ * pushes it, adds and drops a query while running, and never reconnects by itself (a reconnect is
+ * what kicks the player out of the game).
  *
  * The token is your full game login. It is kept in your user folder, OUTSIDE this project, so it
  * can never be committed:   ~/.bitcraft-companion/oldworld-token.txt
@@ -33,6 +38,8 @@
  *   --selftest <player name> [--regions 8]   the same read code against the public 1.0 relay
  *   BC_ANON=1                                real server, no token (exercises the refusal path)
  *   BC_TOKEN_FILE / BC_LOG_FILE              use a different token / log file
+ *   BC_SELFTEST_EXTRA="<sql>;<sql>"          watch self-test: one more live query, for real traffic
+ *   BC_REPLAY=<file.json>                    watch self-test: push hand-made live updates through
  */
 const https = require('https');
 const crypto = require('crypto');
@@ -61,7 +68,9 @@ const COLS = {
   item_desc: ['id', 'name'],
   cargo_desc: ['id', 'name'],
   world_region_name_state: ['id', 'player_facing_name', 'module_name_prefix'],
+  mobile_entity_state: ['entity_id', 'chunk_index', 'timestamp', 'location_x', 'location_z', 'destination_x', 'destination_z', 'dimension', 'is_walking', '_pad1', '_pad2', '_pad3'],
 };
+const seenCols = {};   // table -> column order captured from the first named row; beats COLS for bare-array rows (live updates can arrive that way)
 
 // ───────────────────────────── arguments ─────────────────────────────
 const argv = process.argv.slice(2);
@@ -125,7 +134,18 @@ function saveToken(token) {
   fs.writeFileSync(TOKEN_FILE, token + '\n', { mode: 0o600 });
 }
 function forgetToken() {
+  try { fs.unlinkSync(STATE_FILE); } catch (e) { /* nothing remembered */ }
   try { fs.unlinkSync(TOKEN_FILE); return true; } catch (e) { return false; }
+}
+// Small notes kept beside the token (never in the project): the region that last let this login in, so
+// watch mode can go straight there instead of knocking on all 13 doors.
+const STATE_FILE = path.join(path.dirname(TOKEN_FILE), 'oldworld-state.json');
+function loadState() {
+  try { const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; }
+}
+function saveState(patch) {
+  try { fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true }); fs.writeFileSync(STATE_FILE, JSON.stringify(Object.assign(loadState(), patch))); }
+  catch (e) { /* only a convenience */ }
 }
 function tokenFacts(token) {            // dates only — nothing identifying
   try {
@@ -217,19 +237,29 @@ function wsFrame(opcode, payload) {
   return Buffer.concat([head, mask, body]);
 }
 function makeConn(sock, head) {
-  const c = { closed: false, closeCode: null, closeReason: '', inbox: [], waiters: [] };
+  const c = { closed: false, closeCode: null, closeReason: '', closedByUs: false, inbox: [], waiters: [], onUpdate: null };
   let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0);
   let parts = [];
+  let announceClosed;
+  c.whenClosed = new Promise(resolve => { announceClosed = resolve; });
   const settleClose = () => {
     if (c.closed) return;
     c.closed = true;
     c.waiters.splice(0).forEach(w => { clearTimeout(w.timer); w.reject(new Error('closed')); });
+    announceClosed();
   };
   const deliver = text => {
     let m;
     try { m = JSON.parse(text); } catch (e) { return; }
     if (!m || typeof m !== 'object') return;
-    if (m.TransactionUpdate || m.TransactionUpdateLight) return;      // live changes: a snapshot test ignores them
+    if (m.TransactionUpdate || m.TransactionUpdateLight) {            // live changes: only watch mode listens
+      if (c.onUpdate) {
+        const light = m.TransactionUpdateLight, full = m.TransactionUpdate;
+        const tables = light ? (light.update && light.update.tables) : (full.status && full.status.Committed && full.status.Committed.tables);
+        if (tables && tables.length) { try { c.onUpdate(tables); } catch (e) { /* one bad update must not end the watch */ } }
+      }
+      return;
+    }
     const i = c.waiters.findIndex(w => w.match(m));
     if (i >= 0) { const w = c.waiters.splice(i, 1)[0]; clearTimeout(w.timer); w.resolve(m); }
     else c.inbox.push(m);
@@ -276,7 +306,7 @@ function makeConn(sock, head) {
   });
   c.send = obj => { if (!c.closed) { try { sock.write(wsFrame(1, JSON.stringify(obj))); } catch (e) {} } };
   c.close = () => {
-    if (!c.closed) { try { sock.write(wsFrame(8, Buffer.from([0x03, 0xe8]))); } catch (e) {} }
+    if (!c.closed) { c.closedByUs = true; try { sock.write(wsFrame(8, Buffer.from([0x03, 0xe8]))); } catch (e) {} }
     try { sock.end(); } catch (e) {}
     const t = setTimeout(() => { try { sock.destroy(); } catch (e) {} }, 500);
     if (t.unref) t.unref();
@@ -285,7 +315,8 @@ function makeConn(sock, head) {
   pump();
   return c;
 }
-function openConn({ host, port, db, token, tls }) {
+// light = ask for the slim form of live updates (row changes only, without who-called-what details).
+function openConn({ host, port, db, token, tls, light }) {
   return new Promise(resolve => {
     const headers = {
       Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13',
@@ -297,7 +328,7 @@ function openConn({ host, port, db, token, tls }) {
     const finish = v => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
     let req;
     try {
-      req = https.request(Object.assign({ host, port: port || 443, method: 'GET', path: `/v1/database/${db}/subscribe?compression=None`, headers, agent: false }, tls || {}));
+      req = https.request(Object.assign({ host, port: port || 443, method: 'GET', path: `/v1/database/${db}/subscribe?compression=None${light ? '&light=true' : ''}`, headers, agent: false }, tls || {}));
     } catch (e) { return finish({ kind: 'network', message: e.message }); }
     timer = setTimeout(() => { try { req.destroy(); } catch (e) {} finish({ kind: 'timeout' }); }, 12000);
     req.on('error', e => finish({ kind: 'network', message: e.message }));
@@ -329,14 +360,14 @@ async function dial(target) {
     return out;
   }
 }
-function target(region, token) {
+function target(region, token, light) {
   if (SELFTEST) {
     return {
-      host: 'relay.bitcraftsync.app', port: 3000 + region, db: `idc-${region}`, token: null,   // the relay needs these two flags from Node
+      host: 'relay.bitcraftsync.app', port: 3000 + region, db: `idc-${region}`, token: null, light,   // the relay needs these two flags from Node
       tls: { secureOptions: crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION | crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT },
     };
   }
-  return { host: GAME_HOST, port: 443, db: `bitcraft-live-${region}`, token };
+  return { host: GAME_HOST, port: 443, db: `bitcraft-live-${region}`, token, light };
 }
 
 // ───────────────────────────── reading rows ─────────────────────────────
@@ -370,13 +401,15 @@ function decodeRow(table, raw) {
     catch (e) { try { v = JSON.parse(raw); } catch (e2) { return null; } }
   }
   if (Array.isArray(v)) {
-    const cols = COLS[table];
+    const cols = seenCols[table] || COLS[table];
     if (!cols || v.length < cols.length) return null;
     const o = {};
     cols.forEach((col, i) => { o[col] = v[i]; });
     return o;
   }
-  return v && typeof v === 'object' ? v : null;
+  if (!v || typeof v !== 'object') return null;
+  if (!seenCols[table]) seenCols[table] = Object.keys(v);
+  return v;
 }
 // An optional value in any of the shapes it can arrive in: [0, x] / [1, []], {"some": x} / {"none": []},
 // {"0": x} / {"1": []}, or already the bare value.
@@ -423,9 +456,12 @@ async function query(conn, sqls, ms = 20000) {
   conn.send({ Subscribe: { query_strings: sqls, request_id: ++requestSeq } });
   const m = await conn.next(x => !!(x.InitialSubscription || x.SubscriptionError), ms);
   if (m.SubscriptionError) throw new Error('query refused: ' + clean(m.SubscriptionError.error || 'no reason given').slice(0, 300));
+  return readTables(m.InitialSubscription.database_update);
+}
+// The rows of a snapshot, by table: { table_name: [row, ...] }.
+function readTables(update) {
   const out = {};
-  const tables = (m.InitialSubscription.database_update && m.InitialSubscription.database_update.tables) || [];
-  tables.forEach(tb => {
+  ((update && update.tables) || []).forEach(tb => {
     const list = out[tb.table_name] || (out[tb.table_name] = []);
     (tb.updates || []).forEach(u => (u.inserts || []).forEach(raw => {
       if (!(tb.table_name in samples)) samples[tb.table_name] = (typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 500);
@@ -434,6 +470,24 @@ async function query(conn, sqls, ms = 20000) {
     }));
   });
   return out;
+}
+// Named query sets — the add-onto-it form. Each set gets its own id on the open connection: adding one
+// leaves the others running, and it can be dropped again by that id. This is what a live tracker uses.
+let setSeq = 100;
+const setIdOf = q => Number(q && typeof q === 'object' ? q.id : q);
+const aboutSet = (e, id) => { const q = optPayload(e.query_id), r = optPayload(e.request_id); return (q == null && r == null) || Number(q) === id || Number(r) === id; };
+async function addSet(conn, sqls, ms = 20000) {
+  const id = ++setSeq;
+  const t0 = Date.now();
+  conn.send({ SubscribeMulti: { query_strings: sqls, request_id: id, query_id: { id } } });
+  const m = await conn.next(x => (x.SubscribeMultiApplied && setIdOf(x.SubscribeMultiApplied.query_id) === id) || (x.SubscriptionError && aboutSet(x.SubscriptionError, id)), ms);
+  if (m.SubscriptionError) throw new Error('query refused: ' + clean(m.SubscriptionError.error || 'no reason given').slice(0, 300));
+  return { id, ms: Date.now() - t0, tables: readTables(m.SubscribeMultiApplied.update) };
+}
+async function dropSet(conn, id, ms = 20000) {
+  conn.send({ UnsubscribeMulti: { request_id: id, query_id: { id } } });
+  const m = await conn.next(x => (x.UnsubscribeMultiApplied && setIdOf(x.UnsubscribeMultiApplied.query_id) === id) || (x.SubscriptionError && aboutSet(x.SubscriptionError, id)), ms);
+  if (m.SubscriptionError) throw new Error('drop refused: ' + clean(m.SubscriptionError.error || 'no reason given').slice(0, 300));
 }
 const sqlStr = s => "'" + String(s).replace(/'/g, "''") + "'";
 function playerQueries(id) {             // every filter column here is indexed on the server
@@ -576,6 +630,31 @@ function printPlayer(label, s, names) {
   if (s.unread) say(`    note: ${s.unread} rows arrived in a shape this script could not read (details are in the log)`);
 }
 
+// Why nothing connected, in plain words. results = one entry per region tried.
+function explainNoConnection(results, token) {
+  const refused = results.filter(r => r.kind === 'refused');
+  const trouble = results.filter(r => r.kind !== 'refused' && !(r.kind === 'http' && r.status === 401));
+  if (results.some(r => r.kind === 'http' && r.status === 401)) {
+    say('  The server did not accept the token itself (it is malformed, revoked, or not a BitCraft token).');
+    say(`  Get a fresh one with:  ${SCRIPT} login`);
+    return;
+  }
+  if (refused.length && refused.length === results.length) {
+    say(`  All ${results.length} regions answered, then refused the login.`);
+    if (token) {
+      say('  The token itself is fine. The usual reason is the 24-hour rule: the server only admits a');
+      say('  login whose owner has opened the game in the last day. Start the old-world game, get into');
+      say('  the world, then run this again (log out of the game first if you do not want to be kicked).');
+    } else {
+      say('  That is the expected result without a token: the old world cannot be read anonymously.');
+    }
+    return;
+  }
+  say('  Nothing usable connected, and not because the login was refused:');
+  trouble.forEach(r => say(`    Region ${r.region}: ${regionLabel(r)}`));
+  say('  If it is a network error, check your internet connection and try again.');
+}
+
 // ───────────────────────────── the test ─────────────────────────────
 async function runTest(token) {
   say('');
@@ -630,29 +709,9 @@ async function runTest(token) {
 
   say('');
   say('Step 3 - what this run shows');
-  if (badToken) {
-    say('  The server did not accept the token itself (it is malformed, revoked, or not a BitCraft token).');
-    say(`  Get a fresh one with:  ${SCRIPT} login`);
-    return;
-  }
-  if (!connected.length && !halfRead.length) {
-    if (refused.length && refused.length === results.length) {
-      say(`  All ${results.length} regions answered, then refused the login.`);
-      if (token) {
-        say('  The token itself is fine. The usual reason is the 24-hour rule: the server only admits a');
-        say('  login whose owner has opened the game in the last day. Start the old-world game, get into');
-        say('  the world, then run this again (log out of the game first if you do not want to be kicked).');
-      } else {
-        say('  That is the expected result without a token: the old world cannot be read anonymously.');
-      }
-    } else {
-      say('  Nothing connected, and not because of the token:');
-      trouble.forEach(r => say(`    Region ${r.region}: ${regionLabel(r)}`));
-      say('  Check your internet connection and try again.');
-    }
-    return;
-  }
+  if (badToken || (!connected.length && !halfRead.length)) { explainNoConnection(results, token); return; }
   const accepted = connected.concat(halfRead);
+  if (token && !SELFTEST) saveState({ region: (connected.find(r => r.me) || accepted[0]).region });
   const home = connected.find(r => r.me) || accepted[0];       // the region that knows this login's character
   say(`  A token can read the old world          YES - Region ${home.region}`);
   const others = results.length - accepted.length;
@@ -681,6 +740,332 @@ async function runTest(token) {
   if (trouble.length) say(`  ${trouble.length} region(s) could not be reached at all (network or timeout), so they prove nothing either way.`);
 }
 
+// ───────────────────────────── watch mode ─────────────────────────────
+// Holds ONE connection open and prints what changes, to answer what the one-shot test cannot:
+// does the stream flow, can queries be added and dropped on a running connection, and can the game be
+// played on the same character while this stays connected. It never reconnects by itself — a reconnect
+// is exactly what kicks the player.
+function playerLiveQueries(id) {         // every filter column is indexed on the server
+  return [
+    `SELECT * FROM signed_in_player_state WHERE entity_id = ${id}`,
+    `SELECT * FROM mobile_entity_state WHERE entity_id = ${id}`,
+    `SELECT * FROM inventory_state WHERE owner_entity_id = ${id}`,
+    `SELECT * FROM inventory_state WHERE player_owner_entity_id = ${id}`,
+    `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${id}`,
+    `SELECT * FROM passive_craft_state WHERE owner_entity_id = ${id}`,
+  ];
+}
+const WATCHED_TABLES = ['signed_in_player_state', 'mobile_entity_state', 'inventory_state', 'progressive_action_state', 'passive_craft_state', 'player_username_state'];
+// Ask once and let go: add a set, take its rows, drop it. For lookups that never change (names).
+async function oneShot(conn, sqls) {
+  const s = await addSet(conn, sqls);
+  try { await dropSet(conn, s.id); } catch (e) { /* the rows are already in hand */ }
+  return s.tables;
+}
+const rowCount = t => Object.keys(t).reduce((n, k) => n + (Array.isArray(t[k]) ? t[k].length : 0), 0);
+const span = ms => { const s = Math.round(ms / 1000); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
+async function connectHome(token) {
+  const saved = Number(loadState().region);
+  const base = REGIONS.length ? REGIONS : (SELFTEST ? [8] : OLD_WORLD_REGIONS);
+  const order = base.includes(saved) ? [saved].concat(base.filter(r => r !== saved)) : base;
+  const tried = [];
+  for (const r of order) {
+    const d = await dial(target(r, token, true));
+    let res;
+    if (d.kind === 'open') {
+      const idOk = /^0x[0-9a-fA-F]{64}$/.test(d.identity);
+      const whoSql = SELFTEST
+        ? `SELECT * FROM player_lowercase_username_state WHERE username_lowercase = ${sqlStr(SELF_NAME.toLowerCase())}`
+        : (idOk ? `SELECT * FROM user_state WHERE identity = ${d.identity}` : null);
+      try {
+        // The first read doubles as the acceptance check: a refused login can only close the socket.
+        const first = await oneShot(d.conn, (whoSql ? [whoSql] : []).concat(['SELECT * FROM world_region_name_state']));
+        say(`  Region ${String(r).padStart(2)}   CONNECTED at ${clock(new Date())}`);
+        return { conn: d.conn, region: r, first, tried };
+      } catch (e) {
+        d.conn.close();
+        res = e.message === 'closed' ? { region: r, kind: 'refused' } : { region: r, kind: 'read-failed', error: clean(e.message) };
+      }
+    } else {
+      res = Object.assign({ region: r }, d);
+    }
+    tried.push(res);
+    say(`  Region ${String(r).padStart(2)}   ${regionLabel(res)}`);
+    // A bad token, or a door that opened but would not answer, is not fixed by trying 12 more regions.
+    if (res.kind === 'read-failed' || (res.kind === 'http' && res.status === 401)) break;
+    await sleep(150);
+  }
+  return { conn: null, tried };
+}
+async function runWatch(token) {
+  const minutes = Math.min(120, Math.max(0.2, Number(opt('minutes')) || 15));
+  const durationMs = minutes * 60000;
+  say('');
+  say('WATCH: stays connected and prints what changes, as it happens. It only READS.');
+  if (!flag('yes')) {
+    say('Heads-up: if this character is in the OLD-WORLD game right now, connecting kicks it out once.');
+    say('Log back in while this keeps running: whether both then work side by side is the test.');
+    const a = await ask('Continue? (y/n): ');
+    if (a == null || !/^y/i.test(a)) { say('Stopped. Nothing was contacted.'); return; }
+  }
+  let friend = opt('friend');
+  if (friend == null && !flag('no-friend')) {
+    const a = await ask("Friend's character name to watch too (or just press Enter to skip): ");
+    friend = a || null;
+  }
+  if (friend != null) {
+    friend = String(friend).trim();
+    if (!friend || friend.length > 40) friend = null;
+  }
+
+  say('');
+  say('Step 1 - connecting (the region that worked last time first)');
+  const home = await connectHome(token);
+  if (!home.conn) {
+    say('');
+    say('Step 2 - nothing to watch');
+    explainNoConnection(home.tried, token);
+    return;
+  }
+  const conn = home.conn, region = home.region, startAt = new Date();
+  if (token && !SELFTEST) saveState({ region });
+  const regionRow = (home.first.world_region_name_state || [])[0];
+  const regionName = regionRow ? String(regionRow.player_facing_name || '') : '';
+  const who = (home.first.user_state || home.first.player_lowercase_username_state || [])[0];
+  const meId = who && who.entity_id != null && /^\d+$/.test(String(who.entity_id)) ? String(who.entity_id) : null;
+  if (!meId) {
+    say('  Connected, but could not tell which character this login is, so there is nothing to watch.');
+    conn.close();
+    return;
+  }
+
+  // ── live state ──
+  const people = new Map();              // character id -> name, for the characters being watched
+  const usernames = new Map();           // character id -> name, from the who-is-online query
+  const names = {}, nameTried = new Set();
+  const stats = { messages: 0, rows: 0, byTable: {} };
+  const moves = new Map(), craftTicks = new Map(), otherChanges = new Map();
+  const adds = [], drops = [], problems = [];
+  let lastLine = Date.now(), onlineSet = null;
+  const line = s => { say(`  ${clock(new Date())}  ${s}`); lastLine = Date.now(); };
+  let work = Promise.resolve();          // one update at a time, in arrival order
+  const enqueue = fn => { work = work.then(fn).catch(e => { if (!conn.closed) line('(an update could not be processed: ' + clean(e.message) + ')'); }); return work; };
+  const whoIs = id => (id === meId ? 'You' : (people.get(id) || usernames.get(id) || 'someone'));
+  const whose = id => (id === meId ? 'Your' : `${whoIs(id)}'s`);
+  const itemName = k => names[k] || (k[0] === 'c' ? 'cargo #' : 'item #') + k.slice(2);
+  const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many}`;
+  async function resolveItemNames(keys) {
+    const need = [...new Set(keys)].filter(k => !(k in names) && !nameTried.has(k));
+    if (!need.length || conn.closed) return;
+    need.forEach(k => nameTried.add(k));
+    try {
+      const t = await oneShot(conn, need.map(k => `SELECT * FROM ${k[0] === 'c' ? 'cargo_desc' : 'item_desc'} WHERE id = ${k.slice(2)}`));
+      (t.item_desc || []).forEach(x => { names['i:' + x.id] = String(x.name || ''); });
+      (t.cargo_desc || []).forEach(x => { names['c:' + x.id] = String(x.name || ''); });
+    } catch (e) { /* the numbers still print, just without names */ }
+  }
+  async function lookupName(id) {
+    try { const t = await oneShot(conn, [`SELECT * FROM player_username_state WHERE entity_id = ${id}`]); return String(((t.player_username_state || [])[0] || {}).username || ''); }
+    catch (e) { return ''; }
+  }
+  const totalsOf = row => {
+    const m = new Map();
+    (Array.isArray(row && row.pockets) ? row.pockets : []).forEach(p => {
+      const st = stackOf(p);
+      if (st) { const k = (st.cargo ? 'c:' : 'i:') + st.itemId; m.set(k, (m.get(k) || 0) + st.qty); }
+    });
+    return m;
+  };
+  const bagLabel = row => {                 // "Your Inventory", "One of Heretic721's storages"
+    const owner = String(row.owner_entity_id), keeper = String(row.player_owner_entity_id);
+    if (people.has(owner)) return `${whose(owner)} ${Number(row.inventory_index) === -1 ? 'recovery chest' : (PERSONAL[row.inventory_index] || 'bag ' + row.inventory_index)}`;
+    return `One of ${people.has(keeper) ? whose(keeper).replace(/^Your$/, 'your') : "someone's"} storages`;
+  };
+  async function inventoryLine(oldRow, row) {
+    const label = bagLabel(row);
+    if (!oldRow) { line(`${label} appeared`); return; }
+    const a = totalsOf(oldRow), b = totalsOf(row), diff = [];
+    new Set([...a.keys(), ...b.keys()]).forEach(k => { const d = (b.get(k) || 0) - (a.get(k) || 0); if (d) diff.push([k, d]); });
+    if (!diff.length) { line(`${label} changed (items moved between slots, totals the same)`); return; }
+    await resolveItemNames(diff.map(d => d[0]));
+    diff.sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]));
+    line(`${label} changed: ${diff.slice(0, 5).map(([k, d]) => `${d > 0 ? '+' : ''}${fmt(d)} ${itemName(k)}`).join(', ')}${diff.length > 5 ? `, and ${diff.length - 5} more` : ''}`);
+  }
+  async function handleTables(tables) {
+    for (const tb of tables) {
+      const name = tb.table_name, dels = [], ins = [];
+      const known = WATCHED_TABLES.includes(name);
+      let n = 0;
+      (tb.updates || []).forEach(u => {
+        [[u.deletes, dels], [u.inserts, ins]].forEach(([raws, into]) => (raws || []).forEach(raw => {
+          n++;
+          const key = 'live ' + name;         // live rows can be shaped differently from snapshot rows: keep one of each
+          if (!(key in samples)) samples[key] = (typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 500);
+          if (!known) return;                 // only counted, so its shape does not matter
+          const r = decodeRow(name, raw);
+          if (r) into.push(r); else stats.unreadable = (stats.unreadable || 0) + 1;
+        }));
+      });
+      if (!n) continue;
+      stats.rows += n;
+      stats.byTable[name] = (stats.byTable[name] || 0) + n;
+      // A changed row arrives as delete(old) + insert(new) with the same id; one without the other is a
+      // real removal or a real arrival.
+      const pk = r => String(r.entity_id != null ? r.entity_id : r.id);
+      const was = new Map(dels.map(r => [pk(r), r])), now = new Map(ins.map(r => [pk(r), r]));
+      const tally = new Map();               // "who|what" -> count, so a burst prints as one line
+      const count = (id, what) => tally.set(id + '|' + what, (tally.get(id + '|' + what) || 0) + 1);
+      if (name === 'mobile_entity_state') {
+        now.forEach((r, id) => { if (people.has(id)) moves.set(id, (moves.get(id) || 0) + 1); });
+      } else if (name === 'signed_in_player_state') {
+        now.forEach((r, id) => { if (!was.has(id) && people.has(id)) line(`${whoIs(id)} signed in to the game`); });
+        was.forEach((r, id) => { if (!now.has(id) && people.has(id)) line(`${whoIs(id)} signed out of the game`); });
+      } else if (name === 'player_username_state') {         // fed only by the who-is-online query
+        now.forEach((r, id) => { usernames.set(id, String(r.username || '')); if (!was.has(id) && !people.has(id)) line(`${r.username || 'someone'} came online in this region`); });
+        was.forEach((r, id) => { if (!now.has(id) && !people.has(id)) line(`${r.username || usernames.get(id) || 'someone'} went offline`); });
+      } else if (name === 'inventory_state') {
+        for (const [id, row] of now) await inventoryLine(was.get(id) || null, row);
+        was.forEach((r, id) => { if (!now.has(id)) line(`${bagLabel(r)} was removed`); });
+      } else if (name === 'progressive_action_state') {
+        now.forEach((r, id) => { const o = String(r.owner_entity_id); if (was.has(id)) craftTicks.set(o, (craftTicks.get(o) || 0) + 1); else count(o, 'start'); });
+        was.forEach((r, id) => { if (!now.has(id)) count(String(r.owner_entity_id), 'end'); });
+        tally.forEach((c, key) => {
+          const [o, what] = key.split('|');
+          if (what === 'end' && craftTicks.has(o)) {          // say the ticks before the ending they led to
+            line(`${whoIs(o)}: crafting (${plural(craftTicks.get(o), 'progress tick', 'progress ticks')})`);
+            craftTicks.delete(o);
+          }
+          line(`${whoIs(o)}: ${plural(c, 'craft', 'crafts')} ${what === 'start' ? 'started' : 'ended (finished or cancelled)'}`);
+        });
+      } else if (name === 'passive_craft_state') {
+        now.forEach((r, id) => count(String(r.owner_entity_id), was.has(id) ? 'changed' : 'queued'));
+        was.forEach((r, id) => { if (!now.has(id)) count(String(r.owner_entity_id), 'gone'); });
+        tally.forEach((c, key) => {
+          const [o, what] = key.split('|');
+          line(`${whoIs(o)}: ${plural(c, 'passive craft', 'passive crafts')} ${what === 'queued' ? 'queued' : (what === 'gone' ? 'collected or removed' : 'changed state')}`);
+        });
+      } else {
+        otherChanges.set(name, (otherChanges.get(name) || 0) + n);     // a table this script has no words for: counted, printed on the tick
+      }
+    }
+  }
+  conn.onUpdate = tables => { stats.messages++; enqueue(() => handleTables(tables)); };
+
+  // ── the queries, added one set at a time on the same connection ──
+  say('');
+  say(`Step 2 - watching Region ${region}${regionName ? ' (' + regionName + ')' : ''}`);
+  let friendNote = '';
+  try {
+    const mine = await addSet(conn, playerLiveQueries(meId));
+    const myName = await lookupName(meId);
+    people.set(meId, myName || 'You');
+    const sum = summarize(meId, mine.tables);
+    sum.name = myName;
+    await resolveItemNames(sum.top.map(t => t.key));
+    printPlayer('You', sum, names);
+    if (friend) {
+      let friendId = null;
+      if (/^\d{6,}$/.test(friend)) friendId = friend;
+      else {
+        const t = await oneShot(conn, [`SELECT * FROM player_lowercase_username_state WHERE username_lowercase = ${sqlStr(friend.toLowerCase())}`]);
+        const hit = (t.player_lowercase_username_state || [])[0];
+        if (hit && /^\d+$/.test(String(hit.entity_id))) friendId = String(hit.entity_id);
+        else friendNote = 'no character with that name is in this region right now';
+      }
+      if (friendId === meId) { friendId = null; friendNote = 'that is your own character'; }
+      if (friendId) {
+        const theirs = await addSet(conn, playerLiveQueries(friendId));
+        const theirName = (await lookupName(friendId)) || friend;
+        people.set(friendId, theirName);
+        const fsum = summarize(friendId, theirs.tables);
+        fsum.name = theirName;
+        await resolveItemNames(fsum.top.map(t => t.key));
+        printPlayer(`Friend "${friend}"`, fsum, names);
+        adds.push("your friend's rows");
+        line(`added your friend's queries to the open connection (${fmt(rowCount(theirs.tables))} rows, ${theirs.ms} ms)`);
+      } else {
+        say(`  Friend "${friend}": ${friendNote}`);
+      }
+    }
+  } catch (e) {
+    problems.push('setting up the queries failed: ' + clean(e.message));
+  }
+  // Developer checks, self-test only: the empty pre-launch world gives nothing to watch, so an extra
+  // query can supply real live traffic and a replay file can push hand-made updates through the same path.
+  if (SELFTEST && process.env.BC_SELFTEST_EXTRA) {
+    try { await addSet(conn, process.env.BC_SELFTEST_EXTRA.split(';').map(s => s.trim()).filter(Boolean)); }
+    catch (e) { problems.push('the extra self-test query failed: ' + clean(e.message)); }
+  }
+  if (SELFTEST && process.env.BC_REPLAY) {
+    try { JSON.parse(fs.readFileSync(process.env.BC_REPLAY, 'utf8')).forEach((tables, i) => { const t = setTimeout(() => { if (conn.onUpdate) conn.onUpdate(tables); }, 1200 + i * 300); if (t.unref) t.unref(); }); }
+    catch (e) { problems.push('the replay file could not be read: ' + clean(e.message)); }
+  }
+
+  // Two more steps on a timer, to prove queries can come and go while the stream runs.
+  const onlineAt = Math.min(10000, durationMs * 0.15), dropAt = Math.min(90000, durationMs * 0.6);
+  const timers = [
+    setTimeout(() => enqueue(async () => {
+      if (conn.closed) return;
+      try {
+        onlineSet = await addSet(conn, ['SELECT player_username_state.* FROM player_username_state JOIN signed_in_player_state ON player_username_state.entity_id = signed_in_player_state.entity_id']);
+        const rows = onlineSet.tables.player_username_state || [];
+        rows.forEach(x => usernames.set(String(x.entity_id), String(x.username || '')));
+        adds.push('who is online');
+        line(`added a "who is online here" query on the fly (${onlineSet.ms} ms): ${plural(rows.length, 'player', 'players')} online` + (rows.length ? ` - ${rows.slice(0, 8).map(x => x.username).join(', ')}${rows.length > 8 ? ', ...' : ''}` : ''));
+      } catch (e) { problems.push('adding the "who is online" query failed: ' + clean(e.message)); }
+    }), onlineAt),
+    setTimeout(() => enqueue(async () => {
+      if (conn.closed || !onlineSet) return;
+      try {
+        await dropSet(conn, onlineSet.id);
+        drops.push('who is online');
+        line('dropped the "who is online here" query again; everything else keeps running');
+      } catch (e) { problems.push('dropping the "who is online" query failed: ' + clean(e.message)); }
+    }), dropAt),
+  ];
+  const ticker = setInterval(() => enqueue(async () => {
+    moves.forEach((c, id) => line(`${whoIs(id)} moved (${plural(c, 'position update', 'position updates')})`));
+    moves.clear();
+    craftTicks.forEach((c, id) => line(`${whoIs(id)}: crafting (${plural(c, 'progress tick', 'progress ticks')})`));
+    craftTicks.clear();
+    otherChanges.forEach((c, t) => line(`${t}: ${plural(c, 'row change', 'row changes')}`));
+    otherChanges.clear();
+    if (Date.now() - lastLine >= 30000) line('still connected; nothing changed in the last 30 seconds');
+  }), 5000);
+
+  say('');
+  say(`  Watching now. Press Enter to stop (it also stops by itself after ${minutes >= 1 ? plural(Math.round(minutes), 'minute', 'minutes') : span(durationMs)}).`);
+  say('  To see it work: log this character into the old-world game, walk a few steps, and move');
+  say('  an item between bags. Each of those should print a line here within a second or two.');
+  let capTimer;
+  const cap = new Promise(resolve => { capTimer = setTimeout(() => resolve('time'), durationMs); });
+  const pressed = ask('').then(l => (l == null ? new Promise(() => {}) : 'you'));     // no keyboard = run to the time limit
+  const reason = await Promise.race([pressed, cap, conn.whenClosed.then(() => 'server')]);
+  clearTimeout(capTimer);
+  clearInterval(ticker);
+  timers.forEach(clearTimeout);
+  await work;
+  const endAt = new Date();
+  conn.onUpdate = null;
+  if (reason !== 'server') conn.close();
+
+  say('');
+  say('Step 3 - what this run shows');
+  say(`  Stayed connected                        ${span(endAt - startAt)}, then ` + (reason === 'server'
+    ? `THE SERVER closed it at ${clock(endAt)}${conn.closeCode ? ' (code ' + conn.closeCode + (conn.closeReason ? ', ' + clean(conn.closeReason).slice(0, 80) : '') + ')' : ''}`
+    : (reason === 'time' ? 'it reached the time limit' : 'you stopped it')));
+  say(`  Live updates arrived                    ${stats.messages ? `YES - ${plural(stats.messages, 'message', 'messages')}, ${plural(stats.rows, 'row change', 'row changes')}` : 'NONE - either nothing in the watched rows changed, or the stream is not flowing'}`);
+  if (stats.messages) say(`    by table: ${Object.entries(stats.byTable).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t} ${fmt(c)}`).join(', ')}`);
+  if (stats.unreadable) say(`    note: ${fmt(stats.unreadable)} live rows arrived in a shape this script could not read (details are in the log)`);
+  say(`  Added queries without reconnecting      ${adds.length ? 'YES - ' + adds.join(', ') : 'not shown (nothing was added in this run)'}`);
+  say(`  Dropped a query without reconnecting    ${drops.length ? 'YES - ' + drops.join(', ') : 'not shown (the run ended before that step)'}`);
+  problems.forEach(p => say('  PROBLEM: ' + p));
+  if (reason === 'server') say('  It did not reconnect by itself on purpose: a reconnect is what kicks the character out of the game.');
+  say('  Two things only you can see:');
+  say('    1. After you logged back into the game, did it play normally while this kept printing?');
+  say('    2. When this stopped, did the game kick you? If you were logged in, it should not have.');
+}
+
 async function main() {
   if (Number(process.versions.node.split('.')[0]) < 18) { console.log('This script needs Node 18 or newer.'); return; }
   say('BitCraft old-world token test  (read-only)');
@@ -689,7 +1074,7 @@ async function main() {
     say(forgetToken() ? 'Saved token deleted from this PC.' : 'There was no saved token to delete.');
     return;
   }
-  if (cmd !== 'test' && cmd !== 'login' && cmd !== 'code') { say(`Unknown command "${cmd}". Use: ${SCRIPT}  [login | code | forget]`); return; }
+  if (!['test', 'watch', 'login', 'code'].includes(cmd)) { say(`Unknown command "${cmd}". Use: ${SCRIPT}  [watch | login | code | forget]`); return; }
   let token = null;
   if (SELFTEST) {
     if (!SELF_NAME) { say('--selftest needs a player name.'); return; }
@@ -697,7 +1082,7 @@ async function main() {
   } else if (ANON) {
     say('NO-TOKEN CHECK: the real server without a login. Developer check only.');
   } else {
-    if (cmd === 'test') token = loadToken();
+    if (cmd === 'test' || cmd === 'watch') token = loadToken();
     if (token) { SECRET = token; say(`Using the token saved on this PC (${tokenFacts(token)}).`); }
     else {
       token = await login(cmd === 'code');
@@ -705,7 +1090,7 @@ async function main() {
       say(`  Token dates: ${tokenFacts(token)}.`);
     }
   }
-  await runTest(token);
+  if (cmd === 'watch') await runWatch(token); else await runTest(token);
   if (token) {
     say('');
     say(`Your token stays saved on this PC for the next run. Delete it with:  ${SCRIPT} forget`);
