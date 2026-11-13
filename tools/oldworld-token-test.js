@@ -447,7 +447,7 @@ function playerQueries(id) {             // every filter column here is indexed 
   ];
 }
 function summarize(id, t) {
-  const s = { id, name: '', signedIn: false, carried: { n: 0, stacks: 0, parts: [] }, stored: { n: 0, stacks: 0 }, active: 0, passive: 0, top: [], unread: t.__unreadable || 0 };
+  const s = { id, name: '', signedIn: false, carried: { n: 0, stacks: 0, parts: [] }, recovery: { n: 0, stacks: 0 }, stored: { n: 0, stacks: 0 }, active: 0, passive: 0, top: [], unread: t.__unreadable || 0 };
   const un = (t.player_username_state || []).find(x => String(x.entity_id) === id);
   if (un) s.name = String(un.username || '');
   s.signedIn = (t.signed_in_player_state || []).some(x => String(x.entity_id) === id);
@@ -465,9 +465,12 @@ function summarize(id, t) {
       const key = (st.cargo ? 'c:' : 'i:') + st.itemId;
       totals.set(key, (totals.get(key) || 0) + st.qty);
     });
-    const group = onPlayer ? s.carried : s.stored;
+    // Index -1 on the player is the lost-items inventory (the recovery chest), not something carried:
+    // 48 slots the server parks dropped items in (BitCraftPublic lost_items_state.rs).
+    const lost = onPlayer && Number(x.inventory_index) === -1;
+    const group = lost ? s.recovery : (onPlayer ? s.carried : s.stored);
     group.n++; group.stacks += n;
-    if (onPlayer) s.carried.parts.push(`${PERSONAL[x.inventory_index] || 'bag ' + x.inventory_index} ${n}`);
+    if (onPlayer && !lost) s.carried.parts.push(`${PERSONAL[x.inventory_index] || 'bag ' + x.inventory_index} ${n}`);
   });
   s.active = (t.progressive_action_state || []).filter(x => String(x.owner_entity_id) === id).length;
   s.passive = (t.passive_craft_state || []).filter(x => String(x.owner_entity_id) === id).length;
@@ -480,7 +483,7 @@ async function tryRegion(region, token, friend) {
   const d = await dial(target(region, token));
   if (d.kind !== 'open') return Object.assign({ region }, d);
   const conn = d.conn;
-  const out = { region, kind: 'connected', regionName: '', me: null, meNote: '', friend: null, names: {}, namesNote: '', ms: 0 };
+  const out = { region, kind: 'connected', at: new Date(), regionName: '', me: null, meNote: '', friend: null, names: {}, namesNote: '', ms: 0 };
   const t0 = Date.now();
   try {
     // Round 1 — which character is this login, and what is this region called. It doubles as the real
@@ -559,11 +562,14 @@ function regionLabel(res) {
     default: return String(res.kind);
   }
 }
+const clock = d => d.toLocaleTimeString('en-US', { hour12: false });
+const nothingFor = s => !s.name && !s.carried.n && !s.recovery.n && !s.stored.n && !s.active && !s.passive;
 function printPlayer(label, s, names) {
   const pile = t => `${fmt(t.qty)} ${names[t.key] || (t.key[0] === 'c' ? 'cargo #' : 'item #') + t.key.slice(2)}`;
   say(`  ${label}: ${s.name || '(name not listed in this region)'}   character id ${s.id}`);
   say(`    in the game right now   ${s.signedIn ? 'YES' : 'no'}`);
   say(`    carried                 ${s.carried.n} bags, ${fmt(s.carried.stacks)} item stacks` + (s.carried.parts.length ? `  (${s.carried.parts.join(', ')})` : ''));
+  if (s.recovery.n) say(`    in the recovery chest   ${fmt(s.recovery.stacks)} item stacks`);
   say(`    stored in this region   ${s.stored.n} storages, ${fmt(s.stored.stacks)} item stacks`);
   say(`    crafts                  ${s.active} in progress, ${fmt(s.passive)} passive`);
   if (s.top.length) say(`    biggest piles           ${s.top.map(pile).join(' | ')}`);
@@ -610,12 +616,12 @@ async function runTest(token) {
 
   connected.forEach(res => {
     say('');
-    say(`Step 2 - what the token could read in Region ${res.region}${res.regionName ? ' (' + res.regionName + ')' : ''}   [${res.ms} ms]`);
+    say(`Step 2 - what the token could read in Region ${res.region}${res.regionName ? ' (' + res.regionName + ')' : ''}   [connected ${clock(res.at)}, read took ${res.ms} ms]`);
     if (res.me) printPlayer('You', res.me, res.names);
     else say('  You: ' + (res.meNote || 'not identified'));
     if (res.friend) {
       const fs_ = res.friend.sum;
-      const blank = fs_ && !fs_.name && !fs_.carried.n && !fs_.stored.n && !fs_.active && !fs_.passive;
+      const blank = fs_ && nothingFor(fs_);
       if (fs_ && !blank) printPlayer(`Friend "${res.friend.asked}"`, fs_, res.names);
       else say(`  Friend "${res.friend.asked}": ${blank ? 'nothing belonging to that character is in this region' : (res.friend.note || 'not found')}`);
     }
@@ -657,8 +663,7 @@ async function runTest(token) {
   }
   if (home.kind === 'connected') {
     const me = home.me, fr = home.friend;
-    const nothing = s => !s.name && !s.carried.n && !s.stored.n && !s.active && !s.passive;
-    if (fr && fr.sum && nothing(fr.sum)) { fr.sum = null; fr.note = 'nothing belonging to that character is in this region'; }
+    if (fr && fr.sum && nothingFor(fr.sum)) { fr.sum = null; fr.note = 'nothing belonging to that character is in this region'; }
     say(`  Your own data came back                 ${me ? 'YES' : 'NO - ' + (home.meNote || 'unknown reason')}`);
     if (fr) say(`  Your friend's data came back            ${fr.sum ? 'YES' : 'NO - ' + (fr.note || 'not found')}`);
     if (fr && !fr.sum && !/own character/.test(fr.note || '')) {
@@ -666,8 +671,8 @@ async function runTest(token) {
       say('    name is not listed here. His character id still works: pass it with --friend <id>.');
     }
     if (me && me.signedIn) {
-      say('  You were IN THE GAME during this test. Look at the game now: were you kicked, frozen,');
-      say('  or did nothing happen? That is the one thing this script cannot see for itself.');
+      say(`  You were IN THE GAME when the test connected at ${clock(home.at)}. Look at the game now: were`);
+      say('  you kicked, frozen, or did nothing happen? This script cannot see that for itself.');
     } else if (me) {
       say('  You were not in the game during this test, so the "does it kick you" question is still open.');
     }
