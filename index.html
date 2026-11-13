@@ -157,6 +157,9 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .loading{display:flex;align-items:center;gap:.5rem;color:var(--text2);font-size:13px;padding:2rem;justify-content:center}
 .dot-spin{display:inline-block;width:6px;height:6px;background:var(--teal);border-radius:50%;animation:dot .7s infinite alternate}
 @keyframes dot{to{opacity:.2}}
+.world-note{display:flex;align-items:center;gap:.5rem;flex-shrink:0;padding:6px 1.5rem;font-size:12px;line-height:1.35;color:var(--amber-light);background:rgba(186,117,23,.12);border-bottom:1px solid rgba(186,117,23,.3)}
+.world-note .ti{font-size:14px;flex-shrink:0}
+.empty span{text-align:center}
 .error-msg{color:#f09595;font-size:13px;padding:1rem;background:var(--red-dim);border-radius:6px;border:1px solid rgba(226,75,74,.2);display:flex;align-items:center;gap:.5rem}
 .search-bar{display:flex;gap:.5rem;margin-bottom:1rem}
 .search-bar input{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 12px;font-size:13px;outline:none}
@@ -1137,6 +1140,7 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
       </div>
     </div>
   </div>
+  <div id="world-note" class="world-note" style="display:none"></div>
   <main>
     <div id="tab-skills"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
     <div id="tab-inventory" style="display:none"><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div></div>
@@ -1441,6 +1445,11 @@ let _bitjitaFailedAt = 0;
 async function apiFetch(path, timeoutMs = 30000) {
   // Time-boxed so a stalled request can't hang a caller forever (e.g. the Networth/Planner inventory
   // load Promise.all sitting on "Loading inventory…"). On timeout the fetch aborts and this throws.
+  // bitjita on another world than the relay (bitjitaWorldCheck) knows nothing about a tracked character — and an id
+  // it does recognise there is somebody else's. Don't ask; failing here also releases the boot hold on bitjita, so
+  // the live cache takes over the moment it is whole. Untracked ids (the lookup page) are bitjita's own and go through.
+  const own = bitjitaWorld === false && /^\/api\/(?:players|market\/player)\/(\d+)/.exec(path);
+  if (own && isPlayerTracked(own[1])){ _bitjitaFailedAt = Date.now(); throw Object.assign(new Error('bitjita has no 1.0 data yet — waiting for the live relay'), { otherWorld: true }); }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -1814,7 +1823,68 @@ function lookupRender(){
 }
 function lookupRenderInvBody(){ const b = document.getElementById('lookup-inv-body'); if (!b || !lookupState.data.inventory) return; b.innerHTML = inventoryContentHtml(lookupState.data.inventory, lookupState.invQ || '', 'lk' + lookupState.id); }
 function lookupRefresh(){ const s = lookupState; if (!s.id) return; s.info = null; delete s.data[s.sub]; lookupLoadInfo(); lookupLoadSub(s.sub, true); }
-function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s.info || {}; selectPlayer({ entityId: s.id, username: info.username || info.userName || ('Player ' + s.id) }); bcSyncAlertFeed(); lookupRenderHeader(); }   // tracked now: the relay feed takes over, drop the page's channel
+// The lookup page shows bitjita's player, and bitjita can be on another world than the relay (it still served Early
+// Access when the relay moved to 1.0). So Track asks the relay who this is in ITS world: the same id if it carries
+// the same name there, else the character with exactly that name, else the name waits for its character like the
+// rest (waitingPlayers). Relay not answering: track the id as given, as before.
+async function lookupTrack(){
+  const s = lookupState; if (!s.id) return;
+  const id = s.id, info = s.info || {}, name = info.username || info.userName || '';
+  let p = { entityId: id, username: name || ('Player ' + id) };
+  try {
+    const d = await relayGet('/player/' + id);
+    if (!(d && (!name || waitKey(d.username) === waitKey(name)))){
+      const list = name.length >= 2 ? await relayGet('/player?name=' + encodeURIComponent(name)) : null;
+      const hit = (Array.isArray(list) ? list : []).find(x => waitKey(x.username) === waitKey(name));
+      if (hit) p = relayPlayerRow(hit);
+      else {
+        if (name && !waitingPlayers.some(w => waitKey(w.username) === waitKey(name))){ waitingPlayers.push({ username: name, oldId: String(id) }); saveWaiting(); renderPlayerArea(); liveStart(); if (!trackedPlayers.length) refreshPlayerTabs(); }
+        alertToast(name ? name + ' has no character in the 1.0 world yet — tracked as soon as it exists' : 'That player is not in the 1.0 world', 'ti-hourglass');
+        return;
+      }
+    }
+  } catch(e){}
+  selectPlayer(p); bcSyncAlertFeed(); lookupRenderHeader();   // tracked now: the relay feed takes over, drop the page's channel
+}
+// ── Is bitjita on the same world as the relay? ──
+// They are separate services and changed worlds separately: on 2026-11-11 the relay moved to the 1.0 world while
+// bitjita kept serving Early Access. Everything bitjita-backed (market, deals, shopping prices, the lookup page, the
+// REST fallback) then describes a different world than the live data. Region names tell them apart — each relay
+// mirror carries its own region's name, and every 1.0 region but one was renamed — so compare one.
+let bitjitaWorld = (() => { try { const v = JSON.parse(localStorage.getItem('bc_bitjita_world') || 'null'); return (v && Date.now() - v.t < 6 * 3600e3 && typeof v.same === 'boolean') ? v.same : null; } catch(e){ return null; } })();   // true = same world, false = another, null = not known
+let _bjWorldAt = 0, _bjWorldBusy = false;
+async function bitjitaWorldCheck(){
+  if (_bjWorldBusy || Date.now() - _bjWorldAt < 10 * 60 * 1000) return;
+  _bjWorldBusy = true; _bjWorldAt = Date.now();
+  try {
+    await relayReady();
+    const rg = BC_REGIONS.find(r => liveRegionName(r)) || BC_REGIONS[0];
+    let mine = liveRegionName(rg);
+    if (!mine){ const t = await relayFetchOnce(rg, ['SELECT * FROM world_region_name_state'], 8000); mine = ((t.world_region_name_state || [])[0] || {}).player_facing_name; }
+    const d = await fetch(API + '/api/regions').then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)));
+    const list = Array.isArray(d) ? d : ((d && d.regions) || []);
+    if (!mine || !list.length) return;
+    const theirs = list.find(x => +x.regionId === +rg);
+    const same = !!(theirs && waitKey(theirs.regionName) === waitKey(mine));
+    safeSetItem('bc_bitjita_world', JSON.stringify({ same, t: Date.now() }));
+    if (same !== bitjitaWorld){ bitjitaWorld = same; worldNoteSync(); }
+  } catch(e){ _bjWorldAt = Date.now() - 9 * 60 * 1000; }   // couldn't tell: try again in a minute
+  finally { _bjWorldBusy = false; }
+}
+// The strip under the topbar on tabs whose numbers come from bitjita, while it is on another world.
+const WORLD_NOTE_TABS = {
+  market: 'These listings come from bitjita, which still shows the Early Access world. They are not 1.0 prices yet.',
+  deals: 'These deals come from bitjita, which still shows the Early Access world. They are not 1.0 prices yet.',
+  shopping: 'These prices come from bitjita, which still shows the Early Access world. They are not 1.0 prices yet.',
+  jsn: 'Item values here come from bitjita, which still shows the Early Access world. They are not 1.0 prices yet.',
+  lookup: 'Player lookup reads bitjita, which still shows the Early Access world — these are Early Access characters.',
+};
+function worldNoteSync(){
+  const el = document.getElementById('world-note'); if (!el) return;
+  const msg = bitjitaWorld === false ? WORLD_NOTE_TABS[currentTab] : '';
+  el.style.display = msg ? '' : 'none';
+  el.innerHTML = msg ? '<i class="ti ti-info-circle"></i><span>' + escHtml(msg) + '</span>' : '';
+}
 // ── Player-name search boxes (topbar lookup, sidebar, Group Craft): answers on hand, narrowed as you type ──
 // bitjita's /api/players?q= is a case-insensitive LIKE '%q%' (so _ and % are wildcards) returning the alphabetically
 // first 50 matches. Every name a longer query matches, a shorter query inside it matched too, so a cached answer can be
@@ -1822,31 +1892,51 @@ function lookupTrack(){ const s = lookupState; if (!s.id) return; const info = s
 // (anything else it matches sorts after the cached 50th, i.e. below them). So narrowing an answer under 50 (every match
 // there is) is final, and so is narrowing a capped one down to at least a full list; anything shorter shows at once and
 // the request adds the rest below it. Answers keep 5 minutes, so backspacing is instant too.
+// TWO sources, never mixed in one box (src): 'relay' — the bitcraftsync relay's /player?name=, i.e. the world the app
+// tracks, for every box that ADDS a player (sidebar, Group Craft): an id from any other world would be meaningless to
+// the live sockets. 'bitjita' — for the lookup page, which shows bitjita's own data. The relay's search is a plain
+// case-insensitive substring that returns EVERY match (no cap, any order), so a cached answer narrows to a final one
+// every time, the rows are sorted here, and the box waits for three letters (two would be thousands of names).
 const PS_CAP = 50, PS_TTL = 5 * 60 * 1000;
-const _psCache = new Map(), _psInflight = new Map();   // lower-cased query -> { t, players } / its request
-function playerSearchLocal(q, max){
-  const k = q.toLowerCase(), now = Date.now(), hit = _psCache.get(k);
+const _psCache = { relay: new Map(), bitjita: new Map() }, _psInflight = { relay: new Map(), bitjita: new Map() };   // per source: lower-cased query -> { t, players } / its request
+const psMin = src => src === 'relay' ? 3 : 2;
+function playerSearchLocal(q, max, src){
+  const cache = _psCache[src], k = q.toLowerCase(), now = Date.now(), hit = cache.get(k);
   if (hit && now - hit.t < PS_TTL) return { players: hit.players, final: true };
-  if (/[_%\\]/.test(k)) return null;   // wildcards don't narrow like a plain substring — the server answers those
+  if (src === 'bitjita' && /[_%\\]/.test(k)) return null;   // wildcards don't narrow like a plain substring — the server answers those
   let best = null, final = false;
-  for (const [bk, e] of _psCache){
+  for (const [bk, e] of cache){
     if (now - e.t >= PS_TTL || !k.includes(bk)) continue;
-    const players = e.players.filter(p => playerName(p).toLowerCase().includes(k));
+    const players = psSort(e.players.filter(p => playerName(p).toLowerCase().includes(k)), k, src);
     if (!best || players.length > best.length) best = players;
-    if (e.players.length < PS_CAP) final = true;
+    if (src === 'relay' || e.players.length < PS_CAP) final = true;
   }
   return best && { players: best, final: final || best.length >= max };
 }
-function playerSearchFetch(q){
-  const k = q.toLowerCase();
-  if (!_psInflight.has(k)) _psInflight.set(k, apiFetch('/api/players?q=' + encodeURIComponent(q), 10000).then(d => {
-    const players = d && d.players;
-    if (!Array.isArray(players)) throw new Error('no player list');   // never cache a malformed reply as "no matches"
-    _psCache.delete(k); _psCache.set(k, { t: Date.now(), players });
-    if (_psCache.size > 80) _psCache.delete(_psCache.keys().next().value);
+// Relay rows arrive in no order: the exact name first, then names starting with the query, then A–Z.
+function psSort(players, k, src){
+  if (src !== 'relay') return players;
+  const rank = p => { const nm = playerName(p).toLowerCase(); return nm === k ? 0 : nm.startsWith(k) ? 1 : 2; };
+  return players.slice().sort((a, b) => (rank(a) - rank(b)) || playerName(a).localeCompare(playerName(b)));
+}
+function playerSearchFetch(q, src){
+  const k = q.toLowerCase(), cache = _psCache[src], inflight = _psInflight[src];
+  if (!inflight.has(k)) inflight.set(k, (src === 'relay'
+    ? relayGet('/player?name=' + encodeURIComponent(q), 10000).then(list => {
+        if (!Array.isArray(list)) throw new Error('no player list');
+        return psSort(list.filter(d => d && d.entity_id && d.username).map(relayPlayerRow), k, src);
+      })
+    : apiFetch('/api/players?q=' + encodeURIComponent(q), 10000).then(d => {
+        const players = d && d.players;
+        if (!Array.isArray(players)) throw new Error('no player list');   // never cache a malformed reply as "no matches"
+        return players;
+      })
+  ).then(players => {
+    cache.delete(k); cache.set(k, { t: Date.now(), players });
+    if (cache.size > 80) cache.delete(cache.keys().next().value);
     return players;
-  }).finally(() => _psInflight.delete(k)));
-  return _psInflight.get(k);
+  }).finally(() => inflight.delete(k)));
+  return inflight.get(k);
 }
 // Redraw a search dropdown in place. Rows are keyed ({k, h}), so a row that stays is left alone instead of rebuilt; new
 // rows fade in and the box eases to its new height. While the answer is still coming (opt.pending), rows that stopped
@@ -1879,8 +1969,9 @@ function patchResultRows(el, rows, opt){
 // current text is on screen. shown: id → player for the rows drawn, for their click handlers.
 function makePlayerSearch(cfg){
   const s = { timer: null, q: null, after: null, shown: new Map() };   // q: the query whose request is queued or out
+  const src = cfg.src || 'relay';
   // No cached answer covers q: the rows on screen that still match stay up while it's fetched.
-  const onHand = q => playerSearchLocal(q, cfg.max) || { final: false, players: /[_%\\]/.test(q) ? [] : [...s.shown.values()].filter(p => playerName(p).toLowerCase().includes(q.toLowerCase())) };
+  const onHand = q => playerSearchLocal(q, cfg.max, src) || { final: false, players: (src === 'bitjita' && /[_%\\]/.test(q)) ? [] : [...s.shown.values()].filter(p => playerName(p).toLowerCase().includes(q.toLowerCase())) };
   s.hide = () => { clearTimeout(s.timer); s.q = s.after = null; s.shown = new Map(); const el = cfg.box(); if (el){ el.style.display = 'none'; el.textContent = ''; } };
   s.draw = (players, opt) => {
     const el = cfg.box(); if (!el) return;
@@ -1891,13 +1982,13 @@ function makePlayerSearch(cfg){
     const inp = cfg.input(); if (!inp) return;
     const q = inp.value.trim();
     if (onFinal) s.after = { q, fn: onFinal };
-    if (q.length < 2){ s.hide(); return; }
+    if (q.length < psMin(src)){ s.hide(); return; }
     const local = onHand(q);
     s.draw(local.players, { pending: !local.final });
     if (local.final){ clearTimeout(s.timer); s.q = null; const a = s.after; s.after = null; if (a && a.q === q) a.fn(local.players); return; }
     if (s.q === q && !now) return;
     clearTimeout(s.timer); s.q = q;
-    s.timer = setTimeout(() => playerSearchFetch(q).then(
+    s.timer = setTimeout(() => playerSearchFetch(q, src).then(
       () => { if (s.q != null) s.run(); },
       () => { if (s.q !== q) return; s.q = s.after = null; s.draw(onHand(q).players, { failed: true }); }
     ), now ? 0 : 250);
@@ -1905,7 +1996,7 @@ function makePlayerSearch(cfg){
   return s;
 }
 // Topbar search → lookup (never tracks). Same endpoint as the sidebar search, its own dropdown.
-const lookupNameSearch = makePlayerSearch({ input: () => document.getElementById('lookup-input'), box: () => document.getElementById('lookup-results'), max: 8,
+const lookupNameSearch = makePlayerSearch({ src: 'bitjita', input: () => document.getElementById('lookup-input'), box: () => document.getElementById('lookup-results'), max: 8,
   row: p => { const pid = escHtml(String(p.entityId)); return '<div class="search-result-item" data-id="' + pid + '" onclick="lookupHideResults();openLookup(\'' + pid + '\')">' + escHtml(playerName(p)) + '<small>' + pid + (isPlayerTracked(p.entityId) ? ' · tracked' : '') + '</small></div>'; } });
 let _lookupSearchBound = false;
 function initLookupSearch(){
@@ -1931,6 +2022,7 @@ function switchTab(tab, opts) {
   mainEl.classList.toggle('map-mode', tab === 'map');   // the map's own shell sets its width (see .map-shell)
   mainEl.classList.toggle('skills-mode', tab === 'skills');   // Experience windows set their own widths (see psecApplySize)
   currentTab = tab;
+  worldNoteSync();
   if (tab !== 'lookup') safeSetItem('bc_tab', tab);   // a lookup is never the remembered tab
   // URL mirrors the tab. The boot render REPLACES the entry it landed on (no phantom history step); a
   // back/forward navigation already carries the right path, so nothing is pushed for it.
@@ -2012,6 +2104,8 @@ function isPlayerTracked(id) { return trackedPlayers.some(p => String(p.entityId
 function selectPlayer(p) {
   if (!p || !p.entityId) return;
   hideResults();
+  const w = waitingPlayers.find(x => waitKey(x.username) === waitKey(playerName(p)));   // was waiting for this character: added by hand instead
+  if (w){ worldCarryPlayer(w.oldId, p.entityId); waitingPlayers = waitingPlayers.filter(x => x !== w); saveWaiting(); }
   if (!isPlayerTracked(p.entityId)){ trackedPlayers.push(p); if (typeof p.signedIn === 'boolean') playerOnline[String(p.entityId)] = p.signedIn; }  // search result already carries signedIn
   currentPlayer = trackedPlayers[0];
   savePlayers();
@@ -2052,11 +2146,159 @@ function renderPlayerArea() {
       <div class="search-results" id="search-results" style="display:none"></div>
     </div>
     <button class="search-btn" onclick="searchPlayers()"><i class="ti ti-${has ? 'plus' : 'search'}"></i> ${has ? 'Add' : 'Search'}</button>
-    ${has ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${chips}</div>` : ''}`;
+    ${has ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${chips}</div>` : ''}${waitingChipsHtml()}`;
   initSearch();
   const tr = document.getElementById('topbar-right');
   if (tr) tr.innerHTML = has ? `<i class="ti ti-users" style="color:var(--teal)"></i><span style="color:var(--teal-light);font-weight:500">${trackedPlayers.length} player${trackedPlayers.length > 1 ? 's' : ''} tracked</span>` : '';
 }
+// ═══════════ WHICH WORLD — the roster follows the relay ═══════════
+// The live relay mirrors ONE game world, and since 2026-11-11 that is the 1.0 world, not Early Access (see
+// loadRelayRegions). Entity ids do not carry over: a 1.0 character has a new id, and an old id means nothing there
+// — or worse, is somebody else's entity, since ids are a per-region counter that started again. Usernames DO carry
+// over. So the roster follows the relay's world by NAME:
+//   · WORLD_KEY stamps which world the stored ids and picks belong to.
+//   · When the relay is on another world (worldCheck), the tracked players move to `waitingPlayers` — out of every
+//     tab and every query. The live sockets watch for each waiting name (liveQuerySet), so a character created at
+//     launch joins the roster by itself, with its alert settings, the moment it exists. Tracked claims and the
+//     other id-bound picks cannot be carried (a claim is founded anew): a copy goes to a backup key, then they are
+//     cleared along with the id-keyed caches.
+//   · A relay that only RENAMES its databases is not a new world: if a stored id still answers to its stored name,
+//     the stamp is all that changes.
+const WORLD_KEY = 'bc_world', WAITING_KEY = 'bc_players_waiting';
+// Stored picks that name entities of one world…
+const WORLD_PICK_KEYS = ['bc_claims_v1', 'bc_claims_collapsed_v1', 'bc_opencraft_claims', 'bc_opencraft_custom', 'bc_opencraft_home', 'bc_jsn_claims', 'bc_map_tracked_players_v1'];
+// …and caches keyed by them, which simply refill.
+const WORLD_CACHE_KEYS = ['bcRelayPlaces', 'bcLiveContainers2', 'bcOcPlaces', 'bcOcOwners', 'bc_region_names_v1', 'bcTaskRefs2', 'bcBuffDescs2', 'bcSkillDescs', 'bc_herd_params_v1', 'bc_herd_clocks_v2', 'bc_claim_log_v1', 'bc_house_log_v1'];
+let waitingPlayers = [];   // [{ username, oldId, ord }] — tracked names with no character in the relay's world yet
+const worldStamp = () => { try { return localStorage.getItem(WORLD_KEY) || ''; } catch(e){ return ''; } };
+const waitKey = n => String(n || '').trim().toLowerCase();
+function loadWaiting(){ try { const v = JSON.parse(localStorage.getItem(WAITING_KEY) || '[]'); waitingPlayers = Array.isArray(v) ? v.filter(w => w && waitKey(w.username)) : []; } catch(e){ waitingPlayers = []; } }
+function saveWaiting(){ safeSetItem(WAITING_KEY, JSON.stringify(waitingPlayers)); }
+// The names the live sockets watch for, lower-cased like the game's own player_lowercase_username_state. A name that
+// could break out of the SQL string is left out (it just stays waiting, unwatched).
+function waitingNames(){ return [...new Set(waitingPlayers.map(w => waitKey(w.username)).filter(n => n.length >= 2 && !/['\\\u0000-\u001f]/.test(n)))].sort(); }
+// One relay HTTP read, time-boxed → the parsed JSON, or null on a 404. Throws when the relay didn't answer, so
+// "not there" is never guessed from an outage.
+async function relayGet(path, timeoutMs = 8000){
+  const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(RELAY_HTTP + path, { signal: ctrl.signal });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(tm); }
+}
+const relayPlayerRow = d => ({ entityId: String(d.entity_id), username: d.username, signedIn: d.signed_in === true });
+// Per-player settings follow a character to its new id: paused / collapsed / muted, and its alert choices.
+function worldCarryPlayer(oldId, newId){
+  oldId = String(oldId || ''); newId = String(newId || '');
+  if (!oldId || !newId || oldId === newId) return;
+  ['bc_players_paused', 'bc_players_collapsed', 'bc_players_alerts_muted'].forEach(k => {
+    try { const a = JSON.parse(localStorage.getItem(k) || '[]'); if (Array.isArray(a) && a.map(String).includes(oldId)) safeSetItem(k, JSON.stringify([...new Set(a.map(x => String(x) === oldId ? newId : String(x)))])); } catch(e){}
+  });
+  [typeof playerPaused !== 'undefined' && playerPaused, typeof playerCollapsed !== 'undefined' && playerCollapsed, typeof playerAlertsMuted !== 'undefined' && playerAlertsMuted]
+    .forEach(s => { if (s && s.has(oldId)){ s.delete(oldId); s.add(newId); } });
+  try {
+    const a = JSON.parse(localStorage.getItem('bc_alerts') || 'null');
+    if (a && a.players && a.players[oldId] && !a.players[newId]){ a.players[newId] = a.players[oldId]; delete a.players[oldId]; safeSetItem('bc_alerts', JSON.stringify(a)); }
+    if (typeof alertSettings !== 'undefined' && alertSettings && alertSettings.players && alertSettings.players[oldId] && !alertSettings.players[newId]){ alertSettings.players[newId] = alertSettings.players[oldId]; delete alertSettings.players[oldId]; }
+  } catch(e){}
+}
+// Is what's stored from the world the relay mirrors? Resolves true when storage was rewritten for a new world —
+// the caller then reloads the page once, so every value read at load starts from the new world.
+let _worldCheckP = null;
+function worldCheck(){
+  if (_worldCheckP) return _worldCheckP;
+  const p = _worldCheckP = (async () => {
+    await relayFirstRead();
+    const from = worldStamp();
+    if (from === relayWorld) return false;
+    const roster = trackedPlayers.slice();
+    const stamp = () => { safeSetItem(WORLD_KEY, relayWorld); if (worldStamp() !== relayWorld) _worldForcedOk = true; };   // storage blocked: this session only
+    // The same world under a new database name? A stored id that still answers to its stored name says so.
+    let same = false;
+    try {
+      if (roster.length || trackedClaims.length){ const h = await relayGet('/cache-health'); if (!h || h.ready !== true) throw new Error('relay lookups still warming up'); }   // a cold lookup cache answers 404 for everyone
+      const got = await Promise.all(roster.slice(0, 8).map(q => relayGet('/player/' + q.entityId)));
+      same = got.some((d, i) => d && waitKey(d.username) === waitKey(playerName(roster[i])));
+      if (!same && trackedClaims.length){ const c = trackedClaims[0], d = await relayGet('/claim/' + c.entityId); same = !!(d && c.name && d.name === c.name); }
+    } catch(e){ return false; }   // the relay didn't answer: leave everything alone and ask again (worldRetry)
+    if (same){ stamp(); return false; }
+    // A different world. Keep a copy of what belonged to the old one…
+    const keep = {};
+    ['bc_players', 'bc_groupcraft', 'bc_opencraft_filters', ...WORLD_PICK_KEYS].forEach(k => { try { const v = localStorage.getItem(k); if (v != null) keep[k] = v; } catch(e){} });
+    const touched = Object.keys(keep).length > 0;
+    if (touched) safeSetItem('bc_world_backup_' + (from || 'early-access'), JSON.stringify({ from: from || 'early-access', to: relayWorld, at: new Date().toISOString(), keys: keep }));
+    // …the tracked players wait for their characters…
+    const have = new Set(waitingPlayers.map(w => waitKey(w.username)));
+    roster.forEach((q, i) => { const n = playerName(q); if (n !== 'Unknown' && !have.has(waitKey(n))){ have.add(waitKey(n)); waitingPlayers.push({ username: n, oldId: String(q.entityId), ord: i }); } });
+    saveWaiting();
+    trackedPlayers = []; currentPlayer = null; savePlayers();
+    // …and everything else that named an entity of the old world goes.
+    [...WORLD_PICK_KEYS, ...WORLD_CACHE_KEYS].forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
+    try { const f = JSON.parse(localStorage.getItem('bc_opencraft_filters') || 'null'); if (f && f.scope && /^\d+$/.test(String(f.scope))){ f.scope = 'all'; f.scopeName = ''; safeSetItem('bc_opencraft_filters', JSON.stringify(f)); } } catch(e){}
+    try { const g = JSON.parse(localStorage.getItem('bc_groupcraft') || 'null'); if (g && Array.isArray(g.containers) && g.containers.length){ g.containers = []; safeSetItem('bc_groupcraft', JSON.stringify(g)); } } catch(e){}
+    stamp();
+    return touched && worldStamp() === relayWorld;   // nothing to re-read, or the stamp didn't stick (storage blocked): no reload
+  })();
+  p.finally(() => { if (_worldCheckP === p) _worldCheckP = null; });
+  return p;
+}
+// Stored ids may only be asked of the relay once they are known to be from its world.
+let _worldForcedOk = false, _worldRetryT = null;
+function worldOk(){ return _worldForcedOk || worldStamp() === relayWorld; }
+// The relay turned out to mirror a different world than the one this page loaded with (or the check has yet to
+// get an answer): settle it, then either start over on the rewritten storage or (re)start the live layer.
+function worldChanged(){ worldCheck().then(rewrote => { if (rewrote) location.reload(); else { liveStopAll(); liveStart(); } }); }
+function worldRetry(){ if (!_worldRetryT) _worldRetryT = setTimeout(() => { _worldRetryT = null; if (!worldOk()) worldChanged(); }, 60000); }
+// Characters the live sockets just saw appear: `found` = lower-cased name → entity id.
+function waitingArrived(found){
+  const hits = waitingPlayers.filter(w => found.has(waitKey(w.username)));
+  if (!hits.length) return;
+  waitingPlayers = waitingPlayers.filter(w => !hits.includes(w)); saveWaiting();
+  const added = [];
+  hits.forEach(w => {
+    const id = String(found.get(waitKey(w.username)));
+    if (isPlayerTracked(id)) return;
+    worldCarryPlayer(w.oldId, id);
+    trackedPlayers.push({ entityId: id, username: w.username, ord: w.ord });
+    added.push(w.username);
+  });
+  if (added.length){
+    trackedPlayers.sort((a, b) => (a.ord != null ? a.ord : 1e9) - (b.ord != null ? b.ord : 1e9));   // the order they were tracked in before
+    currentPlayer = trackedPlayers[0]; savePlayers();
+  }
+  renderPlayerArea();
+  refreshPlayerTabs();   // also redials: the roster and the watch list both changed
+  if (added.length){
+    refreshPlayerOnline();
+    const msg = (added.length === 1 ? added[0] + ' is' : added.slice(0, -1).join(', ') + ' and ' + added[added.length - 1] + ' are') + ' in the 1.0 world — now tracked';
+    try { alertToast(msg, 'ti-user-check'); recordNotif('world', msg); } catch(e){}
+  }
+}
+function removeWaitingPlayer(name){
+  waitingPlayers = waitingPlayers.filter(w => waitKey(w.username) !== waitKey(name)); saveWaiting();
+  renderPlayerArea();
+  if (typeof liveStart === 'function') liveStart();   // one name fewer to watch for
+  if (!trackedPlayers.length) refreshPlayerTabs();     // the "waiting for…" line in the empty tabs
+}
+function waitingChipsHtml(){
+  if (!waitingPlayers.length) return '';
+  const chips = waitingPlayers.map(w => `<div style="display:inline-flex;align-items:center;gap:5px;background:transparent;border:1px dashed var(--border2);border-radius:14px;padding:3px 8px;font-size:12px;color:var(--text3)" title="No character named ${escHtml(w.username)} in the 1.0 world yet. It is added here by itself as soon as it exists.">
+      <i class="ti ti-hourglass" style="font-size:12px;flex-shrink:0"></i>
+      <span style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(w.username)}</span>
+      <i class="ti ti-x" style="cursor:pointer;font-size:13px" onclick="removeWaitingPlayer(decodeURIComponent('${encodeURIComponent(w.username).replace(/'/g, '%27')}'))" title="Stop waiting for this name"></i>
+    </div>`).join('');
+  return `<div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.35">Waiting for the 1.0 character</div><div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px">${chips}</div>`;
+}
+// What an empty player tab says: nobody tracked, or everybody still waiting for a 1.0 character.
+function noPlayersHtml(){
+  if (!waitingPlayers.length) return '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>';
+  const n = waitingPlayers.map(w => escHtml(w.username));
+  const names = n.length === 1 ? n[0] : n.slice(0, -1).join(', ') + ' and ' + n[n.length - 1];
+  return `<div class="empty"><i class="ti ti-hourglass"></i><span>Waiting for ${names} to exist in the 1.0 world.<br>${n.length === 1 ? 'It appears' : 'They appear'} here on their own once the character is created.</span></div>`;
+}
+
 // ── Online / offline status for tracked players (green dot = signed in, grey = offline) ──
 let playerOnline = {};   // entityId -> boolean (current signedIn); absent = unknown
 let playerOnlineTimer = null;
@@ -2112,7 +2354,7 @@ function refreshPlayerTabs() {
   ordersFetchedAt = 0; craftFetchedAt = 0;   // roster changed → the cached tabs must refetch, not short-circuit
   if (typeof liveStart === 'function') liveStart();   // roster changed → full redial with the new query set (§3.2); stops the layer when empty
   if (!trackedPlayers.length) {
-    ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; });
+    ['skills','crafting','inventory'].forEach(t => { const e = document.getElementById('tab-'+t); if (e) e.innerHTML = noPlayersHtml(); });
   }
   if (currentTab === 'skills') renderExperienceTab();
   else if (currentTab === 'tasks') loadTasks(currentPlayer ? currentPlayer.entityId : null);
@@ -2791,7 +3033,7 @@ function recalcJourney(entityId){
 async function renderExperienceTab() {
   const el = document.getElementById('tab-skills');
   if (!el) return;
-  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length) { el.innerHTML = noPlayersHtml(); return; }
   // Paint the skeleton BEFORE awaiting anything. loadSkillsInto bails when a player's container is
   // missing, so if the live cache completed while this function was parked on ensureThresholds(), the
   // completion kick would fire into an empty document and the tab would sit on "Loading…" forever.
@@ -3508,7 +3750,7 @@ async function renderInventoryTab(silent) {
   const el = document.getElementById('tab-inventory');
   if (!el) return;
   // Nothing tracked yet: still offer the Claims picker — a claim's storage can be tracked without any player.
-  if (!trackedPlayers.length && !trackedClaims.length) { el.innerHTML = `<div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem">${claimPickerBtnHtml()}</div><div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started — or track a claim's storage with Claims above</span></div>`; return; }
+  if (!trackedPlayers.length && !trackedClaims.length) { el.innerHTML = `<div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem">${claimPickerBtnHtml()}</div>${waitingPlayers.length ? noPlayersHtml() : `<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started — or track a claim's storage with Claims above</span></div>`}`; return; }
   if (!silent || !document.getElementById('inv-sections')) {
     el.innerHTML = `
       <div id="inv-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
@@ -3959,7 +4201,7 @@ function ordersExpandHtml(det, ctx){
 }
 async function renderOrdersTab(silent, force){
   const el = document.getElementById('tab-orders'); if (!el) return;
-  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length){ el.innerHTML = noPlayersHtml(); return; }
   if (!silent || !document.getElementById('orders-toolbar')){
     el.innerHTML = `
       <div id="orders-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
@@ -4369,7 +4611,7 @@ function jsnRenderResults(){
 
 async function renderJsnTab(silent, reprice){
   const el = document.getElementById('tab-jsn'); if (!el) return;
-  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length){ el.innerHTML = noPlayersHtml(); return; }
   if (!silent || !document.getElementById('jsn-toolbar')){
     el.innerHTML = `
       <div id="jsn-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
@@ -4555,33 +4797,84 @@ let craftByPlayer = {}; // entityId -> {active, done, passive, itemMap}
 // it silently dropped 5 of BigKitten's 14 crafts (one of them 98% done). So we read the state tables
 // ourselves: one subscription per region, all 13 in parallel (~1s, ~25KB). Recipe names, durations and
 // outputs come from /crafting-data, which is already loaded and keyed by the same game recipe ids.
-// Which regions the relay actually mirrors. Hardcoding this is how it goes stale — the same failure
-// mode as hardcoding the database name, which cost us hours when the relay renamed them. /health is
-// authoritative (`sources[].port`, region = port − 3000), so read it at startup and keep this list only
-// as the fallback for when /health is unreachable. Temporary/event regions therefore appear on their
-// own, and any the relay drops stop being dialled.
+// Which regions the relay mirrors, and what it calls each one's database. Hardcoding either is how they go
+// stale, and the relay has renamed its databases twice: `relay-mirror-bc<N>` → `bitcraft-live-<N>` (the old
+// name answered 404 on the WebSocket upgrade, which a browser shows only as a bare close code 1006 with no
+// open event — indistinguishable from "relay is down", and it cost hours), then `bitcraft-live-<N>` →
+// `idc-<N>` on 2026-11-11 when it stopped mirroring Early Access and moved to the 1.0 world: same ports,
+// 13 regions → 9, old names 410 Gone. /health is authoritative (`sources[].database` + `.port`) and the
+// relay's own explorer reads it at runtime, so we do too — at startup, again whenever a socket is refused
+// (relayRecheck), and on a slow timer. The values below are only the fallback for when /health can't be
+// reached. Their docs still say relay-mirror-bcN, so trust /health over the tutorial.
 // The `global` mirror (:3000) is deliberately excluded: it's reference/catalog data, and a subscribe
 // there for this player's crafts/orders/inventory returns ZERO rows across all five tables (verified).
-let BC_REGIONS = [3,7,8,9,11,12,13,14,15,17,18,19,23];
-async function loadRelayRegions(){
-  try {
-    const j = await (await fetch(`${RELAY_HTTP}/health`)).json();
-    const regions = Object.values(j.sources || {})
-      .filter(s => s && s.port && s.port !== 3000 && s.connectivity === 'live')
-      .map(s => s.port - 3000)
-      .filter(r => r > 0 && r < 256)
-      .sort((a,b) => a-b);
-    if (regions.length) BC_REGIONS = regions;
-  } catch(e){ /* keep the fallback list */ }
-  return BC_REGIONS;
+let BC_REGIONS = [7,8,9,12,13,14,17,18,19];
+// The name the region databases share (`idc-8` → "idc") says WHICH GAME WORLD the relay mirrors. Every
+// entity id the app stores belongs to one world, so a change here is handled by worldAdopt, not ignored.
+const RELAY_WORLD_DEFAULT = 'idc';
+let relayWorld = RELAY_WORLD_DEFAULT;
+const relayDb = {};   // region -> { db, port } exactly as /health lists it
+let _relayHealthAt = 0, _relayHealthBusy = null, _relayHealthOk = false;
+// Reads /health. Resolves { names, added, removed, world }: whether a database name or port changed, the regions
+// that are new since the last read, fallback guesses the relay turned out not to have, and whether the relay now
+// mirrors a different world. Never throws.
+// After the first read a region is only ever ADDED, never dropped mid-session: its cache slice is still on
+// screen, and a region whose upstream link blinks for a minute must not take its rows down with it.
+function loadRelayRegions(){
+  if (_relayHealthBusy) return _relayHealthBusy;
+  const p = _relayHealthBusy = (async () => {
+    const out = { names: false, added: [], removed: [], world: false };
+    try {
+      const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 8000);
+      let j; try { j = await (await fetch(`${RELAY_HTTP}/health`, { signal: ctrl.signal, cache: 'no-store' })).json(); } finally { clearTimeout(tm); }
+      const worlds = {};   // name prefix -> [{ region, db, port, live }]
+      Object.values(j.sources || {}).forEach(s => {
+        const m = s && typeof s.database === 'string' && /^(.+?)-(\d+)$/.exec(s.database);
+        if (!m || !(s.port > 0) || !(+m[2] > 0 && +m[2] < 256)) return;   // skips the global mirror (no region number)
+        (worlds[m[1]] || (worlds[m[1]] = [])).push({ region: +m[2], db: s.database, port: +s.port, live: s.connectivity === 'live' });
+      });
+      // One world at a time. Normally there is only one; if the relay ever lists two side by side, stay on the one
+      // we are on, else take the default, else the one with the most regions up.
+      const names = Object.keys(worlds);
+      if (!names.length) return out;
+      const up = w => worlds[w].filter(s => s.live).length;
+      const world = names.includes(relayWorld) ? relayWorld : names.includes(RELAY_WORLD_DEFAULT) ? RELAY_WORLD_DEFAULT : names.sort((a, b) => up(b) - up(a))[0];
+      const list = worlds[world], firstRead = !_relayHealthOk;
+      if (world !== relayWorld){ relayWorld = world; out.world = true; Object.keys(relayDb).forEach(k => delete relayDb[k]); }
+      list.forEach(s => { const prev = relayDb[s.region]; if (!prev || prev.db !== s.db || prev.port !== s.port){ relayDb[s.region] = { db: s.db, port: s.port }; if (prev) out.names = true; } });
+      const live = list.filter(s => s.live).map(s => s.region);
+      const want = (live.length ? live : list.map(s => s.region)).sort((a, b) => a - b);   // nothing reported live: keep trying them all
+      const old = BC_REGIONS;
+      out.added = want.filter(r => !old.includes(r));
+      if (firstRead || out.world){ out.removed = old.filter(r => !want.includes(r)); BC_REGIONS = want; }
+      else if (out.added.length) BC_REGIONS = [...old, ...out.added].sort((a, b) => a - b);
+      _relayHealthOk = true; _relayHealthAt = Date.now();
+    } catch(e){ /* keep what we have */ }
+    return out;
+  })();
+  p.finally(() => { if (_relayHealthBusy === p) _relayHealthBusy = null; });
+  return p;
 }
-// ⚠️ The relay RENAMED its mirror databases from `relay-mirror-bc<N>` to `bitcraft-live-<N>`. The old
-// name now returns `HTTP 404 \`relay-mirror-bc19\` not found` on the WebSocket upgrade, which browsers
-// surface only as a bare close code 1006 with no open event — indistinguishable from "relay is down".
-// The authoritative list is /health (`sources[].database` + `.port`); the relay's own explorer reads it
-// from there at runtime, which is why the explorer kept working while we broke. Their docs still say
-// relay-mirror-bcN, so trust /health over the tutorial. One helper so a future rename is a one-line fix.
-const relayWsUrl = region => `wss://relay.bitcraftsync.app:${3000+region}/v1/database/bitcraft-live-${region}/subscribe?compression=None`;
+// Scratch sockets and the first dial wait for the first /health read (bounded by its own 8s abort), so they
+// use the relay's real names instead of the fallback guess.
+let _relayFirstP = null, _relayReadyP = null;
+function relayFirstRead(){ return _relayFirstP || (_relayFirstP = loadRelayRegions()); }
+function relayReady(){ return _relayReadyP || (_relayReadyP = relayFirstRead().then(r => { if (r.world) worldChanged(); })); }
+// A refused or unreachable socket says nothing about WHY in a browser, so ask /health again (at most once per
+// 30s): a renamed database or a moved port is picked up by the next retry, a new region is dialled, and a relay
+// that switched worlds is handled like any other world change. Also runs every 10 minutes off the watchdog.
+function relayRecheck(force){
+  if (!force && Date.now() - _relayHealthAt < 30000) return;
+  _relayHealthAt = Date.now();
+  loadRelayRegions().then(r => {
+    if (r.world){ worldChanged(); return; }
+    if (!liveOn()) return;
+    r.removed.forEach(rg => liveDrop(rg));
+    r.added.forEach(rg => liveDial(rg));
+    if (r.names) Object.values(liveConns).forEach(c => { if (!c.closed && !c.ws){ c.backoff = 1500; clearTimeout(c.timer); liveOpen(c); } });   // waiting to retry under the old name: go now
+  });
+}
+const relayWsUrl = region => { const s = relayDb[region]; return `wss://relay.bitcraftsync.app:${s ? s.port : 3000 + region}/v1/database/${s ? s.db : relayWorld + '-' + region}/subscribe?compression=None`; };
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
 // Buildings never move and claims rarely rename, so the building→claim→name maps are worth keeping
@@ -4636,6 +4929,7 @@ const LIVE_COLS = {
   equipment_preset_state: ['entity_id','player_entity_id','index','active','equipment_slots'],
   signed_in_player_state: ['entity_id'],
   player_username_state: ['entity_id','username'],
+  player_lowercase_username_state: ['entity_id','username_lowercase'],   // the watch for waiting names (waitingNames)
   traveler_task_state: ['entity_id','player_entity_id','traveler_id','task_id','completed'],
   claim_state: ['entity_id','owner_player_entity_id','owner_building_entity_id','name','neutral'],
   world_region_name_state: ['id','player_facing_name','module_name_prefix'],
@@ -4983,6 +5277,13 @@ onLiveChange(evs => {
     liveStart();
   }, LIVE_DISCOVERY_DEBOUNCE_MS);
 });
+// A waiting name's character exists (see waitingNames): snapshot or live insert, either way it joins the roster.
+onLiveChange(evs => {
+  if (!waitingPlayers.length) return;
+  const found = new Map();
+  evs.forEach(e => { if (e.table === 'player_lowercase_username_state') e.rows.forEach(r => found.set(waitKey(r.username_lowercase), String(r.entity_id))); });
+  if (found.size) waitingArrived(found);
+});
 function liveQuerySet(ids, region){
   const owner = ids.map(i => `owner_entity_id = ${i}`).join(' OR ');
   const self  = ids.map(i => `entity_id = ${i}`).join(' OR ');
@@ -5009,6 +5310,10 @@ function liveQuerySet(ids, region){
   trackedClaims.forEach(c => { if (claimRegion(c) === region) sqls.push(...claimStorageSqls(c)); });
   // Unfiltered but bounded (§8.4): one row per mirror — the region's display name.
   sqls.push('SELECT * FROM world_region_name_state');
+  // Tracked names with no character in this world yet (waitingPlayers): one indexed lookup each, in every region,
+  // because a new character's row is born in whichever region it spawns in. The row arriving — in the snapshot or
+  // as a live insert the moment the character is created — moves the name onto the roster (waitingArrived).
+  waitingNames().forEach(n => sqls.push(`SELECT * FROM player_lowercase_username_state WHERE username_lowercase = '${n}'`));
   // Map "everyone online" layer (bcPlayersWanted): the same three questions bitjita's map asks its relay —
   // movement rows of signed-in players in the overworld, their usernames, and the signed-in list itself.
   // Semijoins, so a sign-out deletes that player's rows from the result — no client-side reaping. Measured
@@ -5063,7 +5368,7 @@ function liveQuerySet(ids, region){
     tables: [...LIVE_TABLES_OWNED, ...LIVE_TABLES_SELF, ...LIVE_TABLES_PLAYERCOL, 'building_state', 'deployable_state_v2',
       'world_region_name_state', 'building_nickname_state', 'claim_state',
       'dimension_description_state', 'location_state', 'mobile_entity_state', 'player_username_state',
-      'placeable_state', 'placeable_growth_timer', 'storage_log_state'],
+      'placeable_state', 'placeable_growth_timer', 'storage_log_state', 'player_lowercase_username_state'],
   };
 }
 // Region display name straight from the cache: region 19's mirror carries {id:0, player_facing_name:"Zephra"}.
@@ -5079,7 +5384,11 @@ function liveStart(){
   const ids = trackedPlayers.map(p => String(p.entityId)).sort();
   const cKey = trackedClaims.map(c => String(c.entityId)).sort().join(',');
   const mapIds = bcMapTrackedIds().filter(id => !ids.includes(id)).sort();   // tracked on the map but not in the roster: their movement rows only
-  if (!ids.length && !cKey && !mapIds.length && !bcPlayersOn && !bcCreWanted()){ liveStopAll(); return; }   // the map's "everyone online" layer, a player tracked on the map, a tracked creature type or a tracked claim alone keeps the sockets up
+  // Stored ids from a world the relay no longer mirrors must never be asked of it (worldCheck sorts that out and
+  // restarts this); until then the tabs keep reading bitjita.
+  if (!worldOk()){ liveStopAll(); worldRetry(); return; }
+  const wKey = waitingNames().join(',');
+  if (!ids.length && !cKey && !mapIds.length && !bcPlayersOn && !bcCreWanted() && !wKey){ liveStopAll(); return; }   // the map's "everyone online" layer, a player tracked on the map, a tracked creature type, a tracked claim or a name waiting for its character alone keeps the sockets up
   const pKey = ids.join(',');
   // Discovered refs: what the cache says right now, else last session's persisted set (cold boot) — so a
   // warm start already covers chests, banks, stations and house scope in its FIRST dial, with no
@@ -5094,7 +5403,7 @@ function liveStart(){
   // save-on-change-only path meant a cleared (or never-written) blob stayed empty forever, so every
   // refresh paid a cold discovery round it should have skipped.
   if (!saved || liveRefsKey(saved) !== liveRefsKey(liveRefs)) liveSaveRefs(pKey, liveRefs);
-  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey() + '#claims:' + cKey + '#map:' + mapIds.join(',');   // the layer's on/off + region scope, the tracked claims and the map-only players are part of the query set
+  const key = pKey + '#' + liveRefsKey(liveRefs) + '#players:' + bcPlayersKey() + '#claims:' + cKey + '#map:' + mapIds.join(',') + '#wait:' + wKey;   // the layer's on/off + region scope, the tracked claims, the map-only players and the waiting names are part of the query set
   // roster/ref redial → kick the doorbells again once re-complete, and re-arm the settle gate so the
   // NEXT first-flip (a roster change re-enters the boot path) waits for discovery all over again
   if (key !== liveRosterKey){ _liveCompleteKicked = false; _liveRefsSettled = false; }
@@ -5147,7 +5456,7 @@ function liveOpen(c){
   // re-derive it on every (re)connect, or a socket that drops after a busy afternoon would re-download everything
   // since its dial (and a house's first load is its whole 14 days).
   if (trackedClaims.length || (liveRefs.chunks || []).length){ const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
-  let ws;
+  let ws, opened = false;
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
   c.ws = ws; c.status = 'connecting';
@@ -5163,6 +5472,7 @@ function liveOpen(c){
     }
   }, 15000);
   ws.onopen = () => {
+    opened = true;
     c.status = 'open'; clearTimeout(c.timer);
     // ⚠️ Backoff is NOT reset here. It resets on a SNAPSHOT (below), because the failure that actually
     // hurt was a socket that opened every time and then never finished its subscribe: resetting on
@@ -5206,6 +5516,9 @@ function liveOpen(c){
     c.ws = null; c.cre = null; clearTimeout(c.snapTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
     if (c.closed || c.key !== liveRosterKey) return;
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
+    // Never opened = the upgrade was refused or the relay is unreachable, and a browser can't tell which. The one
+    // cause we can fix from here is a database the relay has renamed or moved, so re-read /health (throttled).
+    if (!opened) relayRecheck();
     liveReschedule(c);
   };
 }
@@ -5236,6 +5549,7 @@ const LIVE_QUIET_MS = 10 * 60 * 1000, LIVE_WATCHDOG_MS = 60 * 1000, LIVE_SNAPSHO
 function liveWatchdog(){
   if (!liveOn() || document.hidden) return;
   const now = Date.now();
+  if (now - _relayHealthAt > 10 * 60 * 1000) relayRecheck(true);   // a region the relay added, or brought back up, joins without a reload
   // At most ONE per sweep: a dead relay must not turn into 13 simultaneous redials (§8.1).
   const stale = Object.values(liveConns).find(c =>
     !c.closed && c.key === liveRosterKey && c.ws && c.ws.readyState === 1 &&
@@ -5264,7 +5578,7 @@ document.addEventListener('visibilitychange', () => {
 // reads the cache. Rows decode through liveRow — snapshots are NAMED objects, so no column-order
 // dependency. Returns { tableName: [rows] }; throws on error/timeout so callers fall back.
 function relayFetchOnce(region, sqls, timeoutMs = 9000){
-  return new Promise((resolve, reject) => {
+  return relayReady().then(() => new Promise((resolve, reject) => {
     let ws;
     try { ws = new WebSocket(relayWsUrl(region), ['v1.json.spacetimedb']); }
     catch(e){ return reject(e); }
@@ -5286,7 +5600,7 @@ function relayFetchOnce(region, sqls, timeoutMs = 9000){
       try { ws.close(); } catch(e){}
       resolve(byTable);
     };
-  });
+  }));
 }
 // Console/debug handle (not a public API): window.__live.status() etc.
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
@@ -6530,7 +6844,7 @@ function setCraftTab(t) {
 async function renderCraftingTab(silent, force) {
   const el = document.getElementById('tab-crafting');
   if (!el) return;
-  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length) { el.innerHTML = noPlayersHtml(); return; }
   if (!silent || !document.getElementById('craft-toolbar')) {
     el.innerHTML = `
       <div id="craft-toolbar" style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">
@@ -7815,7 +8129,7 @@ async function loadTasks(id, silent=false){
 }
 async function renderTasksUI(){
   const el = document.getElementById('tasks-content'); if (!el) return;
-  if (!trackedPlayers.length){ el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length){ el.innerHTML = noPlayersHtml(); return; }
   try { await loadCraftingData(); } catch(e){}
   if (!invData){
     el.innerHTML = taskInvSelectorHtml() + '<div class="empty" style="padding:1.5rem"><span class="dot-spin"></span><span>Loading inventory…</span></div>';
@@ -13200,7 +13514,7 @@ function toolInvSelectorHtml(){
 async function renderToolCrafting(){
   const el = document.getElementById('tool-content');
   if (!el) return;
-  if (!trackedPlayers.length) { el.innerHTML = '<div class="empty"><i class="ti ti-user-search"></i><span>Search for a player to get started</span></div>'; return; }
+  if (!trackedPlayers.length) { el.innerHTML = noPlayersHtml(); return; }
   try { await loadCraftingData(); } catch(e) {}
   if (!invData) {
     el.innerHTML = toolInvSelectorHtml() + '<div class="empty" style="padding:1.5rem"><span class="dot-spin"></span><span>Loading inventory…</span></div>';
@@ -13518,7 +13832,10 @@ function fmtCoin(n){if(n===null||n===undefined)return'—';n=Number(n);if(isNaN(
 function escHtml(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function cap(s){return s?s[0].toUpperCase()+s.slice(1):'';}
 function loading(){return'<div class="loading"><span class="dot-spin"></span> Loading...</div>';}
-function errBox(e){return`<div class="error-msg"><i class="ti ti-alert-circle"></i> ${e?escHtml(e.message):'Error loading data'}</div>`;}
+function errBox(e){
+  if (e && e.otherWorld && typeof liveOn === 'function' && liveOn() && !usingCache() && Date.now() - _liveLayerStartedAt < 20000) return loading();   // the relay's first answer is seconds away
+  return`<div class="error-msg"><i class="ti ti-alert-circle"></i> ${e?escHtml(e.message):'Error loading data'}</div>`;
+}
 function itemLabel(meta, itemId, itemType) {
   if (!meta) return (itemType === 1 ? 'Cargo ' : 'Item ') + itemId;
   const name = meta.name || '';
@@ -14859,6 +15176,21 @@ async function renderGroupCraft(){
     trackedPlayers = arr.filter(p => p && p.entityId);
     currentPlayer = trackedPlayers[0] || null;
   } catch(e) {}
+  loadWaiting();
+  // Which world is everything stored here from? A stamp means "the one the relay was on last time" — carry on
+  // at once, and /health corrects it later if the relay has moved (relayReady → worldChanged). No stamp is a
+  // device that last ran before the relay left Early Access: settle it before anything is drawn or asked, waiting
+  // at most 4 seconds for the relay (the check finishes in the background if it is slower than that).
+  {
+    const st = worldStamp();
+    if (st) relayWorld = st;
+    else {
+      const chk = worldCheck();
+      const rewrote = await Promise.race([chk, new Promise(res => setTimeout(() => res(null), 4000))]);
+      if (rewrote){ location.reload(); return; }
+      if (rewrote === null) chk.then(late => { if (late) location.reload(); else liveStart(); });
+    }
+  }
   try { const c = JSON.parse(localStorage.getItem('bc_players_collapsed') || '[]'); if (Array.isArray(c)) playerCollapsed = new Set(c.map(String)); } catch(e) {}
   try { const pz = JSON.parse(localStorage.getItem('bc_players_paused') || '[]'); if (Array.isArray(pz)) playerPaused = new Set(pz.map(String)); } catch(e) {}
   try { const am = JSON.parse(localStorage.getItem('bc_players_alerts_muted') || '[]'); if (Array.isArray(am)) playerAlertsMuted = new Set(am.map(String)); } catch(e) {}
@@ -14874,11 +15206,14 @@ async function renderGroupCraft(){
   try { const sc = JSON.parse(localStorage.getItem('bc_shopping_claims') || '[]'); if (Array.isArray(sc)) shoppingClaimFilter = sc; } catch(e) {}
   renderPlayerArea();
   try { localStorage.removeItem('bcTabCache'); } catch(e){}   // §9.1: retired — reclaim its quota once
-  if (trackedPlayers.length || trackedClaims.length){
-    // Discover the live region list BEFORE dialling, so a region the relay has added (or dropped) is
-    // picked up without a code change. Falls back to the hardcoded list if /health can't be reached.
-    loadRelayRegions().then(() => liveStart());   // 13 held sockets, one Subscribe each — everything live from here (OVERHAUL §2)
+  // Read the relay's database names and region list BEFORE dialling, so a region it has added or a database it
+  // has renamed is picked up without a code change. Falls back to the built-in list if /health can't be reached.
+  const relayUp = relayReady();
+  if (trackedPlayers.length || trackedClaims.length || waitingPlayers.length){
+    relayUp.then(() => liveStart());   // one held socket per region, one Subscribe each — everything live from here (OVERHAUL §2)
   }
+  bitjitaWorldCheck();           // is bitjita on the relay's world? (decides the fallback and the note on bitjita-backed tabs)
+  setInterval(() => { if (!document.hidden) bitjitaWorldCheck(); }, 10 * 60 * 1000);
   startPlayerOnlinePoll();       // keep the tracked-player status dots (online = green) fresh
   // Switch to saved tab: updates nav highlight, renders non-player tabs (market, deals, shopping)
   if (_bootLookup) openLookup(_bootLookup.player, _bootLookup.sub, { replace: true }); else switchTab(currentTab, { replace: true });
