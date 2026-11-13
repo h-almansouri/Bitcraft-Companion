@@ -10,6 +10,10 @@ node_modules/
 # Leftover investigation/debug scripts (not part of the app)
 _bcm3*
 
+# Old-world token test: its run log holds character names and item counts (the token itself
+# lives outside the project, in the user folder)
+tools/oldworld-test-log.txt
+
 # OS / editor cruft
 *.log
 .DS_Store
