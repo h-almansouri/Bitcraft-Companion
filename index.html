@@ -1785,7 +1785,7 @@ function lookupRenderHeader(){
   const rg = info.regionId != null ? info.regionId : null;
   const online = info.signedIn === true;
   let last = ''; try { if (info.lastLoginTimestamp) last = new Date(info.lastLoginTimestamp).toLocaleString(); } catch(e){}
-  let region = ''; try { const nm = rg != null && typeof liveRegionName === 'function' ? liveRegionName(rg) : null; region = rg == null ? '' : (nm ? nm + ' (R' + rg + ')' : 'R' + rg); } catch(e){ region = rg != null ? 'R' + rg : ''; }
+  let region = ''; try { const nm = rg != null && bitjitaWorld !== false && typeof liveRegionName === 'function' ? liveRegionName(rg) : null; /* the relay's region names only fit bitjita's player while both are on one world */ region = rg == null ? '' : (nm ? nm + ' (R' + rg + ')' : 'R' + rg); } catch(e){ region = rg != null ? 'R' + rg : ''; }
   el.innerHTML = '<div class="lk-head">' +
     '<span class="lk-dot" style="background:' + (online ? 'var(--green-light)' : 'var(--text3)') + '" title="' + (online ? 'Online' : 'Offline') + '"></span>' +
     '<span class="lk-name">' + escHtml(name) + '</span>' +
@@ -1858,9 +1858,10 @@ async function bitjitaWorldCheck(){
   _bjWorldBusy = true; _bjWorldAt = Date.now();
   try {
     await relayReady();
-    const rg = BC_REGIONS.find(r => liveRegionName(r)) || BC_REGIONS[0];
-    let mine = liveRegionName(rg);
-    if (!mine){ const t = await relayFetchOnce(rg, ['SELECT * FROM world_region_name_state'], 8000); mine = ((t.world_region_name_state || [])[0] || {}).player_facing_name; }
+    let rg = BC_REGIONS.find(r => liveRegionName(r));
+    if (rg == null && liveOn()){ await new Promise(res => setTimeout(res, 6000)); rg = BC_REGIONS.find(r => liveRegionName(r)); }   // the held sockets bring every region's name — don't spend a dial on it
+    let mine = rg != null ? liveRegionName(rg) : null;
+    if (!mine){ rg = BC_REGIONS[0]; const t = await relayFetchOnce(rg, ['SELECT * FROM world_region_name_state'], 20000); mine = ((t.world_region_name_state || [])[0] || {}).player_facing_name; }
     const d = await fetch(API + '/api/regions').then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)));
     const list = Array.isArray(d) ? d : ((d && d.regions) || []);
     if (!mine || !list.length) return;
@@ -4871,9 +4872,39 @@ function relayRecheck(force){
     if (!liveOn()) return;
     r.removed.forEach(rg => liveDrop(rg));
     r.added.forEach(rg => liveDial(rg));
-    if (r.names) Object.values(liveConns).forEach(c => { if (!c.closed && !c.ws){ c.backoff = 1500; clearTimeout(c.timer); liveOpen(c); } });   // waiting to retry under the old name: go now
+    if (r.names) Object.values(liveConns).forEach(c => { if (!c.closed && !c.ws && !c.queued){ c.backoff = 1500; clearTimeout(c.timer); liveOpen(c); } });   // waiting to retry under the old name: go now
   });
 }
+// ── The relay admits new sockets at a limited pace ──
+// Measured 2026-11-13 (new with the 1.0 move): about one new WebSocket every 2 seconds per IP address (30 a minute)
+// after a burst of 11, counted across every region port together; a dial over that is refused 429, which a browser
+// shows only as a bare "failed". The plain web lookups are not limited. So every dial takes a token here first —
+// the same bucket, kept a little under the relay's — and waits its turn instead of being refused and backing off.
+// The bucket is kept in localStorage so a second tab of the app, or a page reload, draws on the same allowance: the
+// limit is per address, not per page. (Another device at home still shares it unseen; a refused dial empties the
+// bucket here to match.) The real cure is needing few dials at all — see liveExtend.
+const RELAY_DIAL_BURST = 10, RELAY_DIAL_MS = 2100, RELAY_DIAL_KEY = 'bc_relay_dials';
+let _relayDialMem = { n: RELAY_DIAL_BURST, t: Date.now() }, _relayDialT = null;
+const _relayDialQ = [];
+function relayDialRead(now){
+  let b = _relayDialMem;
+  try { const v = JSON.parse(localStorage.getItem(RELAY_DIAL_KEY) || 'null'); if (v && typeof v.n === 'number' && v.t <= now + 1000) b = v; } catch(e){}
+  return Math.min(RELAY_DIAL_BURST, b.n + Math.max(0, now - b.t) / RELAY_DIAL_MS);
+}
+function relayDialWrite(nTokens, now){ _relayDialMem = { n: nTokens, t: now }; try { localStorage.setItem(RELAY_DIAL_KEY, JSON.stringify(_relayDialMem)); } catch(e){} }
+// Resolves when a dial may go out. First come, first served.
+function relayDialSlot(){ return new Promise(res => { _relayDialQ.push(res); relayDialPump(); }); }
+function relayDialPump(){
+  clearTimeout(_relayDialT); _relayDialT = null;
+  while (_relayDialQ.length){
+    const now = Date.now(), have = relayDialRead(now);
+    if (have < 1){ _relayDialT = setTimeout(relayDialPump, Math.ceil((1 - have) * RELAY_DIAL_MS) + 25); return; }
+    relayDialWrite(have - 1, now);
+    _relayDialQ.shift()();
+  }
+}
+function relayDialRefund(){ const now = Date.now(); relayDialWrite(Math.min(RELAY_DIAL_BURST, relayDialRead(now) + 1), now); relayDialPump(); }   // a slot that ended up unused
+function relayDialRefused(){ const now = Date.now(); relayDialWrite(Math.min(relayDialRead(now), 0), now); }                                   // the relay's own bucket is evidently empty
 const relayWsUrl = region => { const s = relayDb[region]; return `wss://relay.bitcraftsync.app:${s ? s.port : 3000 + region}/v1/database/${s ? s.db : relayWorld + '-' + region}/subscribe?compression=None`; };
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
@@ -5107,6 +5138,7 @@ function liveApplySnapshot(c, frame){
 function liveHandoffKick(){
   if (_liveCompleteKicked || !usingCache()) return;
   _liveCompleteKicked = true;
+  refreshPlayerOnline();   // the status dots, from the cache now — bitjita may not know these characters at all
   // Everything rendered before this moment came from the bitjita fallback, which is less complete than
   // the cache and — for equipment — has NOTHING (equipment is WS-only). Nothing else will correct it:
   // the doorbell only fires when the GAME changes, and the cache filling isn't a game change. So drop
@@ -5258,6 +5290,9 @@ const LIVE_DISCOVERY_DEBOUNCE_MS = 350;
 let _liveContTimer = null;
 onLiveChange(evs => {
   if (!evs.some(e => ['building_state','deployable_state_v2','inventory_state','player_housing_state','dimension_description_state','location_state','progressive_action_state','passive_craft_state'].includes(e.table))) return;
+  liveDiscoverSoon();
+});
+function liveDiscoverSoon(){
   clearTimeout(_liveContTimer);
   _liveContTimer = setTimeout(() => {
     // ⚠️ Only ever derive refs from a WHOLE world. Recomputing while regions were still snapshotting
@@ -5268,15 +5303,13 @@ onLiveChange(evs => {
     if (liveRefsKey(want) === liveRefsKey(liveRefs)){ _liveRefsSettled = true; liveHandoffKick(); return; }   // releases the boot hold
     liveRefs = want;
     liveSaveRefs(trackedPlayers.map(p => String(p.entityId)).sort().join(','), want);
-    // ⚠️ REDIAL, not an additive subscribe. Extending the open sockets with a second Subscribe looked
-    // ideal on paper (no new handshakes) and the frames were accepted — but the rows never arrived:
-    // location_state, building_nickname_state and every container's contents stayed at 0 while the
-    // queries sat on the socket. A full redial delivers all of it. Whatever v1.json does with a second
-    // Subscribe on a live socket, it is not "add these queries and send me their rows", so don't rely
-    // on it. Cost: one extra round of 13 dials on a cold boot, none once the ids are persisted.
+    // ⚠️ Never a second plain Subscribe on the open socket: the frames were accepted but the rows never
+    // arrived — location_state, building_nickname_state and every container's contents stayed at 0 while
+    // the queries sat there. liveStart hands each region the difference as a NAMED set instead (liveExtend),
+    // which does deliver, and only the regions whose questions changed are touched at all.
     liveStart();
   }, LIVE_DISCOVERY_DEBOUNCE_MS);
-});
+}
 // A waiting name's character exists (see waitingNames): snapshot or live insert, either way it joins the roster.
 onLiveChange(evs => {
   if (!waitingPlayers.length) return;
@@ -5415,6 +5448,7 @@ function liveStart(){
   // 311-471ms spread; staggered pushed it to 953-1884ms with a 619-1550ms spread. The FIRST reply was
   // ~335ms either way, so the stagger bought nothing and cost up to a second.
   BC_REGIONS.forEach(rg => liveDial(rg));
+  liveDiscoverSoon();   // a change that needed no new rows at all (every socket already had them) must still settle the hold
   // The settle hold can also be released by its DEADLINE (or by bitjita failing), and in a quiet world no
   // snapshot or delta would follow to notice. Bounded poll — stops the instant the handoff fires, and
   // gives up regardless after LIVE_KICK_POLL_MAX_MS so a permanently-down relay can't leave it spinning.
@@ -5444,18 +5478,78 @@ function liveDrop(rg){
 function liveDial(rg){
   const ex = liveConns[rg];
   if (ex && ex.key === liveRosterKey && !ex.closed) return;   // already covering this roster
-  if (ex) liveDrop(rg);
   const { sqls, tables } = liveQuerySet(liveRosterIds, rg);
+  if (ex && !ex.closed && liveExtend(ex, sqls, tables)) return;   // its socket takes the difference — no new dial
+  if (ex) liveDrop(rg);
   const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
   liveConns[rg] = c;
   liveOpen(c);
 }
+// ── The query set changed: give the region's socket the DIFFERENCE instead of hanging up ──
+// Every change of roster or discovered refs used to redial every region. With the relay admitting one new socket
+// every two seconds (relayDialSlot) that turned adding a player — or a cold boot's two discovery rounds — into half
+// a minute of refused dials. A named set (SubscribeMulti) on the OPEN socket answers in ~100 ms with its rows and
+// streams live updates from then on, alongside the first Subscribe: measured on the 1.0 relay 2026-11-13, ten sets
+// of 150 queries each, ~97 ms apiece, updates flowing for all of them. (A second plain Subscribe is NOT this — its
+// rows never arrived; see the redial note in the discovery watcher.)
+// Queries no longer wanted stay subscribed until the socket next reconnects, when it asks for exactly the current
+// set — their rows are merely unused. After LIVE_EXTEND_MAX additions the next change redials for a clean slate.
+const LIVE_EXTEND_MAX = 8, LIVE_ADD_QID = 900000;   // creature sets count up from 1 on the same socket (bcCre*)
+// The activity-log queries carry a moving cursor (… days_since_epoch >= N AND id > M); a socket holding an older
+// cursor already receives everything a newer one would, so the cursor is not part of "is this subscribed?".
+const liveSqlKey = q => q.replace(/(days_since_epoch >= |storage_log_state\.id > )\d+/g, '$1#');
+function liveExtend(c, sqls, tables){
+  if ((c.adds || 0) >= LIVE_EXTEND_MAX && sqls.some(q => !c.subs || !c.subs.has(liveSqlKey(q)))) return false;
+  c.sqls = sqls; c.tables = tables; c.key = liveRosterKey;
+  liveExtendFlush(c);   // nothing to send yet if the socket is still on its way up: it subscribes c.sqls when it opens
+  return true;
+}
+function liveExtendFlush(c){
+  if (c.closed || !c.ws || c.ws.readyState !== 1 || !c.snapshotTs || !c.subs) return;   // not answering yet → liveOpenNow / the first snapshot picks c.sqls up
+  const add = c.sqls.filter(q => !c.subs.has(liveSqlKey(q)));
+  if (!add.length) return;
+  const qid = LIVE_ADD_QID + (c.adds = (c.adds || 0) + 1);
+  add.forEach(q => c.subs.add(liveSqlKey(q)));
+  (c.addWait || (c.addWait = new Set())).add(qid);
+  c.status = 'extending';   // not 'live' until its rows are in: the region's slice is incomplete for the new roster
+  try { c.ws.send(JSON.stringify({ SubscribeMulti: { request_id: qid, query_id: { id: qid }, query_strings: add } })); } catch(e){}
+  const ws = c.ws;
+  clearTimeout(c.addTimer);
+  c.addTimer = setTimeout(() => { if (c.ws === ws && c.addWait && c.addWait.size){ console.warn(`[live] r${c.region} never answered an added set — reconnecting`); try { ws.close(); } catch(e){} } }, LIVE_SNAPSHOT_TIMEOUT_MS);
+}
+// An added set's rows: merged into the region's slices (a snapshot of just those queries, not of the region).
+function liveApplyAdded(c, a){
+  const qid = a.query_id && a.query_id.id;
+  const evs = [];
+  ((a.update && a.update.tables) || []).forEach(t => {
+    const tb = t.table_name, byRegion = liveCache[tb] || (liveCache[tb] = {}), slice = byRegion[c.region] || (byRegion[c.region] = new Map());
+    let got = 0;
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.set(livePk(r), r); got++; } }));
+    if (got) evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
+  });
+  if (c.addWait) c.addWait.delete(qid);
+  if (!c.addWait || !c.addWait.size){ clearTimeout(c.addTimer); if (c.status === 'extending') c.status = 'live'; c.snapshotTs = Date.now(); }
+  if (evs.length) liveNotify(evs);
+  liveDiscoverSoon();   // an answer with no rows still has to let the boot hold settle
+  liveHandoffKick();
+  if (_liveCompleteKicked){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }   // rows the tabs haven't seen, and not a delta
+}
+const liveSetId = v => { const q = v && v.query_id; const id = q == null ? null : typeof q === 'object' ? (q.id != null ? q.id : (q.some != null ? (q.some.id != null ? q.some.id : q.some) : null)) : q; return typeof id === 'number' ? id : null; };
 function liveOpen(c){
-  if (c.closed || c.key !== liveRosterKey) return;
-  // A tracked claim's or house's activity query asks only for log entries newer than the newest one seen —
-  // re-derive it on every (re)connect, or a socket that drops after a busy afternoon would re-download everything
-  // since its dial (and a house's first load is its whole 14 days).
-  if (trackedClaims.length || (liveRefs.chunks || []).length){ const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
+  if (c.closed || c.key !== liveRosterKey || c.queued) return;
+  c.status = 'connecting'; c.queued = true;
+  relayDialSlot().then(() => {
+    c.queued = false;
+    if (c.closed || c.key !== liveRosterKey || c.ws){ relayDialRefund(); return; }
+    liveOpenNow(c);
+  });
+}
+function liveOpenNow(c){
+  // Ask for exactly what is wanted NOW: a reconnect sheds whatever the old socket had piled up, and a tracked
+  // claim's or house's activity query starts from the newest entry seen instead of re-downloading since its dial
+  // (a house's first load is its whole 14 days).
+  { const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
+  c.subs = null; c.adds = 0; c.addWait = null; clearTimeout(c.addTimer);
   let ws, opened = false;
   try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
@@ -5479,6 +5573,7 @@ function liveOpen(c){
     // connect pinned the retry at ~3s, so we re-asked the mirror for the same expensive snapshot every
     // ~15s forever and its ingest never recovered. Resetting on success instead lets a mirror that keeps
     // stalling decay to the 60s ceiling on its own.
+    c.subs = new Set(c.sqls.map(liveSqlKey));   // what this socket holds; liveExtendFlush adds what's missing later
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
     bcCreOnOpen(c);   // creature roster/position sets ride this socket as NAMED subscriptions (SubscribeMulti) — see bcCre*
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
@@ -5504,11 +5599,19 @@ function liveOpen(c){
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
       // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
       if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
+      liveExtendFlush(c);   // the roster moved on while this socket was coming up
     }
     else if (m.TransactionUpdate) liveApplyDelta(c, m.TransactionUpdate);
-    else if (m.SubscribeMultiApplied) bcCreOnApplied(c, m.SubscribeMultiApplied);      // a creature set's snapshot
+    else if (m.SubscribeMultiApplied){
+      if (liveSetId(m.SubscribeMultiApplied) > LIVE_ADD_QID) liveApplyAdded(c, m.SubscribeMultiApplied);   // queries added to this socket (liveExtend)
+      else bcCreOnApplied(c, m.SubscribeMultiApplied);      // a creature set's snapshot
+    }
     else if (m.UnsubscribeMultiApplied){ /* a replaced creature set: the next SubscribeMultiApplied rebuilds that region's dots whole */ }
-    else if (m.SubscriptionError){ bcCreOnError(c, m.SubscriptionError); console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300)); }
+    else if (m.SubscriptionError){
+      console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300));
+      if (liveSetId(m.SubscriptionError) > LIVE_ADD_QID){ try { ws.close(); } catch(e){} }   // an added set was refused: reconnect and ask for the whole current set in one go
+      else bcCreOnError(c, m.SubscriptionError);
+    }
     // IdentityToken (first frame) and anything unrecognised: ignore.
   };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
@@ -5518,7 +5621,7 @@ function liveOpen(c){
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     // Never opened = the upgrade was refused or the relay is unreachable, and a browser can't tell which. The one
     // cause we can fix from here is a database the relay has renamed or moved, so re-read /health (throttled).
-    if (!opened) relayRecheck();
+    if (!opened){ relayDialRefused(); relayRecheck(); }
     liveReschedule(c);
   };
 }
@@ -5578,7 +5681,7 @@ document.addEventListener('visibilitychange', () => {
 // reads the cache. Rows decode through liveRow — snapshots are NAMED objects, so no column-order
 // dependency. Returns { tableName: [rows] }; throws on error/timeout so callers fall back.
 function relayFetchOnce(region, sqls, timeoutMs = 9000){
-  return relayReady().then(() => new Promise((resolve, reject) => {
+  return relayReady().then(relayDialSlot).then(() => new Promise((resolve, reject) => {
     let ws;
     try { ws = new WebSocket(relayWsUrl(region), ['v1.json.spacetimedb']); }
     catch(e){ return reject(e); }
@@ -10785,7 +10888,7 @@ const BC_RELAY_QUIET_MS = 10000;
 function bcRelayRow(id){
   const byRegion = liveCache.mobile_entity_state; let row = null, rg = null;
   if (byRegion) Object.keys(byRegion).forEach(k => { const r = byRegion[k].get(id); if (r && (!row || +r.timestamp > +row.timestamp)){ row = r; rg = k; } });
-  return row && { row, region: +rg, live: !!(liveConns[rg] && liveConns[rg].status === 'live') };
+  return row && { row, region: +rg, live: !!(liveConns[rg] && (liveConns[rg].status === 'live' || liveConns[rg].status === 'extending')) };
 }
 // ── Indoors: the marker waits at the door ──
 // Inside a house, cave, ruin or dungeon a movement row's coordinates are the interior's own, so the marker
@@ -11903,7 +12006,7 @@ function bcCreOnApplied(c, a){
 // The relay refused a set: forget it (no automatic retry loop — the next track/region/tab action re-syncs)
 // and count the region as settled so the list doesn't show "…" forever.
 function bcCreOnError(c, err){
-  const s = c.cre, qid = err && err.query_id && err.query_id.id; if (!s || !qid) return;
+  const s = c.cre, qid = liveSetId(err); if (!s || !qid) return;   // the id arrives as {"some": n} here, {"id": n} on an applied set
   if (qid === s.rosterQid){ s.rosterQid = 0; s.rosterReady = false; }
   if (qid === s.posQid){ s.posQid = 0; s.posReady = true; s.posKey = ''; s.posIds = new Set(); }
   if (qid === s.herdQid) s.herdQid = 0;   // herdKey stays: the same set isn't re-asked on this socket
