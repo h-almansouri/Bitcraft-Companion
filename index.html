@@ -1859,9 +1859,8 @@ async function bitjitaWorldCheck(){
   try {
     await relayReady();
     let rg = BC_REGIONS.find(r => liveRegionName(r));
-    if (rg == null && liveOn()){ await new Promise(res => setTimeout(res, 6000)); rg = BC_REGIONS.find(r => liveRegionName(r)); }   // the held sockets bring every region's name — don't spend a dial on it
     let mine = rg != null ? liveRegionName(rg) : null;
-    if (!mine){ rg = BC_REGIONS[0]; const t = await relayFetchOnce(rg, ['SELECT * FROM world_region_name_state'], 20000); mine = ((t.world_region_name_state || [])[0] || {}).player_facing_name; }
+    if (!mine){ rg = BC_REGIONS[0]; const t = await relayAsk(rg, ['SELECT * FROM world_region_name_state'], 20000); mine = ((t.world_region_name_state || [])[0] || {}).player_facing_name; }
     const d = await fetch(API + '/api/regions').then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)));
     const list = Array.isArray(d) ? d : ((d && d.regions) || []);
     if (!mine || !list.length) return;
@@ -3063,7 +3062,7 @@ async function relayBuffDescs(){
   } catch(e){}
   for (const rg of BC_REGIONS){
     try {
-      const byT = await relayFetchOnce(rg, ['SELECT * FROM buff_desc', 'SELECT * FROM buff_type_desc'], 12000);
+      const byT = await relayAsk(rg, ['SELECT * FROM buff_desc', 'SELECT * FROM buff_type_desc'], 12000);
       const types = {}; (byT.buff_type_desc || []).forEach(t => types[t.id] = t.name);
       const map = {};
       (byT.buff_desc || []).forEach(b => {
@@ -3131,7 +3130,7 @@ async function relaySkillDescs(){
   const CATS = ['None','Profession','Adventure'];   // the schema's own Sum variant names, so the strings match bitjita's exactly
   for (const rg of BC_REGIONS){
     try {
-      const rows = (await relayFetchOnce(rg, ['SELECT * FROM skill_desc'], 9000)).skill_desc || [];
+      const rows = (await relayAsk(rg, ['SELECT * FROM skill_desc'], 9000)).skill_desc || [];
       if (rows.length){
         const map = {};
         rows.forEach(s => { const cat = Array.isArray(s.skill_category) ? s.skill_category[0] : (+s.skill_category || 0);
@@ -5472,6 +5471,7 @@ function liveDrop(rg){
   const c = liveConns[rg];
   if (!c) return;
   c.closed = true; clearTimeout(c.timer);
+  liveAsksFail(c, false);   // asks sent or still waiting on this socket: fail now, so relayAsk moves on at once
   try { c.ws && c.ws.close(); } catch(e){}
   delete liveConns[rg];
 }
@@ -5576,6 +5576,7 @@ function liveOpenNow(c){
     c.subs = new Set(c.sqls.map(liveSqlKey));   // what this socket holds; liveExtendFlush adds what's missing later
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
     bcCreOnOpen(c);   // creature roster/position sets ride this socket as NAMED subscriptions (SubscribeMulti) — see bcCre*
+    if (c.askSet) c.askSet.forEach(a => { if (!a.sent) a.send(); });   // lookups that were waiting for this socket (relayAsk)
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
     // this the region sits at 'open' forever and liveComplete() never trips. Give up and let onclose
     // reschedule with backoff — the region rejoins the moment it starts answering again.
@@ -5607,6 +5608,7 @@ function liveOpenNow(c){
       else bcCreOnApplied(c, m.SubscribeMultiApplied);      // a creature set's snapshot
     }
     else if (m.UnsubscribeMultiApplied){ /* a replaced creature set: the next SubscribeMultiApplied rebuilds that region's dots whole */ }
+    else if (m.OneOffQueryResponse){ const h = c.asks && c.asks.get(m.OneOffQueryResponse.message_id); if (h) h(m.OneOffQueryResponse); }   // an answer to relayAsk
     else if (m.SubscriptionError){
       console.warn(`[live] r${c.region} subscription error:`, JSON.stringify(m.SubscriptionError).slice(0, 300));
       if (liveSetId(m.SubscriptionError) > LIVE_ADD_QID){ try { ws.close(); } catch(e){} }   // an added set was refused: reconnect and ask for the whole current set in one go
@@ -5617,6 +5619,7 @@ function liveOpenNow(c){
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onclose = () => {
     c.ws = null; c.cre = null; clearTimeout(c.snapTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
+    liveAsksFail(c, true);   // answers that will never come; asks not sent yet wait for the reconnect
     if (c.closed || c.key !== liveRosterKey) return;
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     // Never opened = the upgrade was refused or the relay is unreachable, and a browser can't tell which. The one
@@ -5682,16 +5685,17 @@ document.addEventListener('visibilitychange', () => {
 // dependency. Returns { tableName: [rows] }; throws on error/timeout so callers fall back.
 function relayFetchOnce(region, sqls, timeoutMs = 9000){
   return relayReady().then(relayDialSlot).then(() => new Promise((resolve, reject) => {
-    let ws;
+    let ws, opened = false;
     try { ws = new WebSocket(relayWsUrl(region), ['v1.json.spacetimedb']); }
     catch(e){ return reject(e); }
     const t = setTimeout(() => { try { ws.close(); } catch(e){} reject(new Error('fetch-once timeout r' + region)); }, timeoutMs);
     ws.onerror = () => { try { ws.close(); } catch(e){} };
-    ws.onclose = () => { clearTimeout(t); reject(new Error('fetch-once closed r' + region)); };   // no-op if already settled
-    ws.onopen = () => { try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: sqls } })); } catch(e){} };
+    ws.onclose = () => { clearTimeout(t); if (!opened) relayDialRefused(); reject(new Error('fetch-once closed r' + region)); };   // no-op if already settled
+    ws.onopen = () => { opened = true; try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: sqls } })); } catch(e){} };
     ws.onmessage = ev => {
       if (typeof ev.data !== 'string') return;
       let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+      if (m.SubscriptionError){ clearTimeout(t); ws.onclose = null; try { ws.close(); } catch(e){} reject(Object.assign(new Error('relay refused the query: ' + String(m.SubscriptionError.error || '').slice(0, 200)), { queryError: true })); return; }   // it would never answer: don't sit out the timeout
       if (!m.InitialSubscription) return;
       clearTimeout(t);
       const byTable = {};
@@ -5705,6 +5709,76 @@ function relayFetchOnce(region, sqls, timeoutMs = 9000){
     };
   }));
 }
+// ── Ask once: a snapshot of some queries, over the region's HELD socket when it has one ──
+// The relay answers one-off queries on an open socket (measured on v1.json 2026-11-13; it refused them in July):
+// no subscription, so nothing to drop afterwards and no live traffic — ~85 ms a question, and 60 sent together all
+// came back within ~100 ms. Rows arrive like a snapshot's (named objects) and the SQL is the subscription dialect
+// (two-table joins, no projections / LIMIT / COUNT). That makes a lookup cost none of the one thing in short
+// supply, new sockets (relayDialSlot): Open Crafts alone used to open one per region per load, eighteen a minute
+// in Live mode against the relay's thirty.
+// So: the region's held socket if the live layer has one (waiting for it while it is still coming up), a scratch
+// socket (relayFetchOnce) when it has none — or when the held one fails mid-ask, or the relay stops taking
+// one-offs. Either way the result is { tableName: [rows] }, and a query the relay refuses rejects with .queryError.
+let _relayAskSeq = 0, _relayOneOffOff = false, _relayAskSilent = 0;
+function relayAsk(region, sqls, timeoutMs = 9000){
+  return relayReady().then(async () => {
+    const c = liveConns[region];
+    if (c && !c.closed && !_relayOneOffOff){
+      try { const t = await liveAsk(c, sqls, timeoutMs); _relayAskSilent = 0; return t; }
+      catch(e){
+        if (e && e.queryError) throw e;                            // a scratch socket would be refused the same way
+        // The relay saying it won't take one-offs, or twice ignoring one on a socket that is otherwise alive: stop
+        // asking this way for a while, so lookups don't each sit out a timeout first.
+        const silent = e && /^ask timeout/.test(e.message) && c.ws && c.ws.readyState === 1 && c.snapshotTs > 0;
+        if ((e && e.unsupported) || (silent && ++_relayAskSilent >= 2)){
+          _relayOneOffOff = true; _relayAskSilent = 0;
+          console.warn('[live] one-off queries are not being answered — lookups use scratch sockets for the next 10 minutes');
+          setTimeout(() => { _relayOneOffOff = false; }, 10 * 60 * 1000);
+        }
+      }
+    }
+    return relayFetchOnce(region, sqls, timeoutMs);
+  });
+}
+function liveAsk(c, sqls, timeoutMs){
+  return new Promise((resolve, reject) => {
+    const byTable = {}, ids = [];
+    let left = sqls.length, done = false;
+    const a = { sent: false, send: null, fail: null };
+    const finish = err => {
+      if (done) return; done = true; clearTimeout(t);
+      ids.forEach(id => c.asks.delete(id)); c.askSet.delete(a);
+      err ? reject(err) : resolve(byTable);
+    };
+    const t = setTimeout(() => finish(new Error('ask timeout r' + c.region)), timeoutMs);
+    if (!c.asks){ c.asks = new Map(); c.askSet = new Set(); }
+    a.fail = () => finish(new Error('ask closed r' + c.region));
+    a.send = () => {
+      a.sent = true;
+      const ws = c.ws;
+      for (const sql of sqls){
+        const k = ++_relayAskSeq, mid = [k & 255, (k >>> 8) & 255, (k >>> 16) & 255, (k >>> 24) & 255];
+        const hex = mid.map(b => b.toString(16).padStart(2, '0')).join('');   // the id comes back as hex
+        ids.push(hex);
+        c.asks.set(hex, resp => {
+          const err = resp.error && (typeof resp.error === 'string' ? resp.error : resp.error.some);
+          if (err){ const e = new Error('relay refused the query: ' + String(err).slice(0, 200)); if (/one-?off|not supported through|subscribe to the table/i.test(String(err))) e.unsupported = true; else e.queryError = true; return finish(e); }
+          (resp.tables || []).forEach(tb => {
+            const list = byTable[tb.table_name] || (byTable[tb.table_name] = []);
+            (tb.rows || []).forEach(raw => { const r = liveRow(tb.table_name, typeof raw === 'string' ? raw : JSON.stringify(raw)); if (r) list.push(r); });
+          });
+          if (--left === 0) finish();
+        });
+        try { ws.send(JSON.stringify({ OneOffQuery: { message_id: mid, query_string: sql } })); } catch(e){ return finish(new Error('ask send failed r' + c.region)); }
+      }
+    };
+    c.askSet.add(a);
+    if (!left) return finish();
+    if (c.ws && c.ws.readyState === 1) a.send();   // else: liveOpenNow's onopen sends it
+  });
+}
+// The socket closed (sentOnly: asks not yet sent keep waiting for the reconnect) or the region was dropped (all).
+function liveAsksFail(c, sentOnly){ if (c.askSet) [...c.askSet].forEach(a => { if (a.sent || !sentOnly) a.fail(); }); }
 // Console/debug handle (not a public API): window.__live.status() etc.
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
 // ═══════════════ end LIVE LAYER core ═══════════════
@@ -7359,9 +7433,11 @@ async function ocBitjitaLoad(){
 // ── Relay feed ──
 // The board comes straight from each region's mirror on the bitcraftsync relay. bitjita's /api/crafts refreshed
 // region by region: watched 2026-10-26, several regions ran minutes behind and r8 ~45 min.
-// One snapshot per load over scratch sockets (relayFetchOnce), not a named set held on the live sockets: dropping a
-// held set costs a second full copy (UnsubscribeMultiApplied carries every row again, measured), and holding it
-// streams ~120 KB/s of progress ticks world-wide, against ~1.9 MB per snapshot. Live mode re-snapshots every 30 s.
+// One snapshot per load, asked as one-off queries over the sockets the live layer already holds (relayAsk) — no new
+// socket, which matters now that the relay admits only thirty a minute. Not a named set held on those sockets:
+// dropping a held set costs a second full copy (UnsubscribeMultiApplied carries every row again, measured), and
+// holding it streams ~120 KB/s of progress ticks world-wide, against ~1.9 MB per snapshot. With nobody tracked there
+// are no held sockets, and each region gets a scratch socket instead (relayFetchOnce). Live mode re-snapshots every 30 s.
 //   round 1, per region: every public craft's progress row (a semijoin on public_progressive_action_state — ~4,700 of
 //            the ~5,900 are finished-but-uncollected and dropped here, as bitjita drops them), the region's display
 //            name, and the tracked players' claim memberships (My Claims).
@@ -7370,8 +7446,8 @@ async function ocBitjitaLoad(){
 // Owner names are fetched per card instead (ocOwnerName): a mirror only knows the players standing in its region.
 const OC_CRAFTS_SQL = 'SELECT progressive_action_state.* FROM progressive_action_state JOIN public_progressive_action_state ON progressive_action_state.entity_id = public_progressive_action_state.entity_id';
 const OC_PLACES_KEY = 'bcOcPlaces', OC_PLACES_TTL = 3*24*60*60*1000;   // age of the whole map: bounds how long a renamed claim keeps its old name
-// Scratch sockets at once. The live layer holds 13 — or is about to: booting straight onto this tab dials both at the
-// same moment, so counting the open ones isn't safe — and past ~22 a socket hangs in CONNECTING (§8.3).
+// Regions asked at once. When there are no held sockets each ask is a scratch socket, and past ~22 sockets in the
+// browser one hangs in CONNECTING (§8.3) — so the cap stays, though asks over held sockets wouldn't need it.
 const OC_SCRATCH_MAX = 6;
 let ocPlaces = null;           // { born, b: {stationId: [claimId, buildingDescId]}, c: {claimId: [name, x, z]} }
 let ocRelayRegions = {};       // regionId -> { rows: unfinished progress rows, at } — each region's last good snapshot
@@ -7402,11 +7478,11 @@ async function ocRelayLoad(){
   const regions = BC_REGIONS.slice();
   const sqls = [OC_CRAFTS_SQL, 'SELECT * FROM world_region_name_state',
     ...trackedPlayers.map(p => String(p.entityId)).filter(id => /^\d+$/.test(id)).map(id => `SELECT * FROM claim_member_state WHERE player_entity_id = ${id}`)];
-  const got = await ocRelayEach(regions, rg => relayFetchOnce(rg, sqls, 30000));
+  const got = await ocRelayEach(regions, rg => relayAsk(rg, sqls, 30000));
   const failed = () => regions.filter((rg, i) => got[i] instanceof Error);
   if (failed().length === regions.length) throw new Error('no region answered');
   const retry = failed();   // a mirror mid-hiccup usually answers a second ask
-  if (retry.length){ const again = await ocRelayEach(retry, rg => relayFetchOnce(rg, sqls, 25000)); retry.forEach((rg, j) => { got[regions.indexOf(rg)] = again[j]; }); }
+  if (retry.length){ const again = await ocRelayEach(retry, rg => relayAsk(rg, sqls, 25000)); retry.forEach((rg, j) => { got[regions.indexOf(rg)] = again[j]; }); }
   const silent = failed();
   const members = new Set(ocMemberClaims.filter(id => silent.includes(regionOfEntity(id))));   // a silent region keeps the memberships it had
   let named = false;
@@ -7444,7 +7520,7 @@ async function ocResolvePlaces(stationIds, claimIds){
     `SELECT * FROM claim_state WHERE entity_id = ${c}`, `SELECT * FROM claim_local_state WHERE entity_id = ${c}`]));
   Object.keys(byRegion).forEach(rg => { const g = byRegion[rg]; for (let i = 0; i < g.length; i += 100) jobs.push({ rg: +rg, sqls: g.slice(i, i + 100).flat() }); });
   if (!jobs.length) return;
-  const got = await ocRelayEach(jobs, j => relayFetchOnce(j.rg, j.sqls, 30000));
+  const got = await ocRelayEach(jobs, j => relayAsk(j.rg, j.sqls, 30000));
   const names = {}, locs = {};
   got.forEach((t, i) => { if (t instanceof Error) return;   // whatever didn't answer is asked again on the next load
     (t.building_state || []).forEach(r => { P.b[String(r.entity_id)] = [String(r.claim_entity_id || '0'), r.building_description_id]; });
@@ -8096,7 +8172,7 @@ async function relayTaskRefs(){
   } catch(e){}
   for (const rg of BC_REGIONS){
     try {
-      const byT = await relayFetchOnce(rg, ['SELECT * FROM traveler_task_desc', 'SELECT * FROM npc_desc'], 12000);
+      const byT = await relayAsk(rg, ['SELECT * FROM traveler_task_desc', 'SELECT * FROM npc_desc'], 12000);
       const tasks = {}, npcs = {};
       (byT.npc_desc || []).forEach(n => npcs[n.npc_type] = { name: n.name, skills: (n.task_skill_check || []).map(s => Array.isArray(s) ? +s[0] : +s).filter(s => s > 0) });
       (byT.traveler_task_desc || []).forEach(t => {
@@ -10916,11 +10992,11 @@ function bcDoor(rg, dim, depth = 0){
 }
 async function bcFindDoor(rg, dim, depth){
   const via = (t, col) => `SELECT ${t}.* FROM ${t} JOIN dimension_description_state ON ${t}.${col} = dimension_description_state.dimension_network_entity_id WHERE dimension_description_state.dimension_id = ${dim}`;
-  const a = await relayFetchOnce(rg, [via('player_housing_state', 'network_entity_id'), via('dimension_network_state', 'entity_id')]);
+  const a = await relayAsk(rg, [via('player_housing_state', 'network_entity_id'), via('dimension_network_state', 'entity_id')]);
   const house = (a.player_housing_state || [])[0], net = (a.dimension_network_state || [])[0];
   const ids = [house && house.entrance_building_entity_id, net && net.building_id].filter(Boolean).map(String);   // a house's door first
   if (!ids.length) return null;
-  const b = await relayFetchOnce(rg, ids.map(id => `SELECT * FROM location_state WHERE entity_id = ${id}`));
+  const b = await relayAsk(rg, ids.map(id => `SELECT * FROM location_state WHERE entity_id = ${id}`));
   const loc = ids.map(id => (b.location_state || []).find(r => String(r.entity_id) === id)).find(Boolean);
   if (!loc) return null;
   if (+loc.dimension === 1) return { x: +loc.x, z: +loc.z };
