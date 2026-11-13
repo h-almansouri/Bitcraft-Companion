@@ -94,6 +94,7 @@ const scrub = s => {
 const clean = s => scrub(s).replace(/[^\s"'<>=&?]+@[^\s"'<>&]+/g, '<email>').replace(/\s+/g, ' ').trim();
 function say(s = '') { s = scrub(s); console.log(s); logLines.push(s); }
 const fmt = n => Number(n).toLocaleString('en-US');
+const plural = (n, one, many) => `${fmt(n)} ${Number(n) === 1 ? one : many}`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function flushLog() {
   try {
@@ -622,9 +623,9 @@ function printPlayer(label, s, names) {
   const pile = t => `${fmt(t.qty)} ${names[t.key] || (t.key[0] === 'c' ? 'cargo #' : 'item #') + t.key.slice(2)}`;
   say(`  ${label}: ${s.name || '(name not listed in this region)'}   character id ${s.id}`);
   say(`    in the game right now   ${s.signedIn ? 'YES' : 'no'}`);
-  say(`    carried                 ${s.carried.n} bags, ${fmt(s.carried.stacks)} item stacks` + (s.carried.parts.length ? `  (${s.carried.parts.join(', ')})` : ''));
-  if (s.recovery.n) say(`    in the recovery chest   ${fmt(s.recovery.stacks)} item stacks`);
-  say(`    stored in this region   ${s.stored.n} storages, ${fmt(s.stored.stacks)} item stacks`);
+  say(`    carried                 ${plural(s.carried.n, 'bag', 'bags')}, ${plural(s.carried.stacks, 'item stack', 'item stacks')}` + (s.carried.parts.length ? `  (${s.carried.parts.join(', ')})` : ''));
+  if (s.recovery.n) say(`    in the recovery chest   ${plural(s.recovery.stacks, 'item stack', 'item stacks')}`);
+  say(`    stored in this region   ${plural(s.stored.n, 'storage', 'storages')}, ${plural(s.stored.stacks, 'item stack', 'item stacks')}`);
   say(`    crafts                  ${s.active} in progress, ${fmt(s.passive)} passive`);
   if (s.top.length) say(`    biggest piles           ${s.top.map(pile).join(' | ')}`);
   if (s.unread) say(`    note: ${s.unread} rows arrived in a shape this script could not read (details are in the log)`);
@@ -853,7 +854,6 @@ async function runWatch(token) {
   const whoIs = id => (id === meId ? 'You' : (people.get(id) || usernames.get(id) || 'someone'));
   const whose = id => (id === meId ? 'Your' : `${whoIs(id)}'s`);
   const itemName = k => names[k] || (k[0] === 'c' ? 'cargo #' : 'item #') + k.slice(2);
-  const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many}`;
   async function resolveItemNames(keys) {
     const need = [...new Set(keys)].filter(k => !(k in names) && !nameTried.has(k));
     if (!need.length || conn.closed) return;
@@ -1056,7 +1056,7 @@ async function runWatch(token) {
     : (reason === 'time' ? 'it reached the time limit' : 'you stopped it')));
   say(`  Live updates arrived                    ${stats.messages ? `YES - ${plural(stats.messages, 'message', 'messages')}, ${plural(stats.rows, 'row change', 'row changes')}` : 'NONE - either nothing in the watched rows changed, or the stream is not flowing'}`);
   if (stats.messages) say(`    by table: ${Object.entries(stats.byTable).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t} ${fmt(c)}`).join(', ')}`);
-  if (stats.unreadable) say(`    note: ${fmt(stats.unreadable)} live rows arrived in a shape this script could not read (details are in the log)`);
+  if (stats.unreadable) say(`    note: ${plural(stats.unreadable, 'live row', 'live rows')} arrived in a shape this script could not read (details are in the log)`);
   say(`  Added queries without reconnecting      ${adds.length ? 'YES - ' + adds.join(', ') : 'not shown (nothing was added in this run)'}`);
   say(`  Dropped a query without reconnecting    ${drops.length ? 'YES - ' + drops.join(', ') : 'not shown (the run ended before that step)'}`);
   problems.forEach(p => say('  PROBLEM: ' + p));
