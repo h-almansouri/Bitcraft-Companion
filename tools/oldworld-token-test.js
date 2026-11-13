@@ -8,6 +8,7 @@
  *
  *   node tools/oldworld-token-test.js            run the test (logs in first if no token is saved)
  *   node tools/oldworld-token-test.js login      throw away the saved token, log in again, run the test
+ *   node tools/oldworld-token-test.js code       log in with a code that already arrived (requests no new one)
  *   node tools/oldworld-token-test.js forget     delete the saved token from this PC
  *
  * Options:  --friend <name or character id>   skip the "friend" question
@@ -149,21 +150,35 @@ async function httpPost(url) {
   const res = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(20000) });
   return { status: res.status, body: await res.text() };
 }
-async function login() {
+// haveCode = the email already arrived from an earlier request, so do not ask for another one (a new
+// request would most likely cancel the code the user is holding).
+async function login(haveCode) {
   say('');
   say('Logging in to get your token');
-  say('  BitCraft emails a one-time code to the address on your game account.');
+  if (haveCode) {
+    say('  Using a code BitCraft already emailed you. No new code is requested.');
+  } else {
+    say('  BitCraft emails a one-time code to the address linked to your game account.');
+    say('  (If you start the game with "Continue without email", no address is linked and this');
+    say('  cannot work until you link one in the game: login screen, Link Account.)');
+  }
   const email = await ask('  Your BitCraft account email: ');
   if (!email) { say('  No email entered. Stopped.'); return null; }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { say('  That does not look like an email address. Stopped.'); return null; }
-  let r;
-  try { r = await httpPost(`${LOGIN_API}/request-access-code?email=${encodeURIComponent(email)}`); }
-  catch (e) { say('  Could not reach the BitCraft login service: ' + clean(e.message)); return null; }
-  if (r.status < 200 || r.status >= 300) { say(`  The login service refused the request (HTTP ${r.status}): ${clean(r.body).slice(0, 160)}`); return null; }
-  say('  Code requested. Check your inbox (and spam); it can take a minute.');
+  if (!haveCode) {
+    let r;
+    try { r = await httpPost(`${LOGIN_API}/request-access-code?email=${encodeURIComponent(email)}`); }
+    catch (e) { say('  Could not reach the BitCraft login service: ' + clean(e.message)); return null; }
+    if (r.status < 200 || r.status >= 300) { say(`  The login service refused the request (HTTP ${r.status}): ${clean(r.body).slice(0, 160)}`); return null; }
+    say(`  Code requested (the login service answered HTTP ${r.status}).`);
+    say('  Look for an email with the subject "BitCraft Access Code". Check Junk too, and the "Other"');
+    say('  tab if your inbox is split. Outlook, Hotmail, Live and Yahoo addresses often junk or delay it.');
+    say('  No rush: leave this waiting, or press Enter to stop and use the code later with:');
+    say(`    ${SCRIPT} code`);
+  }
   for (let attempt = 1; attempt <= 3; attempt++) {
     const code = await ask('  Code from the email: ');
-    if (!code) { say('  No code entered. Stopped.'); return null; }
+    if (!code) { say(`  No code entered. Stopped. When the email arrives, run:  ${SCRIPT} code`); return null; }
     let a;
     try { a = await httpPost(`${LOGIN_API}/authenticate?email=${encodeURIComponent(email)}&accessCode=${encodeURIComponent(code)}`); }
     catch (e) { say('  Could not reach the BitCraft login service: ' + clean(e.message)); return null; }
@@ -182,7 +197,7 @@ async function login() {
       say(`  (reply outline: ${String(a.body).length} chars, ${String(a.body).slice(0, 60).replace(/[A-Za-z0-9]/g, 'x')})`);
       return null;
     }
-    say(`  That code was not accepted (HTTP ${a.status}).` + (attempt < 3 ? ' Try again.' : ' Stopped.'));
+    say(`  That code was not accepted (HTTP ${a.status}).` + (attempt < 3 ? ' Try again.' : ` Stopped. It may have expired; ask for a new one with:  ${SCRIPT} login`));
   }
   return null;
 }
@@ -669,7 +684,7 @@ async function main() {
     say(forgetToken() ? 'Saved token deleted from this PC.' : 'There was no saved token to delete.');
     return;
   }
-  if (cmd !== 'test' && cmd !== 'login') { say(`Unknown command "${cmd}". Use: ${SCRIPT}  [login | forget]`); return; }
+  if (cmd !== 'test' && cmd !== 'login' && cmd !== 'code') { say(`Unknown command "${cmd}". Use: ${SCRIPT}  [login | code | forget]`); return; }
   let token = null;
   if (SELFTEST) {
     if (!SELF_NAME) { say('--selftest needs a player name.'); return; }
@@ -677,10 +692,10 @@ async function main() {
   } else if (ANON) {
     say('NO-TOKEN CHECK: the real server without a login. Developer check only.');
   } else {
-    if (cmd !== 'login') token = loadToken();
+    if (cmd === 'test') token = loadToken();
     if (token) { SECRET = token; say(`Using the token saved on this PC (${tokenFacts(token)}).`); }
     else {
-      token = await login();
+      token = await login(cmd === 'code');
       if (!token) return;
       say(`  Token dates: ${tokenFacts(token)}.`);
     }
