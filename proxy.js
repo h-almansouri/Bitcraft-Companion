@@ -6,10 +6,15 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 // Map export hosts for /bcexports/*, primary first, as [hostname, path prefix]. prism.brico.app (BitCraftToolBox) serves
 // the same file layout bitjita's old export host did — terrain re-rendered from the game daily, roads hourly, the
-// GeoJSON lists every 15 minutes — while bitjita's copy still has June terrain, so it is only the fallback for when
-// prism errors out. Override without a deploy: BC_EXPORT_HOSTS="host/prefix,host/prefix" (no scheme).
-const BC_EXPORT_HOSTS = (process.env.BC_EXPORT_HOSTS || 'prism.brico.app,exports.bitjita.com/bitcraftmap')
+// GeoJSON lists every 15 minutes. Its /release path is the 1.0 world (the bare host is still Early Access). bitjita's
+// copy is the fallback for when prism errors out: it moved to 1.0 too, but only some of its lists are regenerated —
+// see BC_WORLD_SINCE. Override without a deploy: BC_EXPORT_HOSTS="host/prefix,host/prefix" (no scheme).
+const BC_EXPORT_HOSTS = (process.env.BC_EXPORT_HOSTS || 'prism.brico.app/release,exports.bitjita.com/bitcraftmap')
   .split(',').map(s => { const t = s.trim(); const i = t.indexOf('/'); return i < 0 ? [t, ''] : [t.slice(0, i), t.slice(i)]; });
+// The 1.0 world opened on 2026-11-13 15:00 UTC. A fallback host's file last written before that describes Early Access
+// (on 2026-11-14 bitjita's caves, dungeons, temples and region grid were still September's): it counts as a miss, so
+// the map keeps what it has rather than drawing another world's caves. The primary host is taken at its word.
+const BC_WORLD_SINCE = Date.parse('2026-11-13T15:00:00Z');
 const TARGET = 'bitjita.com';
 const DATA_DIR = path.join(__dirname, 'data');
 
@@ -93,6 +98,26 @@ const HISTORY_MIN_GAP = 20 * 60 * 1000; // at most one snapshot per item per 20 
 const HISTORY_MAX_PTS = 120;            // cap points per item (rolling window)
 let history = null, historyDirty = false;
 function loadHistory() { if (!history) { try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch (e) { history = {}; } } return history; }
+// One world's prices only. bitjita moved from Early Access to the 1.0 world around 2026-11-14, and the same item ids
+// carry on, so a chart would run Early Access prices straight into 1.0's. The history is stamped with the world it
+// was recorded in — bitjita's region list, whose names changed with the world (Zephra → Veska…) — and starts over
+// when that changes. A history from before the stamp existed starts over too. Checked at startup and every 30 minutes.
+let historyWorldAt = 0;
+async function historyWorldCheck() {
+  if (Date.now() - historyWorldAt < 30 * 60 * 1000) return;
+  historyWorldAt = Date.now();
+  try {
+    const d = await bitjitaJson('/api/regions');
+    const sig = (Array.isArray(d) ? d : (d && d.regions) || []).map(r => r.regionId + ':' + r.regionName).sort().join(',');
+    if (!sig) return;
+    const h = loadHistory();
+    if (h._world === sig) return;
+    const had = Object.keys(h).filter(k => k !== '_world').length;
+    for (const k of Object.keys(h)) delete h[k];
+    h._world = sig; historyDirty = true;
+    if (had) console.log(`[history] bitjita serves another world now (${sig}) - dropped ${had} items' price history from the old one`);
+  } catch (e) { historyWorldAt = Date.now() - 25 * 60 * 1000; }   // couldn't tell: ask again in 5 minutes
+}
 function priceFromDetail(detail) {
   const p = o => +(o.price || o.priceThreshold || 0);
   const sells = (detail.sellOrders || []).map(p).filter(v => v > 0);
@@ -100,6 +125,7 @@ function priceFromDetail(detail) {
   return { s: sells.length ? Math.min(...sells) : null, b: buys.length ? Math.max(...buys) : null };
 }
 function recordHistory(type, id, detail) {
+  historyWorldCheck();   // fire and forget: at most one small request per half hour
   const h = loadHistory(); const key = `${type}_${id}`;
   const arr = h[key] || (h[key] = []);
   const last = arr[arr.length - 1];
@@ -240,10 +266,12 @@ const ITEMDEFS_FILE = path.join(DATA_DIR, 'itemdefs.json');
 const ITEMDEFS_TTL = 7 * 24 * 60 * 60 * 1000;   // game data only changes on patches
 const GAMEDATA_PATH = '/BitCraftToolBox/BitCraft_GameData/refs/heads/sats-json/static/';
 let itemDefs = null, itemDefsBuilding = null;
+const ghEtags = {};   // file → the ETag (a content hash) of the copy ghJson last downloaded
 function ghJson(file) {
   return new Promise((resolve, reject) => {
     const r = https.get({ hostname: 'raw.githubusercontent.com', path: GAMEDATA_PATH + file, headers: { 'User-Agent': 'BitcraftCompanion/1.0' } }, res => {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      ghEtags[file] = res.headers.etag || '';
       const chunks = []; res.on('data', c => chunks.push(c));
       res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
     });
@@ -336,19 +364,33 @@ function slimPlaceables(descs, growth, acts) {
   return out;
 }
 const PLACEABLES_FORMAT = 2;   // bump with slimPlaceables' shape, so a disk cache in an older shape is rebuilt
+// Definitions are current while they are under a week old AND not behind the crafting data being served. That second
+// half is how a patch reaches them: the crafting data is rebuilt whenever the game data mirror's tables change (hourly
+// ETag check, craftingMaybeRefresh), so definitions that are older than it and were built from other copies of the
+// tables the two share were built from the tables it replaced. (Older but from the same copies is the ordinary cold
+// start, where both are fetched minutes apart: nothing to redo.) Age alone left the 1.0 release's new items nameless
+// for up to a week on a server that had fetched the day before.
+const ITEMDEFS_SHARED = ['item_desc.json', 'cargo_desc.json', 'crafting_recipe_desc.json'];
+function itemDefsCurrent(d) {
+  if (!d || !d.ts || (Date.now() - d.ts) >= ITEMDEFS_TTL) return false;
+  const c = craftingCurrent();
+  if (!c || !(c.extractedAt > d.ts)) return true;
+  const mine = d.etags || {}, theirs = c.sourceEtags || {};
+  return ITEMDEFS_SHARED.every(f => mine[f] && mine[f] === theirs[f]);
+}
 async function getItemDefs() {
-  if (itemDefs && (Date.now() - itemDefs.ts) < ITEMDEFS_TTL) return itemDefs;
+  if (itemDefsCurrent(itemDefs)) return itemDefs;
   if (itemDefsBuilding) return itemDefsBuilding;
   itemDefsBuilding = (async () => {
     try {   // disk cache first (survives restarts; avoids a 4MB refetch on every cold start)
       const d = JSON.parse(fs.readFileSync(ITEMDEFS_FILE, 'utf8'));
       // recipeOuts and placeables must be non-empty — a build whose fetch failed writes {} and must not stick for 7
       // days (and a cache from before placeables existed, or with placeables or recipeOuts in an older shape, is rebuilt once)
-      if (d && d.ts && (Date.now() - d.ts) < ITEMDEFS_TTL && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && d.recipeOutsFormat === RECIPE_OUTS_FORMAT && Object.keys(d.placeables || {}).length && d.placeablesFormat === PLACEABLES_FORMAT) { itemDefs = d; itemDefsBuilding = null; return d; }
+      if (itemDefsCurrent(d) && d.equip && d.buildings && Object.keys(d.recipeOuts || {}).length && d.recipeOutsFormat === RECIPE_OUTS_FORMAT && Object.keys(d.placeables || {}).length && d.placeablesFormat === PLACEABLES_FORMAT) { itemDefs = d; itemDefsBuilding = null; return d; }
     } catch (e) { /* no/stale disk cache — rebuild */ }
     try {
       const [items, cargos, equip, buildings, recipes, placeDescs, placeGrowth, placeActs] = await Promise.all([ghJson('item_desc.json'), ghJson('cargo_desc.json'), ghJson('equipment_desc.json').catch(() => []), ghJson('building_desc.json').catch(() => []), ghJson('crafting_recipe_desc.json').catch(() => []), ghJson('placeable_desc.json').catch(() => []), ghJson('placeable_growth_desc.json').catch(() => []), ghJson('placeable_interaction_desc.json').catch(() => [])]);
-      const built = { ts: Date.now(), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), recipeOutsFormat: RECIPE_OUTS_FORMAT, placeables: slimPlaceables(placeDescs, placeGrowth, placeActs), placeablesFormat: placeActs.length ? PLACEABLES_FORMAT : 0 };   // no actions = a failed fetch: don't let the disk copy stick
+      const built = { ts: Date.now(), etags: Object.fromEntries(ITEMDEFS_SHARED.map(f => [f, ghEtags[f] || ''])), items: slimDefs(items), cargos: slimDefs(cargos), equip: slimEquip(equip), buildings: slimBuildings(buildings), recipeOuts: slimRecipeOuts(recipes), recipeOutsFormat: RECIPE_OUTS_FORMAT, placeables: slimPlaceables(placeDescs, placeGrowth, placeActs), placeablesFormat: placeActs.length ? PLACEABLES_FORMAT : 0 };   // no actions = a failed fetch: don't let the disk copy stick
       itemDefs = built;
       try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(ITEMDEFS_FILE, JSON.stringify(built)); } catch (e) {}
       return built;
@@ -567,6 +609,7 @@ http.createServer((req, res) => {
   // bitcraftsync relay returns (names/icons/tier/rarity) without calling bitjita. Long-cached + ETag,
   // so it's a one-time download per client per game patch.
   if (req.url === '/itemdefs' || req.url.startsWith('/itemdefs?')) {
+    craftingMaybeRefresh();   // the patch check (hourly at most): a rebuilt crafting data makes the next /itemdefs rebuild too
     getItemDefs().then(d => {
       const etag = '"idf-' + d.ts + '"';
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=86400' }); res.end(); return; }
@@ -593,8 +636,9 @@ http.createServer((req, res) => {
 
   // Map exports → /bcexports/claims.geojson, /bcexports/maps/terrain/tiles/{z}/{x}/{y}.webp … Tries BC_EXPORT_HOSTS in
   // order: a connection error, timeout or non-2xx answer moves on to the next host, so a prism outage quietly serves
-  // bitjita's (older) copy. In practice only the GeoJSON lists come through here — the browser loads tiles straight
-  // from the host — and the lists are capped at 5 minutes in the browser cache so prism's 15-minute refresh shows up.
+  // bitjita's copy — unless that copy predates the 1.0 world (BC_WORLD_SINCE), which answers 502 instead. In practice
+  // only the GeoJSON lists come through here — the browser loads tiles straight from the host — and the lists are
+  // capped at 5 minutes in the browser cache so prism's 15-minute refresh shows up.
   if (req.url.startsWith('/bcexports/')) {
     const rel = req.url.slice('/bcexports'.length);
     const isTile = /\.webp(\?|$)/.test(req.url);
@@ -606,6 +650,12 @@ http.createServer((req, res) => {
       const enc = !isTile && wantsGzip(req) ? 'gzip' : 'identity';
       const exReq = https.request({ hostname, path: prefix + rel, method: 'GET', headers: { 'User-Agent': 'BitcraftCompanion/1.0', 'Accept-Encoding': enc } }, (apiRes) => {
         if ((apiRes.statusCode < 200 || apiRes.statusCode >= 300) && !last) { apiRes.resume(); tryHost(i + 1); return; }
+        const written = Date.parse(apiRes.headers['last-modified'] || '');
+        if (i > 0 && apiRes.statusCode < 300 && written < BC_WORLD_SINCE) {   // a fallback's leftover from the old world
+          apiRes.resume();
+          if (!last) { tryHost(i + 1); return; }
+          res.writeHead(502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'only an Early Access copy is available' })); return;
+        }
         const ce = apiRes.headers['content-encoding'];
         res.writeHead(apiRes.statusCode, {
           'Content-Type': apiRes.headers['content-type'] || 'application/octet-stream',
@@ -663,6 +713,7 @@ http.createServer((req, res) => {
   // Bandwidth-lazy: no background market refresh or deal precompute. The market list is fetched on demand
   // (and cached for MARKET_TTL); deals are computed only when the Deals tab requests /deals and they're
   // stale. This avoids fetching ~2,400 market items every few minutes 24/7 whether or not anyone's using it.
+  historyWorldCheck();   // before the first chart is asked for: is the saved price history this world's?
   // Flush accumulated price-history snapshots to disk periodically (not on every record).
   setInterval(() => { if (historyDirty) { try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(HISTORY_FILE, JSON.stringify(history)); historyDirty = false; } catch (e) {} } }, 60 * 1000);
 });

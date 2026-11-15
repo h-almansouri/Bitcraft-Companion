@@ -857,6 +857,8 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
 .bc-lm img{width:22px;height:22px}
 .bc-lm b{position:absolute;right:-8px;bottom:-6px;padding:0 3px;border-radius:5px;background:var(--c);color:#0a0c10;font-size:9px;font-weight:700;line-height:12px;white-space:nowrap}
 .bc-lm.dim img,.bc-lm.dim i{opacity:.4;filter:grayscale(.8)}
+.bc-lm.sm{width:20px;height:20px;border-radius:6px;border-width:1px}   /* the many-of-a-kind landmarks (Maker's Trees) */
+.bc-lm.sm img{width:15px;height:15px}
 .bc-region-name{background:none;border:none}
 .bc-region-name div{position:absolute;transform:translate(-50%,-50%);color:rgba(244,246,249,.92);font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;text-shadow:0 0 4px #000,0 0 2px #000;white-space:nowrap;pointer-events:none}
 /* live player pulse marker */
@@ -1868,8 +1870,30 @@ async function bitjitaWorldCheck(){
     const same = !!(theirs && waitKey(theirs.regionName) === waitKey(mine));
     safeSetItem('bc_bitjita_world', JSON.stringify({ same, t: Date.now() }));
     if (same !== bitjitaWorld){ bitjitaWorld = same; worldNoteSync(); }
+    // bitjita's world gets a stamp of its own (its region names), as the relay's has bc_world: the day it differs,
+    // bitjita has changed worlds. No stamp yet counts as changed — bitjita moved to 1.0 on 2026-11-14, before the stamp existed.
+    const sig = list.map(x => x.regionId + ':' + x.regionName).sort().join(',');
+    let was = null; try { was = localStorage.getItem('bc_bitjita_sig'); } catch(e){}
+    if (was !== sig){ safeSetItem('bc_bitjita_sig', sig); bitjitaMoved(same); }
   } catch(e){ _bjWorldAt = Date.now() - 9 * 60 * 1000; }   // couldn't tell: try again in a minute
   finally { _bjWorldBusy = false; }
+}
+// bitjita changed worlds: what this browser saved from it describes the other one. The two regenerable snapshots
+// (market list, deals) go — they would be shown for a moment before the refresh. The Shopping List's claim filter
+// keeps only the claims the relay knows in its world, which is bitjita's too when `same` (it answers 404 for the
+// rest): one Early Access claim left in that filter would filter every 1.0 price away.
+async function bitjitaMoved(same){
+  ['bc_deals_cache_v1', 'bc_market_cache_v1'].forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
+  if (!same || !shoppingClaimFilter.length) return;
+  const keep = [];
+  for (const c of shoppingClaimFilter){
+    let gone = false;
+    try { gone = (await fetch(`${RELAY_HTTP}/claim/${encodeURIComponent(c.entityId)}`)).status === 404; } catch(e){}   // couldn't ask: keep it
+    if (!gone) keep.push(c);
+  }
+  if (keep.length === shoppingClaimFilter.length) return;
+  shoppingClaimFilter = keep; saveShoppingClaims();
+  if (currentTab === 'shopping'){ renderShoppingTab(); shoppingInvalidatePrices(); fetchAllShoppingPrices(); }
 }
 // The strip under the topbar on tabs whose numbers come from bitjita, while it is on another world.
 const WORLD_NOTE_TABS = {
@@ -7897,8 +7921,8 @@ async function loadGameItemDefs(){
     // briefly served rout1 WITHOUT recipeOuts (the route dropped the field), and that empty payload
     // sat in browser caches for 24h — programmatic fetches don't revalidate on hard refresh. plc1 added placeables; plc2 gave
     // them tier, kind, icon, growth timing and actions; act1 added each recipe's actions per craft to recipeOuts; cgo1
-    // added the headline's cargo flag.
-    const d = await apiFetch('/itemdefs?v=cgo1');   // compact [name, tier, rarityIdx, tag, icon]
+    // added the headline's cargo flag; rel1 = the 1.0 release's items (a copy cached the day before lacked them).
+    const d = await apiFetch('/itemdefs?v=rel1');   // compact [name, tier, rarityIdx, tag, icon]
     const expand = m => { const o = {}; for (const id in m){ const a = m[id]; o[id] = { name:a[0], tier:a[1], rarityStr:rarityName(a[2]), tag:a[3], iconAssetName:a[4] }; } return o; };
     gameItemDefs = { items: expand(d.items||{}), cargos: expand(d.cargos||{}), equip: d.equip || {}, buildings: d.buildings || {},
       recipeOuts: d.recipeOuts || {},     // recipeId -> [headlineItemId, qty, actionsRequired, isCargo] — the game's own crafted_item_stacks[0]
@@ -9979,7 +10003,7 @@ function bcClaimHoverTip(m, name){
 }
 async function bcLoadGeo(name, fresh){
   // Marker lists (claims, caves, dungeons, temples, ruins, wonders) from the map export host via /bcexports/ —
-  // prism.brico.app, regenerated every 15 minutes, with bitjita's older copy as the proxy's fallback.
+  // prism.brico.app/release (the 1.0 world), regenerated every 15 minutes, with bitjita's copy as the proxy's fallback.
   // Either FeatureCollections or plain arrays. `fresh` (the 15-minute refresh) skips the browser's 5-minute copy.
   try {
     const r = await fetch(`${API}/bcexports/${name}`, fresh ? { cache: 'no-cache' } : undefined);
@@ -10292,10 +10316,10 @@ async function bcInitMap(){
   bcBuildCaves(await bcLoadGeo('caves.geojson'));
 
   // ----- Other POI overlay layers (icon-based, like bitcraftmap) -----
-  const poiLayer = async (file, iconUrl, size, label) => {
+  const poiLayer = async (file, iconUrl, size, label, keep) => {
     const icon = L.icon({ iconUrl:`${API}/mapassets/${iconUrl}`, iconSize:[size,size], iconAnchor:[size/2,size/2], popupAnchor:[0,-size/2] });
     const layer = L.layerGroup();
-    const feats = await bcLoadGeo(file);
+    const feats = (await bcLoadGeo(file)).filter(f => !keep || keep(f));
     feats.forEach(f => {
       const ll = bcFeatLatLng(f); if (!ll) return;
       const p = f.properties || {};
@@ -10308,7 +10332,9 @@ async function bcInitMap(){
   };
   const dungeons = await poiLayer('dungeons.geojson', 'dungeon.png',      28, 'Dungeon');
   const temples  = await poiLayer('temples.geojson',  'temple.svg',       26, 'Temple');
-  const ruined   = await poiLayer('ruined.geojson',   'ruinedCity.png',   28, 'Ruined City');
+  // Ruined cities are the 'ruined-city' entries of npcs.geojson. The old ruined.geojson is not made for the 1.0 world
+  // (404 on prism; bitjita's is a June 2026 leftover with the Early Access towns).
+  const ruined   = await poiLayer('npcs.geojson',     'ruinedCity.png',   28, 'Ruined City', f => (f.properties || {}).type === 'ruined-city');
   const wonders  = await poiLayer('trees.geojson',    'travelerTree.svg', 26, 'Wonder');
   bcPoiCounts = { dungeons: dungeons.count, temples: temples.count, ruined: ruined.count, wonders: wonders.count };
   bcRegionLayer = bcBuildRegions(await bcLoadGeo('grids.geojson'));
@@ -10395,8 +10421,10 @@ let bcCullClaims = [], bcCullCaves = [];        // {m, ll, group} — added to t
 // our proxy — that's the single biggest bandwidth saving, since map tiles never touch the host.
 // prism.brico.app (BitCraftToolBox, the same project behind the prism relay) serves the exact tile layout
 // bitjita's old export host did, but re-rendered from the game: terrain daily (~04:00 UTC), roads about hourly.
-// bitjita's copy (terrain last rendered June 2026) stays as the per-tile fallback for when prism fails to answer.
-const BC_TILE_BASE = 'https://prism.brico.app';
+// THE WORLD IS IN THE PATH: /release is the 1.0 world (since its launch, 2026-11-13); the bare host still draws
+// Early Access, which is why the map showed the old terrain and old claims under 1.0's live dots until 2026-11-14.
+// bitjita's copy moved to 1.0 as well (terrain hourly now) and stays the per-tile fallback for when prism fails.
+const BC_TILE_BASE = 'https://prism.brico.app/release';
 const BC_TILE_FALLBACK = 'https://exports.bitjita.com/bitcraftmap';
 const BC_TILE_PATH = { terrain: 'maps/terrain/tiles', roads: 'roads/tiles' };
 let bcTerrainLayer = null, bcRoadsLayer = null;
@@ -10565,7 +10593,7 @@ function bcLayerControlHtml(){
     flat('ruined',`Ruined Cities (${bcPoiCounts.ruined || 0})`,dot('#c8c8c8')) +
     flat('wonders',`Wonders (${bcPoiCounts.wonders || 0})`,dot('#63c45a')) +
     Object.keys(BC_LM).map(k => flat(k, BC_LM[k].label + (bcLm.at ? ` (${bcLm.counts[k] || 0})` : ''), dot(BC_LM[k].color))).join('') +   // counts once loaded
-    flat('ancient', 'Ancient Ruins' + (bcLm.ruins ? ` (${bcLm.ruins.toLocaleString()})` : ''), dot(BC_RUIN_COLOR));
+    flat('ancient', 'Ancient Ruins' + (bcLm.ruinsAt ? ` (${bcLm.ruins.toLocaleString()})` : ''), dot(BC_RUIN_COLOR));
 }
 // Redraw the layer control's counts after a refresh, keeping which groups are expanded and every toggle as it was.
 // Looked up inside the control itself: while the map is popped out, it lives in the pop-out's document.
@@ -10670,6 +10698,7 @@ function bcCullMarkers(){
   sync(bcCullClaims);
   sync(bcCullCaves);
   sync(bcCullRuins);
+  sync(bcCullLm);
 }
 function bcExpandLayerGroup(gid){
   const b = document.getElementById('bc-lg-'+gid), c = document.getElementById('bc-lgchev-'+gid);
@@ -10704,20 +10733,31 @@ function bcBuildRegions(feats){
 // is on. That resource is the landmark's state: a giant bush and a hexite deposit sit exactly on their claim, a quarry's
 // rocks within ~18 units of it — and a T1 quarry holds T1–T3 rocks, a T4 one T4–T6, a T7 one T7–T9 (measured 2026-10-27).
 // The 4,281 ancient ruins (~470 KB) load only with their layer and are remembered for three days; they don't move.
+// THE 1.0 WORLD (counted on prism-release, 2026-11-14) keeps the same buildings with a different cast: 8 T1 quarries
+// (T1–T3 rocks, as before; no T4/T7 quarry placed), 48 giant bushes, 4 sunken ruins — and Hexite Reservoirs (10) where
+// Early Access had Hexite Deposits, 8 Overgrown Mines, 309 Maker's Trees (island-only before), and no ancient ruins at
+// all. A reservoir is Inactive for 23 hours and then Energized (resource_growth_recipe_desc); it and a Fruitless
+// Maker's Tree carry a growth timer, read with the rest so the popup can say when.
 const BC_LM = {
   quarries: { label:'Quarries', color:'#c9b38f', icon:'GeneratedIcons/Other/QuarryRock',
               b:{ 1008512330:[1,'Quarry'], 1632191797:[4,'Quarry'], 1671738347:[7,'Quarry'] } },
+  mines:    { label:'Overgrown Mines', color:'#d4a373', icon:'GeneratedIcons/Other/RuinMinecart',
+              b:{ 1385919449:[0,'Overgrown Mine'] } },
   berries:  { label:'Giant Berry Bushes', color:'#f0609a', icon:'GeneratedIcons/Other/BushStrawberry',
               b:{ 967548084:[1,'Giant Strawberry Bush'], 285371337:[2,'Giant Savory Berry Bush'], 912126889:[3,'Giant Zesty Berry Bush'] } },
-  hexite:   { label:'Hexite Deposits', color:'#5eead4', glyph:'ti-hexagon',   // its game icon (ArgentOre) isn't on bitjita
-              b:{ 421789207:[0,'Hexite Deposit'] } },
+  hexite:   { label:'Hexite Reservoirs', color:'#5eead4', icon:'GeneratedIcons/Other/HexiteReservoir',
+              b:{ 1506763792:[0,'Hexite Reservoir'], 421789207:[0,'Hexite Deposit'] } },   // the deposit is Early Access's; none in 1.0
+  makers:   { label:"Maker's Trees", color:'#86efac', icon:'GeneratedIcons/Other/MakersTree', small:true,
+              b:{ 1375306631:[0,"Maker's Tree"] } },
   sunken:   { label:'Sunken Ruins', color:'#60a5fa', glyph:'ti-building-arch',
               b:{ 1320058140:[0,'North Western Sunken Ruin'], 1907229466:[0,'North Eastern Sunken Ruin'], 148750481:[0,'South Western Sunken Ruin'], 988692715:[0,'South Eastern Sunken Ruin'] } },
 };
 const BC_RUINS = { 1441436391:'Ancient Crumbled Pillar', 1842388176:'Ancient Crumbled Platform' }, BC_RUIN_COLOR = '#d6b56d';
-const BC_RUINS_KEY = 'bc_map_ruins_v1', BC_RUINS_TTL = 3*24*60*60*1000;
-const bcLm = { layers:{}, marks:new Map(), counts:{}, at:0, busy:false, ruins:0, ruinsBusy:false };
+const BC_RUINS_KEY = 'bc_map_ruins_v2', BC_RUINS_TTL = 3*24*60*60*1000;   // v1 held the Early Access world's ruins
+try { localStorage.removeItem('bc_map_ruins_v1'); } catch(e){}
+const bcLm = { layers:{}, marks:new Map(), counts:{}, at:0, busy:false, ruins:0, ruinsAt:0, ruinsBusy:false };
 let bcCullRuins = [];   // {m, ll, group} like claims and caves: only the in-view dots are on the map
+let bcCullLm = [];      // the landmarks too: the Maker's Trees alone are 309 markers
 // One snapshot from the prism relay over a scratch socket: subscribe, take the initial rows, hang up. Raw v1 JSON —
 // the vendored SDK (bcRelayLib) only knows the five tables the tracker uses.
 function bcPrismFetchOnce(sqls, timeoutMs = 15000){
@@ -10749,16 +10789,19 @@ function bcPrismFetchOnce(sqls, timeoutMs = 15000){
 function bcLmSync(refresh){
   if (!bcMap) return;
   if (Object.keys(BC_LM).some(k => bcLayersOn.has(k)) && (refresh || !bcLm.at)) bcLmLoad();
-  if (bcLayersOn.has('ancient') && !bcLm.ruins) bcLmLoadRuins();
+  if (bcLayersOn.has('ancient') && !bcLm.ruins && Date.now() - bcLm.ruinsAt > 10 * 60000) bcLmLoadRuins();   // a world without any is asked again now and then, not on every toggle
 }
 // The resources that give a landmark its state, from the track list's index: a giant bush's three states, a hexite
-// deposit's two, and every quarry rock (any variant — Glittering, Hardened, Cracked… — is a rock still standing).
+// reservoir's (or deposit's) two, a Maker's Tree's two, and every quarry rock (any variant — Glittering, Hardened,
+// Cracked… — is a rock still standing).
 function bcLmStateTypes(){
   const t = {};
   for (const id in bcResourceIndex){
     const r = bcResourceIndex[id], n = r.name || '';
     if (r.tag === 'Bountiful Berry Bush') t[id] = { kind:'berries', state: /^Withering/.test(n) ? 'withering' : /^Citric/.test(n) ? 'citric' : 'bountiful' };
     else if (/^(Depleted )?Hexite Deposit$/.test(n)) t[id] = { kind:'hexite', state: /^Depleted/.test(n) ? 'depleted' : 'ready' };
+    else if (/^(Inactive|Energized) Hexite Reservoir$/.test(n)) t[id] = { kind:'hexite', state: /^Inactive/.test(n) ? 'inactive' : 'energized' };
+    else if (/^(Fruitless )?Maker's Tree$/.test(n)) t[id] = { kind:'makers', state: /^Fruitless/.test(n) ? 'fruitless' : 'fruit' };
     else if (/ Quarry Rock$/.test(n)) t[id] = { kind:'quarries', tier: r.tier };
   }
   return t;
@@ -10769,19 +10812,20 @@ async function bcLmLoad(){
   try {
     const types = bcLmStateTypes();
     const sqls = Object.values(BC_LM).flatMap(d => Object.keys(d.b)).map(b => `SELECT * FROM claim_meta WHERE building_desc_id = ${b}`)
-      .concat(Object.keys(types).map(id => `SELECT * FROM resource_location WHERE resource_id = ${id}`));
+      .concat(Object.keys(types).map(id => `SELECT * FROM resource_location WHERE resource_id = ${id}`))
+      .concat('SELECT * FROM growth_timers');   // a dozen rows world-wide: when a reservoir energizes, when a Maker's Tree bears again
     const got = await bcPrismFetchOnce(sqls);
     if (!(got.claim_meta || []).length) throw new Error('no landmarks');   // keep what's drawn
     bcLm.at = Date.now();   // before the build: its layer-control redraw shows the counts once this is set
-    bcLmBuild(got.claim_meta, got.resource_location || [], types);
+    bcLmBuild(got.claim_meta, got.resource_location || [], types, got.growth_timers || []);
   } catch(e){ /* keep what's drawn: the next 15-minute slot, or switching a layer on, tries again */ }
   finally { bcLm.busy = false; }
 }
-function bcLmBuild(metas, res, types){
+function bcLmBuild(metas, res, types, timers){
   const kindOf = {}; for (const k in BC_LM) for (const b in BC_LM[k].b) kindOf[b] = k;
   const lms = metas.filter(c => kindOf[c.building_desc_id]).map(c => {
     const kind = kindOf[c.building_desc_id], [tier, name] = BC_LM[kind].b[c.building_desc_id];
-    return { kind, tier, name, x: c.x, z: c.z, rocks: null, state: null };
+    return { kind, tier, name, x: c.x, z: c.z, rocks: null, state: null, until: 0 };
   });
   const onSpot = new Map(lms.map(l => [l.x + ',' + l.z, l])), quarries = lms.filter(l => l.kind === 'quarries');
   if (Object.values(types).some(t => t.kind === 'quarries')) quarries.forEach(q => q.rocks = {});   // no index, no rock count
@@ -10795,29 +10839,37 @@ function bcLmBuild(metas, res, types){
       if (l && l.kind === t.kind) l.state = t.state;
     }
   });
+  (timers || []).forEach(g => {   // end_timestamp arrives as { __timestamp_micros_since_unix_epoch__: n }
+    const l = onSpot.get(g.x + ',' + g.z), ts = g.end_timestamp, us = ts && typeof ts === 'object' ? +Object.values(ts)[0] : +ts;
+    if (l && us > 0) l.until = us / 1000;
+  });
   // In place, like the claims: a landmark still there keeps its marker (an open popup stays open, and updates).
-  const next = new Map(), counts = {};
+  // Only the ones in view are on the map (bcCullMarkers), like the claims and caves.
+  const next = new Map(), counts = {}, cull = [];
   lms.forEach(l => {
     const key = l.kind + '@' + l.x + ',' + l.z, ll = L.latLng(l.z, l.x), html = bcLmIconHtml(l);
     let e = bcLm.marks.get(key);
-    if (!e){ e = { m: L.marker(ll, { icon: bcLmIcon(html), title: l.kind === 'quarries' ? `Quarry · T${l.tier}–T${l.tier + 2} rocks` : l.name }).bindPopup(''), html, kind: l.kind }; bcLm.layers[l.kind].addLayer(e.m); }
-    else if (e.html !== html){ e.m.setIcon(bcLmIcon(html)); e.html = html; }
+    if (!e) e = { m: L.marker(ll, { icon: bcLmIcon(html, BC_LM[l.kind].small), title: l.kind === 'quarries' ? `Quarry · T${l.tier}–T${l.tier + 2} rocks` : l.name }).bindPopup(''), html, kind: l.kind };
+    else if (e.html !== html){ e.m.setIcon(bcLmIcon(html, BC_LM[l.kind].small)); e.html = html; }
     e.m.setPopupContent(bcLmPopup(l, ll));
     next.set(key, e); counts[l.kind] = (counts[l.kind] || 0) + 1;
+    cull.push({ m: e.m, ll, group: bcLm.layers[l.kind] });
   });
   bcLm.marks.forEach((e, k) => { if (!next.has(k)) bcLm.layers[e.kind].removeLayer(e.m); });
-  bcLm.marks = next; bcLm.counts = counts;
-  bcRefreshLayerControl();
+  bcLm.marks = next; bcLm.counts = counts; bcCullLm = cull;
+  bcRefreshLayerControl(); bcCullMarkers();
 }
-const bcLmIcon = html => L.divIcon({ className: 'bc-lm-ic', html, iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -14] });
+const bcLmIcon = (html, small) => { const s = small ? 20 : 28; return L.divIcon({ className: 'bc-lm-ic', html, iconSize: [s, s], iconAnchor: [s / 2, s / 2], popupAnchor: [0, -s / 2] }); };
 function bcLmIconHtml(l){
   const d = BC_LM[l.kind];
   const badge = l.kind === 'quarries' ? `T${l.tier}–${l.tier + 2}` : l.tier ? `T${l.tier}` : '';
-  const dim = l.state === 'withering' || l.state === 'depleted' || (l.rocks && !Object.keys(l.rocks).length);   // nothing to take right now
-  return `<div class="bc-lm${dim ? ' dim' : ''}" style="--c:${d.color}">${d.icon ? `<img src="${gameIconUrl(d.icon)}" alt="">` : `<i class="ti ${d.glyph}"></i>`}${badge ? `<b>${badge}</b>` : ''}</div>`;
+  const dim = ['withering', 'depleted', 'inactive', 'fruitless'].includes(l.state) || (l.rocks && !Object.keys(l.rocks).length);   // nothing to take right now
+  return `<div class="bc-lm${d.small ? ' sm' : ''}${dim ? ' dim' : ''}" style="--c:${d.color}">${d.icon ? `<img src="${gameIconUrl(d.icon)}" alt="">` : `<i class="ti ${d.glyph}"></i>`}${badge ? `<b>${badge}</b>` : ''}</div>`;
 }
 function bcLmPopup(l, ll){
   const ok = s => `<span style="color:var(--teal-light)">${s}</span>`, wait = s => `<span style="color:var(--amber-light)">${s}</span>`;
+  // "Sun 1:42 AM" — the popup is rewritten with the 15-minute lists, so it names the moment rather than counting down.
+  const at = l.until > Date.now() ? new Date(l.until).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
   let h = `<b>${escHtml(l.name)}</b>`;
   if (l.kind === 'quarries'){
     h += ` <span style="color:var(--text3)">T${l.tier}–T${l.tier + 2} rocks</span>`;
@@ -10831,7 +10883,10 @@ function bcLmPopup(l, ll){
     else if (l.state === 'citric') h += '<br>' + ok('Citric') + ': ready to gather, with citric berries';
     else if (l.state === 'bountiful') h += '<br>' + ok('Bountiful') + ': ready to gather';
   } else if (l.kind === 'hexite' && l.state){
-    h += '<br>' + (l.state === 'ready' ? ok('Ready to extract') : wait('Depleted'));
+    h += '<br>' + (l.state === 'ready' ? ok('Ready to extract') : l.state === 'energized' ? ok('Energized')
+       : l.state === 'inactive' ? wait('Inactive') + (at ? `: energizes ${escHtml(at)}` : '') : wait('Depleted'));
+  } else if (l.kind === 'makers' && l.state){
+    h += '<br>' + (l.state === 'fruit' ? ok('Bearing fruit') : wait('Fruitless') + (at ? `: bears again ${escHtml(at)}` : ''));
   }
   return h + `<br><span style="color:var(--text3)">${bcNE(ll)}</span>`;
 }
@@ -10846,9 +10901,9 @@ async function bcLmLoadRuins(){
     if (!pts){
       const got = await bcPrismFetchOnce(kinds.map(b => `SELECT * FROM claim_meta WHERE building_desc_id = ${b}`), 30000);
       pts = (got.claim_meta || []).map(c => [c.x, c.z, kinds.indexOf(String(c.building_desc_id))]);
-      if (!pts.length) throw new Error('no ruins');
-      safeSetItem(BC_RUINS_KEY, JSON.stringify({ at: Date.now(), p: pts }));
-    }
+      bcLm.ruinsAt = Date.now();   // answered: the layer list can say how many, even when that is none (the 1.0 world, so far)
+      if (pts.length) safeSetItem(BC_RUINS_KEY, JSON.stringify({ at: Date.now(), p: pts }));
+    } else bcLm.ruinsAt = Date.now();
     const layer = bcLm.layers.ancient;
     layer.clearLayers();
     bcCullRuins = pts.map(([x, z, k]) => {
@@ -11841,7 +11896,8 @@ const BC_RELAY_RETRY_MIN = 30000, BC_RELAY_RETRY_MAX = 5*60*1000;
 let bcRelaySubs = {};              // 'r<resourceId>' -> SubscriptionHandle
 let bcRelaySubRegion = null;       // region the current subs were built for ('' = all regions)
 let bcRelayRedrawT = null;
-const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-relay';
+// The module is the world: prism-release mirrors 1.0, prism-relay still mirrors Early Access (same tables, same rows).
+const BC_RELAY_URI = 'https://st.prism.brico.app', BC_RELAY_MODULE = 'prism-release';
 function bcRelayEnemyTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'enemy'); }
 function bcRelayResourceTypes(){ return Object.values(bcTrackedRes).filter(t => t.kind === 'resource'); }
 async function bcRelayLoadLib(){ if (!bcRelayLib) bcRelayLib = await import(`${API}/mapassets/prism-relay.js`); return bcRelayLib; }
@@ -12502,8 +12558,9 @@ function bcHerdApply(){
 }
 
 // ── growth_timers respawn overlay: depleted resource nodes + their live respawn countdown ──────────
-// growth_timers is sparse (~tens/region — in practice Depleted Hexite Deposits, which grow back over
-// 2–7 days), so each is a real Leaflet marker: the same tag as the herd timers, with the countdown ON the
+// growth_timers is sparse (a dozen rows world-wide in 1.0: Inactive Hexite Reservoirs, 23 hours from energizing,
+// and a Fruitless Maker's Tree; Early Access had Depleted Hexite Deposits growing back over 2–7 days), so each
+// is a real Leaflet marker: the same tag as the herd timers, with the countdown ON the
 // map. (They used to be bare teal rings whose name and time only showed in a tiny hover label, so they
 // read as unexplained dots.) Streamed from the prism relay connection; toggled from the Live-map panel.
 let bcGrowthOn = (() => { try { return localStorage.getItem('bc_growth_on') === '1'; } catch(e){ return false; } })();
@@ -12536,11 +12593,12 @@ function bcGrowthRebuild(){
 }
 // Countdown that stays short on a tag: "3d 4h", "5h 12m", "12:05".
 const bcLeftShort = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); if (s >= 86400) return Math.floor(s / 86400) + 'd ' + Math.floor(s % 86400 / 3600) + 'h'; if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm'; return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
-const bcGrowthIcon = name => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:#5eead4"><i class="ti ${/hexite/i.test(name) ? 'ti-hexagon' : 'ti-pick'}"></i><span></span></div>` });
+const bcGrowthIcon = name => L.divIcon({ className: 'bc-herd-ic', iconSize: [0, 0], html: `<div class="bc-herd" style="--c:#5eead4"><i class="ti ${/hexite/i.test(name) ? 'ti-hexagon' : /tree/i.test(name) ? 'ti-tree' : 'ti-pick'}"></i><span></span></div>` });
 function bcGrowthTipHtml(m, ms){
-  const grown = m.name.replace(/^Depleted\s+/i, ''), when = new Date(m.endMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-  const line = ms <= 0 ? 'Growing back now (on the game\'s next growth tick)'
-             : `${grown !== m.name ? 'Grows back into a ' + grown : 'Respawns'} in ${bcLeftShort(ms)} (${when})`;
+  // What it turns into is in the name: a Depleted X or a Fruitless X grows back into X, an Inactive reservoir energizes.
+  const grown = m.name.replace(/^(Depleted|Fruitless)\s+/i, ''), inactive = /^Inactive\s/i.test(m.name), when = new Date(m.endMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const line = ms <= 0 ? (inactive ? 'Energizing now (on the game\'s next growth tick)' : 'Growing back now (on the game\'s next growth tick)')
+             : `${inactive ? 'Energizes' : grown !== m.name ? 'Grows back into a ' + grown : 'Respawns'} in ${bcLeftShort(ms)} (${when})`;
   return `<b>${escHtml(m.name)}</b><div class="bc-herd-tip">${escHtml(line)}</div>`;
 }
 // The tag's text and state are compared against the DOM, not a cached copy: hiding the layer (leaving the
