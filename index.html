@@ -1393,7 +1393,7 @@ let toolInvOpen = false;       // whether the Tool crafting inventory selector i
 // this change and for bitjita-shaped containers that carry no entity id.
 function _invKeys(inv) {
   const owner = inv._ownerId || '';
-  const nameKey = owner + '||' + (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || '');
+  const nameKey = owner + '||' + (inv.inventoryName || inv.buildingName || '') + '|' + (inv.claimName || (inv._regional ? 'R' + inv.regionId : ''));   // Regional Banks: same name, no claim
   return inv.entityId ? [owner + '||#' + inv.entityId, nameKey] : [nameKey];
 }
 function _invNameKey(inv) { return _invKeys(inv)[0]; }   // what we SAVE: the id key when there is one
@@ -3515,7 +3515,7 @@ function toggleInvSection(key) {
 // Stable, id-safe key for one inventory location block (survives search-driven re-renders so its
 // collapsed state sticks even as the query changes which locations are shown).
 function _invLocId(secKey, loc) {
-  const raw = secKey + '' + (loc.name || '') + '' + (loc.claimName || '');
+  const raw = secKey + '' + (loc.name || '') + '' + (loc.claimName || '') + (loc.regional ? 'r' + loc.regionId : '');   // Regional Banks share a name and have no claim
   try { return btoa(unescape(encodeURIComponent(raw))).replace(/[+/=]/g, m => ({ '+': '-', '/': '_', '=': '' }[m])); }
   catch (e) { return secKey + (loc.name || ''); }
 }
@@ -3568,9 +3568,10 @@ function buildSlotsFor(data) {
       let locationType = 'personal';
       if (inv._claimStore) locationType = 'claim';   // a tracked claim's shared storage (claimInvData)
       else if (inv._isHousing) locationType = 'housing';
+      else if (inv._isBank) locationType = 'bank';   // flagged where it is read: a Regional Bank has no claim and no building to go by
       else if (inv._isDeployable) locationType = 'personal';   // carts/boats/caches travel with the player
-      else if (inv.claimName) locationType = n.includes('bank') ? 'bank' : 'storage';
-      allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, group:inv._group||null, meta });
+      else if (inv.claimName) locationType = /bank|stash/.test(n) ? 'bank' : 'storage';   // by name: "Settlement Stash" (the 1.0 Town Bank), or a nickname
+      allSlots.push({ itemId:s.itemId, itemType:s.itemType, quantity:s.quantity, inventoryName:invName, claimName:inv.claimName||null, regionId:inv.regionId||null, locationType, regional:!!inv._regional, group:inv._group||null, meta });
     });
   });
   return allSlots;
@@ -3667,6 +3668,13 @@ const TOOLBELT_HIDE = new Set(['cooking pot', 'mallet', 'hexite tuner']);
 // this many different items — about two rows. Searching one thing ("scrofa": 1–2 items, "fine log": 2) shows its
 // totals; a broad search ("log": 12–17 items, "fine": 30–70, one letter: hundreds) would only list everything twice.
 const INV_TOTALS_MAX = 10;
+// What a Regional Bank says under its name. A container in a settlement reads "R8 · Astra Nova"; a Regional Bank
+// belongs to the whole region, so it names that instead: "R8 · Ossura" ("Region 8" until the name is known).
+function invRegionLabel(rg){
+  if (rg == null || rg === '') return '';
+  const n = claimRegionName(rg);
+  return n === 'Region ' + rg ? n : `R${rg} · ${n}`;
+}
 function inventoryContentHtml(data, q, pfx) {
   const allSlots = buildSlotsFor(data).filter(s => !(/^tool ?belt$/i.test(s.inventoryName || '') && TOOLBELT_HIDE.has(((s.meta && s.meta.name) || '').toLowerCase())));
   q = (q||'').trim().toLowerCase();
@@ -3690,7 +3698,7 @@ function inventoryContentHtml(data, q, pfx) {
     const byItem = new Map();
     filtered.forEach(s => {
       const k = s.itemId + ':' + (s.itemType ?? 0), n = +s.quantity || 0;
-      const at = s.inventoryName + (s.claimName && s.locationType !== 'claim' ? ' · ' + s.claimName : '');
+      const at = s.inventoryName + (s.regional ? ' · ' + invRegionLabel(s.regionId) : s.claimName && s.locationType !== 'claim' ? ' · ' + s.claimName : '');
       let t = byItem.get(k);
       if (!t) byItem.set(k, t = { ...s, quantity: 0, at: new Map() });
       t.quantity += n; t.at.set(at, (t.at.get(at) || 0) + n);
@@ -3716,7 +3724,8 @@ function inventoryContentHtml(data, q, pfx) {
     return totals + `<div class="inv-items-grid">${filtered.slice().sort(invSort).map(s => { const name=itemLabel(s.meta,s.itemId,s.itemType); const rar=(s.meta?.rarityStr||'').toLowerCase(); return `<div class="inv-item-card" style="border-left:3px solid ${invTierCol(s.meta)}">${gameIconImg(s.meta?.iconAssetName,26)}<div class="inv-item-info"><div class="inv-item-name">${escHtml(name)}</div><div class="inv-item-tag">${escHtml(s.inventoryName)} · ${escHtml(s.meta?.tag||'')}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">${rar?`<span class="badge badge-${rar}">${cap(rar)}</span>`:''}<span class="inv-item-qty">${fmtNum(s.quantity)}</span></div></div>`; }).join('')}</div>` + hlog;
   }
   const byLocation = {};
-  filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:'') + (s.group?'|'+s.group:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, group:s.group, slots:[]}; byLocation[key].slots.push(s); });
+  // One block per container. A Regional Bank has no claim to tell it from the next region's, so its region is in the key.
+  filtered.forEach(s => { const key = s.inventoryName + (s.claimName?'|'+s.claimName:'') + (s.regional?'|r'+s.regionId:'') + (s.group?'|'+s.group:''); if (!byLocation[key]) byLocation[key] = {name:s.inventoryName, claimName:s.claimName, regionId:s.regionId, locationType:s.locationType, regional:s.regional, group:s.group, slots:[]}; byLocation[key].slots.push(s); });
   const personal = Object.values(byLocation).filter(l => l.locationType==='personal');
   const banks    = Object.values(byLocation).filter(l => l.locationType==='bank');
   const housing  = Object.values(byLocation).filter(l => l.locationType==='housing');
@@ -3728,7 +3737,7 @@ function inventoryContentHtml(data, q, pfx) {
     const collapsed = !!invSectionCollapsed[secKey];
     const sel = invSelectedChip[secKey] instanceof Set ? invSelectedChip[secKey] : new Set();
     const sorted = locs.slice().sort((a,b) => (a.name||'').localeCompare(b.name||''));   // alphabetical + stable order
-    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = (loc.claimName && loc.locationType!=='housing' && loc.locationType!=='claim') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocHidden[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
+    const chips = sorted.map(loc => { const lk = _invLocId(secKey, loc); const sub = loc.regional ? escHtml(invRegionLabel(loc.regionId)) : (loc.claimName && loc.locationType!=='housing' && loc.locationType!=='claim') ? `R${loc.regionId||'?'} · ${escHtml(loc.claimName)}` : ''; const active = q ? !invLocHidden[lk] : sel.has(lk); return `<div class="inv-loc-chip${active?' active':''}" id="inv-chip-${lk}" onclick="selectInvChip('${secKey}','${lk}')"><span class="inv-loc-chip-name">${escHtml(loc.name)}</span>${sub?`<span class="inv-loc-chip-sub">${sub}</span>`:''}</div>`; });
     // Searching expands every container with a hit; otherwise every chip the user has toggled open (any number).
     const expandedLocs = q ? sorted : sorted.filter(loc => sel.has(_invLocId(secKey, loc)));
     const multi = expandedLocs.length > 1;
@@ -3737,7 +3746,7 @@ function inventoryContentHtml(data, q, pfx) {
     // sit in. NORMAL browsing: no bar — the active chip already names the container; when several are
     // open at once a slim non-interactive caption keeps their grids apart.
     const locBlock = (loc) => {
-      const sub = (!loc.claimName || loc.locationType==='claim') ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
+      const sub = loc.regional ? invRegionLabel(loc.regionId) : (!loc.claimName || loc.locationType==='claim') ? '' : (loc.locationType==='housing' ? loc.claimName : `R${loc.regionId||'?'} · ${loc.claimName}`);
       const lk = _invLocId(secKey, loc);
       const mSlots = mergeInvSlots(loc.slots);   // one card per distinct item, quantities summed
       if (!q) return `<div class="inv-chip-content">${multi ? `<div class="inv-locb-cap">${escHtml(loc.name)}${sub?` <span class="inv-locb-sub">${escHtml(sub)}</span>`:''}</div>` : ''}${renderItemGrid(mSlots)}</div>`;
@@ -5262,7 +5271,8 @@ function liveWantedRefs(){
   liveRowsByRegion('deployable_state_v2', r => tracked.has(String(r.owner_id)))
     .forEach(x => { const id = String(x.row.entity_id); containers.add(id); regionHint[id] = x.region; });
   // bank buildings — the OWNER of a bank inventory row, owned by whoever runs the settlement
-  liveRows('inventory_state', r => tracked.has(String(r.player_owner_entity_id)) && !tracked.has(String(r.owner_entity_id)))
+  // (a Regional Bank row has no building: owner 0)
+  liveRows('inventory_state', r => tracked.has(String(r.player_owner_entity_id)) && !tracked.has(String(r.owner_entity_id)) && String(r.owner_entity_id) !== '0')
     .forEach(r => buildings.add(String(r.owner_entity_id)));
   // craft stations, so the Crafts tab resolves its place names from the cache too
   ['progressive_action_state','passive_craft_state'].forEach(t =>
@@ -8059,9 +8069,14 @@ async function fetchPlayerInvRelay(id){
       const items = livePocketItems(r); if (!items.length) return;
       inventories.push(mk(r.entity_id, PERSONAL[r.inventory_index] || 'Storage', null, items, { _isDeployable: true }));
     });
-  // banks — the row's owner is the bank BUILDING. Its name and claim come from the cache (the building,
-  // nickname and claim rows are all part of the held subscription), so there's nothing to fetch.
-  const bankRows = liveRows('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
+  // banks — every row some building keeps FOR this player (player_owner = the player). Two kinds since 1.0, and the
+  // server makes such rows for nothing else (inventory_create_personal.rs):
+  //   · Settlement Stash, the old Town Bank: the row's owner is the stash BUILDING in a settlement. Its name and
+  //     claim come from the cache (the building, nickname and claim rows are all part of the held subscription).
+  //   · Regional Bank: the row has NO owner (owner_entity_id 0, InventoryState::is_regional_bank). One per player
+  //     per region, opened from any Regional Bank building there — so it is named by the region, and the region is
+  //     the mirror that holds the row.
+  const bankRows = liveRowsByRegion('inventory_state', r => String(r.player_owner_entity_id) === id && String(r.owner_entity_id) !== id);
   // house chests + the house's entrance (for its display name)
   const housing = liveRows('player_housing_state', r => String(r.entity_id) === id)[0];
   // Everything inside the house's dimension(s) — player_housing_state.network_entity_id →
@@ -8075,16 +8090,21 @@ async function fetchPlayerInvRelay(id){
   if (inHouse) liveRows('building_state', r => inHouse.has(String(r.entity_id))).forEach(r => houseB.set(String(r.entity_id), r));
   syncRelayPlaces();   // fold the cache's building/nickname/claim rows into the persisted name maps
   const bankInvs = [];
-  bankRows.forEach(r => {
+  bankRows.forEach(({ row: r, region }) => {
     const items = livePocketItems(r); if (!items.length) return;
+    if (String(r.owner_entity_id) === '0'){
+      bankInvs.push({ ...mk(r.entity_id, 'Regional Bank', null, items, { _isBank: true, _regional: true }), regionId: region });
+      return;
+    }
     const b = relayBuildingInfo[String(r.owner_entity_id)] || {};
-    // Name it after the actual building ("Town Bank", or your nickname) the way the old HTTP route did —
-    // buildSlotsFor still classifies it as a bank by matching /bank/i case-insensitively on the name.
-    bankInvs.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Bank',
-      (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, {}));
+    // Named after the actual building ("Settlement Stash", or your nickname). _isBank files it under Banks whatever
+    // it is called — matching the word "bank" in the name is what sent the renamed stashes to Storage.
+    bankInvs.push(mk(r.entity_id, b.nickname || defs.buildings[b.descId] || 'Settlement Stash',
+      (b.claimId && b.claimId !== '0' && relayClaimNames[b.claimId]) || null, items, { _isBank: true }));
   });
-  // sort by settlement first — banks read as a list of towns
-  bankInvs.sort((a, b) => (a.claimName || '').localeCompare(b.claimName || '') || byName(a, b));
+  // Regional Banks first, by region; then the stashes by settlement — they read as a list of towns
+  bankInvs.sort((a, b) => (!!b._regional - !!a._regional) || (a._regional ? a.regionId - b.regionId : 0)
+    || (a.claimName || '').localeCompare(b.claimName || '') || byName(a, b));
   bankInvs.forEach(i => inventories.push(i));
   // house — named like the HTTP route did: "<player>'s House (<residence type>)". Tracked players carry
   // `username` (see playerName) — this read `.name`, which no player has, so every house said "Housing (…)".
@@ -8147,6 +8167,16 @@ async function fetchPlayerInvBitjita(id) {
     apiFetch(`/api/players/${id}/inventories`),
     apiFetch(`/api/players/${id}/housing`).catch(() => [])
   ]);
+  // Banks, flagged the way fetchPlayerInvRelay flags them. bitjita hands a Regional Bank over raw: a row with no
+  // owner, no name and no claim (ownerEntityId "0", playerOwnerEntityId = the player) — it is named here. A
+  // Settlement Stash is a BUILDING's row kept for the player; a vehicle also names the player, but it has no
+  // building and is its own owner.
+  (d.inventories || []).forEach(inv => {
+    const owner = String(inv.ownerEntityId ?? ''), keeper = String(inv.playerOwnerEntityId || '0');
+    if (keeper === '0') return;
+    if (owner === '0'){ inv.inventoryName = 'Regional Bank'; inv._isBank = inv._regional = true; }
+    else if (inv.buildingName && owner !== String(inv.entityId)) inv._isBank = true;
+  });
   const houses = Array.isArray(housingList) ? housingList.filter(h => !h.isEmpty) : [];
   const houseDetails = await Promise.all(houses.map(h => apiFetch(`/api/players/${id}/housing/${h.buildingEntityId}`).catch(() => null)));
   const housingInvs = [];
@@ -13372,10 +13402,11 @@ function renderTrackedInvChips(trackedSet, toggleFn) {
   (invData.inventories || []).forEach((inv, idx) => {
     const oid = inv._ownerId || '?';
     if (!groups[oid]) groups[oid] = { personal: [], house: [], bank: [] };
-    const c = inv._isHousing ? 'house' : (inv.claimName ? 'bank' : 'personal');
+    const c = inv._isHousing ? 'house' : ((inv._isBank || inv.claimName) ? 'bank' : 'personal');
     const on = trackedSet.has(idx);
     const rawName = inv.inventoryName || inv.buildingName || 'Unknown';
-    const claim = (!inv._isHousing && inv.claimName) ? `<span class="inv-loc-claim">${escHtml(inv.claimName)}</span>` : '';
+    const place = inv._isHousing ? '' : (inv._regional ? invRegionLabel(inv.regionId) : inv.claimName);   // a Regional Bank has a region where a stash has a town
+    const claim = place ? `<span class="inv-loc-claim">${escHtml(place)}</span>` : '';
     groups[oid][c].push({ name: rawName.toLowerCase(), html: `<span class="planner-inv-loc${on ? ' active' : ''}" onclick="${toggleFn}(${idx})"><i class="ti ti-${on ? 'checkbox' : 'square'}" style="font-size:13px"></i> ${escHtml(rawName)}${claim}</span>` });
   });
   const cat = (title, icon, arr) => !arr.length ? '' : `<div style="margin-bottom:.3rem"><div class="planner-inv-cat-hdr"><i class="ti ${icon}"></i>${title}</div><div class="planner-inv-chips">${arr.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(x=>x.html).join('')}</div></div>`;
@@ -13384,7 +13415,7 @@ function renderTrackedInvChips(trackedSet, toggleFn) {
     if (!g) return '';
     return `<div style="margin-bottom:.55rem">
       <div style="font-size:12px;font-weight:600;color:var(--teal-light);margin-bottom:.25rem"><i class="ti ti-user" style="font-size:12px"></i> ${escHtml(playerName(p))}</div>
-      ${cat('Personal','ti-user',g.personal)}${cat('House','ti-home',g.house)}${cat('Town Banks','ti-building-bank',g.bank)}
+      ${cat('Personal','ti-user',g.personal)}${cat('House','ti-home',g.house)}${cat('Banks','ti-building-bank',g.bank)}
     </div>`;
   }).join('');
   return out || '<div style="font-size:12px;color:var(--text3)">No inventory locations found</div>';
@@ -14942,7 +14973,7 @@ function gcToggleAlloc(){ gcState.allocCollapsed = !gcState.allocCollapsed; gcSa
 let gcContainerFilter = '';        // filter text for the container picker
 let gcCatCollapsed = {};           // category -> collapsed (transient; the filter always expands)
 let gcCfindDocBound = false;
-const GC_CAT_META = { personal:{label:'Personal',icon:'ti-user'}, housing:{label:'Housing',icon:'ti-home'}, bank:{label:'Town Banks',icon:'ti-building-bank'}, claim:{label:'Claim Storage',icon:'ti-box'} };
+const GC_CAT_META = { personal:{label:'Personal',icon:'ti-user'}, housing:{label:'Housing',icon:'ti-home'}, bank:{label:'Banks',icon:'ti-building-bank'}, claim:{label:'Claim Storage',icon:'ti-box'} };
 const GC_CAT_ORDER = ['personal','housing','bank','claim'];
 
 // Live player-name dropdown — the same search box as the sidebar's and the topbar lookup's.
@@ -14958,8 +14989,10 @@ function gcPickPlayer(id){ const p = gcNameSearch.shown.get(String(id)); gcHideP
 //   2. /storage-logs         — anything else they've used (other people's storage, unclaimed buildings)
 //   3. /claim/<id>/inventory — every shared container in each claim they've used
 // Only storage BUILDINGS are listed. Personal inventory, toolbelt, wallet, cache, wagons, deployables
-// and Town Banks are deliberately absent: the game logs no transfers for them (verified — every one of
-// those entity ids returns an empty /storage-logs), so they could never be tallied. gcCfindNote() says so.
+// and banks (Settlement Stash, Regional Bank — the old Town Banks) are deliberately absent: the game logs no
+// transfers for them (verified — every one of those entity ids returns an empty /storage-logs; the server only
+// logs building inventories with no player owner, action_log_state.rs), so they could never be tallied.
+// gcCfindNote() says so.
 const GC_MAX_CLAIM_FETCH = 6;   // a claim inventory is ~90KB; players realistically use 1–2
 let gcClaimsSkipped = 0;
 async function gcFindContainers(playerId, playerName){
@@ -14981,7 +15014,7 @@ async function gcFindContainers(playerId, playerName){
       const b = l.building||{}; if (!b.entity_id) return;
       if (l.claim_entity_id && l.claim_entity_id !== '0' && l.claim_name) claimNames[l.claim_entity_id] = l.claim_name;
       put(b.entity_id, { ...label(b), region:l.region, claim:l.claim_name||'',
-                         cat: /bank/i.test(b.name||'') ? 'bank' : (l.claim_name ? 'claim' : 'personal') });
+                         cat: /bank|settlement stash/i.test(b.name||'') ? 'bank' : (l.claim_name ? 'claim' : 'personal') });
     });
     const cids = Object.keys(claimNames);
     gcClaimsSkipped = Math.max(0, cids.length - GC_MAX_CLAIM_FETCH);
@@ -14990,7 +15023,7 @@ async function gcFindContainers(playerId, playerName){
     claims.forEach(cj => { if (!cj) return; const cl = cj.claim||{};
       (cj.dimensions||[]).forEach(d => (d.buildings||[]).forEach(b =>
         put(b.entity_id, { ...label(b), region:cl.region, claim:cl.name||'',
-                           cat: /bank/i.test(b.name||'') ? 'bank' : 'claim' })));
+                           cat: /bank|settlement stash/i.test(b.name||'') ? 'bank' : 'claim' })));
     });
     gcFoundContainers = Object.values(seen).sort((a,b) => (a.name||'').localeCompare(b.name||''));
     gcContainerFilter = '';
@@ -15010,7 +15043,7 @@ function gcCfindBoxHtml(){
 // the list that would always tally zero.
 function gcCfindNote(){
   const skipped = gcClaimsSkipped ? ` Only the first ${GC_MAX_CLAIM_FETCH} claims were loaded (${gcClaimsSkipped} more skipped) — search from a player in the missing claim to reach it.` : '';
-  return `Storage buildings only. Personal inventory, toolbelt, cache, wagons and Town Banks can't be counted — the game records no deposit history for them.${skipped}`;
+  return `Storage buildings only. Personal inventory, toolbelt, cache, wagons, Settlement Stashes and Regional Banks can't be counted — the game records no deposit history for them.${skipped}`;
 }
 function gcCfindListHtml(){
   const q = gcContainerFilter;
