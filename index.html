@@ -110,6 +110,8 @@ main.planner-mode{max-width:none;padding:1rem}
 .stat{background:var(--bg3);border-radius:6px;padding:.75rem 1rem}
 .stat-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
 .stat-val{font-size:20px;font-weight:600;color:var(--text)}
+.stat-rank{font-size:12px;font-weight:500;color:var(--text3);margin-left:.45rem;cursor:help}
+.stat-rank:empty{display:none}
 .badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500}
 .badge-tier{background:var(--bg4);color:var(--text2)}
 .badge-sell{background:var(--red-dim);color:#f09595}
@@ -3308,6 +3310,55 @@ function skillToolHtml(entityId, skillName){
 function patchSkillTools(entityId){
   document.querySelectorAll('.skill-tool[data-entity="' + entityId + '"]').forEach(el => { el.innerHTML = skillToolHtml(entityId, el.dataset.skillname); });
 }
+// ── Rank beside Total levels / Total XP ──
+// bitjita's skill leaderboard sorts by totalLevel and by totalXP, and its name search keeps every row's rank in the
+// whole board — so one ~1 KB call per total answers "where does this player stand". There is no lookup by id: `search`
+// is a name substring (ILIKE) and a page is 100 rows whatever pageSize asks for, so a short name ("Vel" matched 23
+// players on 2026-11-16) is found by walking its matches, best rank first, a few pages at most — the row is picked by
+// entityId, which also keeps a same-named character from another world out. bitjita's totalLevel leaves out skills
+// with no XP where the tile counts each as level 1, so its own figure rides along for the tooltip. Kept 2 minutes per
+// player: every silent re-render of the section, and every live XP tick, comes through ensureTotalRanks.
+const TOTAL_RANK_TTL = 120000, TOTAL_RANK_RETRY = 20000, TOTAL_RANK_PAGES = 5;
+const totalRankCache = {};   // entityId -> { ts, pending, name, ranks: { total, xp } } — each { rank, of, val } or null (not on the board)
+async function fetchTotalRank(id, name, sortBy){
+  for (let page = 1; page <= TOTAL_RANK_PAGES; page++){
+    const d = await apiFetch('/api/leaderboard/skills?sortBy=' + sortBy + '&search=' + encodeURIComponent(name) + '&page=' + page, 15000);
+    const hit = (d.players || []).find(r => String(r.entityId) === id);
+    if (hit) return { rank: +hit.rank, of: +d.count || 0, val: +hit[sortBy] };
+    if (!(d.pagination && d.pagination.hasNext)) break;
+  }
+  return null;
+}
+function ensureTotalRanks(id, name){
+  id = String(id);
+  const c = totalRankCache[id] || (totalRankCache[id] = { ts: 0, ranks: {} });
+  if (name) c.name = name;
+  if (!c.name || c.pending || Date.now() - c.ts < TOTAL_RANK_TTL) return;
+  if (bitjitaWorld === false && isPlayerTracked(id)) return;   // bitjita on another world: this character isn't on its board
+  c.pending = true;
+  Promise.all(['totalLevel', 'totalXP'].map(s => fetchTotalRank(id, c.name, s).catch(() => undefined))).then(([lv, xp]) => {
+    // A call that failed (undefined) keeps the rank already showing and asks again soon; "not on the board" (null) clears it.
+    const failed = lv === undefined || xp === undefined;
+    c.ranks = { total: lv === undefined ? c.ranks.total : lv, xp: xp === undefined ? c.ranks.xp : xp };
+    c.ts = failed ? Date.now() - TOTAL_RANK_TTL + TOTAL_RANK_RETRY : Date.now();
+    c.pending = false;
+    patchTotalRanks(id);
+  });
+}
+function totalRankHtml(id, key){   // key: 'total' (levels) | 'xp'
+  const r = ((totalRankCache[String(id)] || {}).ranks || {})[key];
+  let tip = '';
+  if (r){
+    tip = 'Rank ' + fmtCount(r.rank) + (r.of ? ' of ' + fmtCount(r.of) + ' players' : '') + ' by total ' + (key === 'xp' ? 'XP' : 'level') + ' on bitjita’s leaderboard';
+    const sk = key === 'total' && isFinite(r.val) ? ((skillsByPlayer[String(id)] || {}).skills || []) : [];
+    if (sk.length && r.val !== skillStats(sk).total) tip += ' — bitjita counts ' + fmtCount(r.val) + ' levels' + (sk.some(s => !s.xp) ? ' (it leaves out skills with no XP)' : '');
+  }
+  return '<span class="stat-rank" data-rank="' + key + '"' + (tip ? ' title="' + escHtml(tip) + '"' : '') + '>' + (r ? '#' + r.rank : '') + '</span>';
+}
+function patchTotalRanks(id){
+  const body = skillCardsHost(id); if (!body) return;
+  ['total', 'xp'].forEach(k => { const el = body.querySelector('.stat-rank[data-rank="' + k + '"]'); if (el) el.outerHTML = totalRankHtml(id, k); });
+}
 // The three numbers above the skill cards — shared by the full render and the live patch so they always agree.
 function skillStats(skills){
   return { max: skills.reduce((m,sk)=>Math.max(m,sk.level),0), total: skills.reduce((s,sk)=>s+sk.level,0), xp: skills.reduce((s,sk)=>s+sk.xp,0) };
@@ -3329,6 +3380,9 @@ function skillsSectionHtml(pData, rankData, entityId) {
     // Live-track XP + cache for the calculator panel to read.
     updateSkillSession(entityId, skills);
     skillsByPlayer[entityId] = { skills, rankings };
+    // Ranks for the two totals: whatever is cached paints with the tiles below, a fresh answer patches in place.
+    const who = trackedPlayers.find(p => String(p.entityId) === entityId) || (lookupState.id === entityId ? lookupState.info : null) || {};
+    ensureTotalRanks(entityId, player.username || who.username || who.userName || '');
 
     const professions = skills.filter(s => s.category === 'Profession');
     const adventure = skills.filter(s => s.category === 'Adventure');
@@ -3362,8 +3416,8 @@ function skillsSectionHtml(pData, rankData, entityId) {
     return `
       <div class="stat-row">
         <div class="stat"><div class="stat-label">Highest level</div><div class="stat-val" data-stat="max">${st.max}</div></div>
-        <div class="stat"><div class="stat-label">Total levels</div><div class="stat-val" data-stat="total">${st.total}</div></div>
-        <div class="stat"><div class="stat-label">Total XP</div><div class="stat-val" data-stat="xp">${fmtNum(st.xp)}</div></div>
+        <div class="stat"><div class="stat-label">Total levels</div><div class="stat-val"><span data-stat="total">${st.total}</span>${totalRankHtml(entityId, 'total')}</div></div>
+        <div class="stat"><div class="stat-label">Total XP</div><div class="stat-val"><span data-stat="xp">${fmtNum(st.xp)}</span>${totalRankHtml(entityId, 'xp')}</div></div>
       </div>
       ${professions.length?`<div class="category-label"><i class="ti ti-hammer"></i> Professions</div><div class="skills-grid">${renderSkillCards(professions)}</div>`:''}
       ${adventure.length?`<div class="category-label"><i class="ti ti-sword"></i> Skills</div><div class="skills-grid">${renderSkillCards(adventure)}</div>`:''}
@@ -14800,8 +14854,9 @@ function updateSkillCardLive(id, sk){
 function updateSkillStatsLive(id){
   const body = skillCardsHost(id), store = skillsByPlayer[id]; if (!body || !store || !store.skills) return;
   const st = skillStats(store.skills);
-  const set = (k, v) => { const el = body.querySelector(`.stat-val[data-stat="${k}"]`); if (el) el.textContent = v; };
+  const set = (k, v) => { const el = body.querySelector(`[data-stat="${k}"]`); if (el) el.textContent = v; };
   set('max', st.max); set('total', st.total); set('xp', fmtNum(st.xp));
+  ensureTotalRanks(id);   // XP is moving, so the two rank tags are too — no-op inside their 2 minutes
 }
 // Live-refresh the open calculator panel (level, into-level, measured XP/hr, session XP, XP needed, ETA).
 // Skip if the user is editing an input in it, so a live tick can't wipe a half-typed target / manual rate —
