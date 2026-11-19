@@ -323,6 +323,8 @@ body.bc-resizing-both{cursor:nwse-resize;user-select:none}
 .al-pchip{display:inline-flex;align-items:center;gap:.35rem;font-size:12px;padding:4px 9px;border-radius:8px;background:var(--bg4);border:1px solid var(--border2);color:var(--text2);cursor:pointer;white-space:nowrap}
 .al-pchip.on{background:rgba(29,158,117,.14);border-color:var(--teal);color:var(--teal-light)}
 .al-pchip input{cursor:pointer;accent-color:var(--teal)}
+.al-say-off{opacity:.45;cursor:default}
+.al-say-off input{cursor:default}
 .al-vol input[type=range]{width:140px;accent-color:var(--teal)}
 .al-note{font-size:12px;color:var(--text3);line-height:1.5;display:flex;align-items:flex-start;gap:.4rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.6rem .75rem;margin-bottom:.9rem}
 .al-note i{margin-top:1px}
@@ -14201,18 +14203,21 @@ const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
   tts: { on:false, voice:'', rate:0.95 },   // spoken alerts (Web Speech); independent of the sound master
   players: {},                              // entityId -> per-player on/off + threshold overrides (see palOn)
+  // speak: whether this alert is read aloud while spoken alerts (tts.on) are on. All true by default, so
+  // turning the voice on still speaks everything, as it did before each alert had its own switch.
   types: {
-    buffLost:  { on:false, sound:'chime', scope:'food' },   // scope: 'food' | 'any'
-    stamina:   { on:false, sound:'coin', dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
-    craftDone: { on:false, sound:'ding', muteSecs:60 },     // muteSecs: after a craft-done ping, stay quiet this long (de-dupes a wave)
-    idle:      { on:false, sound:'alarm', seconds:60 },
+    buffLost:  { on:false, sound:'chime', speak:true, scope:'food' },   // scope: 'food' | 'any'
+    stamina:   { on:false, sound:'coin', speak:true, dropPct:0 },       // dropPct: only alert on refill if stamina first fell below this % of max (0 = any dip)
+    craftDone: { on:false, sound:'ding', speak:true, muteSecs:60 },     // muteSecs: after a craft-done ping, stay quiet this long (de-dupes a wave)
+    idle:      { on:false, sound:'alarm', speak:true, seconds:60 },
   }
 };
+// sample: the line the row's Test button reads out (n = a tracked player's name)
 const ALERT_META = {
-  buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff' },
-  stamina:   { label:'Max stamina',          icon:'ti-bolt',      desc:'A player’s stamina refills to full' },
-  craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes' },
-  idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving' },
+  buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff',                sample: n => `${n} lost Food Buffs` },
+  stamina:   { label:'Max stamina',          icon:'ti-bolt',      desc:'A player’s stamina refills to full',           sample: n => `${n} — stamina full` },
+  craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes',                     sample: n => `${n} — passive craft finished` },
+  idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving', sample: n => `${n} has been idle for 60s` },
 };
 let alertSettings = null;
 function loadAlerts(){
@@ -14229,9 +14234,35 @@ function saveAlerts(){ try { safeSetItem('bc_alerts', JSON.stringify(alertSettin
 
 // ── Sound engine (WebAudio; no audio files needed) ──
 let _actx = null;
-function actx(){ try { _actx = _actx || new (window.AudioContext||window.webkitAudioContext)(); if (_actx.state === 'suspended') _actx.resume(); } catch(e){} return _actx; }
+function actx(){ try { _actx = _actx || new (window.AudioContext||window.webkitAudioContext)(); } catch(e){} return _actx; }
+// Resolves true once the context is really producing sound. A browser holds a page's audio until the page
+// has been clicked or typed in, and until then the context sits `suspended` with its clock STOPPED.
+// Nothing may be scheduled against that stopped clock: every ping fired during the wait is set for the same
+// instant, and they all go off together, in phase, when the page is first clicked. Best explanation for
+// the "first ping is super loud" report (2026-11-18): the pile-up is measured — 4 dings set for one instant
+// = 4x one ding, past full scale — but the hold itself was never caught on the user's own browser.
+function audioReady(c){
+  if (c.state === 'running') return Promise.resolve(true);
+  return new Promise(res => {
+    let over = false; const fin = () => { if (!over){ over = true; res(c.state === 'running'); } };
+    try { c.resume().then(fin, fin); } catch(e){ fin(); }
+    setTimeout(fin, 1200);   // held: resume() neither resolves nor rejects until the page is clicked
+  });
+}
+// A held page drops its pings (above), so say why it is silent. Stays up until the click that lifts the hold.
+let _audioHeldToast = null;
+function audioHeldNotice(){
+  if (_audioHeldToast) return;
+  _audioHeldToast = alertToast('Your browser is holding this page’s sound until you click anywhere on it', 'ti-volume-off', true);
+  const clear = () => {
+    ['pointerdown','keydown'].forEach(ev => document.removeEventListener(ev, clear, true));
+    if (_audioHeldToast){ _audioHeldToast.remove(); _audioHeldToast = null; }
+  };
+  ['pointerdown','keydown'].forEach(ev => document.addEventListener(ev, clear, true));
+}
 // One soft note. Exponential attack/decay (no hard edges = no click) into a shared destination node,
 // so the volume + low-pass live on the master and every sound is scaled/softened uniformly.
+let _noteLog = null;   // while a sound is being laid out: each of its oscillators and when it ends
 function _note(c, dest, t0, freq, dur, gain, type, freqEnd){
   const o = c.createOscillator(), g = c.createGain();
   o.type = type || 'sine';
@@ -14242,6 +14273,7 @@ function _note(c, dest, t0, freq, dur, gain, type, freqEnd){
   g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);  // smooth decay
   o.connect(g); g.connect(dest);
   o.start(t0); o.stop(t0 + dur + 0.05);
+  if (_noteLog) _noteLog.push({ o, end: t0 + dur + 0.05 });
 }
 // Gentle palette: sines/triangles only, normalised to a similar loudness. Each = (ctx, destNode, startTime).
 const ALERT_SOUNDS = {
@@ -14259,17 +14291,43 @@ const ALERT_SOUNDS = {
   coin:    (c,d,t)=>{ _note(c,d,t,988,0.10,0.27,'sine'); _note(c,d,t+0.09,1319,0.24,0.27,'sine'); },
 };
 const ALERT_SOUND_NAMES = Object.keys(ALERT_SOUNDS);
-function playAlertSound(name, volOverride){
-  loadAlerts();
-  const c = actx(); if (!c) return;
-  const v = Math.max(0, Math.min(1, volOverride != null ? volOverride : alertSettings.volume));
-  if (v <= 0) return;
-  // Master chain: volume gain → gentle low-pass (tames harshness) → speakers. Volume applied once here.
-  const master = c.createGain(); master.gain.value = v;
-  const shaper = c.createWaveShaper(); shaper.curve = _scCurve();  // soft-clip: evens loudness across sounds w/ different note counts
+// One output chain per context, shared by every sound:
+//   notes → soft-clip → gentle low-pass → ceiling → volume → speakers
+// The soft-clip evens loudness across sounds with different note counts; the low-pass tames harshness.
+// The ceiling is the backstop for sounds piling up. They are played one at a time (alert audio queue below),
+// but if several ever are summed in here, they come out at 0.75 × the volume slider and no higher — one ping
+// alone peaks at 0.40–0.72 × the slider (measured, all 12 sounds), so a single ping never touches it. It has
+// to come after the low-pass: filtering a clipped wave overshoots, 8 dings came out 13% over without it.
+// It used to be a new chain per sound, volume first, straight into the speakers, so overlapping sounds
+// simply added up with nothing to stop them: 4 dings = 4x one ding.
+let _abus = null;
+function alertBus(c){
+  if (_abus && _abus.c === c) return _abus;
+  const inp = c.createGain(), vol = c.createGain();
+  const shaper = c.createWaveShaper(); shaper.curve = _scCurve();
   const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5200; lp.Q.value = 0.5;
-  master.connect(shaper); shaper.connect(lp); lp.connect(c.destination);
-  (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, master, c.currentTime + 0.03);
+  // straight line from -0.75 to 0.75, flat beyond (9 points, evenly spaced over the -1..1 input range)
+  const cap = c.createWaveShaper(); cap.curve = new Float32Array([-.75, -.75, -.5, -.25, 0, .25, .5, .75, .75]);
+  inp.connect(shaper); shaper.connect(lp); lp.connect(cap); cap.connect(vol); vol.connect(c.destination);
+  return (_abus = { c, inp, vol });
+}
+// Plays one sound; onEnd fires when it has finished ringing — or at once if it can't play. Called by the
+// alert audio queue only: anything that wants a sound goes through queueAlertAudio, so two never overlap.
+function playAlertSound(name, volOverride, onEnd){
+  loadAlerts();
+  const end = () => { const f = onEnd; onEnd = null; if (f) f(); };
+  const c = actx(); if (!c) return end();
+  const v = Math.max(0, Math.min(1, volOverride != null ? volOverride : alertSettings.volume));
+  if (v <= 0) return end();
+  audioReady(c).then(ok => {
+    if (!ok){ if (c.state === 'suspended') audioHeldNotice(); return end(); }   // held by the browser: play nothing rather than park it on a stopped clock
+    const bus = alertBus(c);
+    bus.vol.gain.value = v;
+    const log = _noteLog = [];
+    try { (ALERT_SOUNDS[name] || ALERT_SOUNDS.chime)(c, bus.inp, c.currentTime + 0.03); } finally { _noteLog = null; }
+    const last = log.reduce((a, b) => (!a || b.end > a.end) ? b : a, null);
+    if (last) last.o.onended = end; else end();
+  });
 }
 let _scCurveCache = null;
 function _scCurve(){
@@ -14280,7 +14338,7 @@ function _scCurve(){
 }
 
 // ── Toast ──
-function alertToast(msg, icon){
+function alertToast(msg, icon, sticky){   // sticky: stays until whoever raised it removes the returned element
   let host = document.getElementById('alert-toasts');
   if (!host){ host = document.createElement('div'); host.id = 'alert-toasts'; document.body.appendChild(host); }
   const el = document.createElement('div');
@@ -14288,7 +14346,8 @@ function alertToast(msg, icon){
   el.innerHTML = `<i class="ti ${icon||'ti-bell'}"></i><span>${escHtml(msg)}</span>`;
   host.appendChild(el);
   requestAnimationFrame(()=>el.classList.add('show'));
-  setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(), 300); }, 5000);
+  if (!sticky) setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(), 300); }, 5000);
+  return el;
 }
 // ── Voice alerts (Web Speech API — built in, no dependency) ──
 // Independent of the sound master: sound plays if master is on, voice speaks if tts.on — either or both.
@@ -14305,18 +14364,87 @@ function ttsPickVoice(){
   const want = alertSettings.tts && alertSettings.tts.voice;
   return voices.find(v => v.voiceURI === want) || voices[0];
 }
-function speakAlert(msg){
+// Speaks one line; onEnd fires when it has been said — or at once if it can't be. Like playAlertSound,
+// called by the alert audio queue only.
+let _ttsU = null;   // the line being spoken, held here: Chrome can garbage-collect an utterance mid-speech, and then its end event never fires
+function speakAlert(msg, onEnd){
+  const end = () => { const f = onEnd; onEnd = null; if (f) f(); };
   try {
-    if (!('speechSynthesis' in window) || !msg) return;
+    if (!('speechSynthesis' in window) || !msg) return end();
     const t = alertSettings.tts || {};
     const u = new SpeechSynthesisUtterance(String(msg).replace(/[—·]/g, ', ')); // soften separators for speech
     const v = ttsPickVoice(); if (v) u.voice = v;
     u.rate = t.rate || 0.95;   // slightly slow = calmer
     u.pitch = 1;               // natural pitch (keeps it from getting shrill/harsh)
     u.volume = Math.max(0, Math.min(1, alertSettings.volume != null ? alertSettings.volume : 0.6)); // share the alert volume slider
-    speechSynthesis.cancel();  // don't let a burst of alerts queue up
+    u.onend = u.onerror = end;
+    _ttsU = u;
+    // This used to cancel() before every line so a burst couldn't pile up — which cut each alert off
+    // mid-word as the next arrived. The queue hands lines over one at a time now, so nothing of ours is
+    // still talking here; if the engine says otherwise it is stuck on an earlier line, and this frees it.
+    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
     speechSynthesis.speak(u);
-  } catch(e){}
+  } catch(e){ end(); }
+}
+// Is this alert read aloud? The voice switch is the master; each alert then has its own (types[k].speak).
+function alertSpeaks(typeKey){
+  const t = alertSettings.types[typeKey];
+  return !!(alertSettings.tts && alertSettings.tts.on && t && t.speak !== false);
+}
+
+// ── Alert audio queue: one thing at a time ──
+// Every ping and every spoken line goes through here, and the next starts only when the last has finished:
+// an alert's ping, then its spoken line, then the next alert. Before this each alert played the instant it
+// fired, so alerts landing together rang on top of each other (levels add — see audioReady), a spoken line
+// was cut off by the next one, and the ping played over the voice.
+// Alerts landing together is the normal case here, not a rare one: one poll walks every tracked player, and
+// Chrome holds a background tab's timers and releases them in one go (once a minute after 5 minutes
+// hidden, by its documented throttling), so three characters' crafts finishing "at the same time" is routine.
+// Each step hands over on its own end event — an oscillator's `ended`, the speech engine's `end` — because
+// those are not timers, and that throttling only holds timers back. The timer below is only the fallback
+// for an end event that never comes.
+const ALERT_AUDIO_STALE_MS = 20000;   // waited this long for its turn → old news; skip its audio (the toast and the bell still have it)
+const ALERT_AUDIO_MAX = 8;            // waiting alerts kept; past this the oldest go
+const ALERT_AUDIO_SAME_MS = 1500;     // the same ping again this soon after itself adds nothing
+let _aq = [], _aqCur = null, _aqGen = 0, _aqTimer = null, _aqPrev = { sound:'', at:0 };
+// sound: a name from ALERT_SOUNDS, or '' for none. say: the line to speak, or '' for none.
+// preview: asked for from the settings (Test, picking a sound or a voice) — wanted now, and always played.
+function queueAlertAudio(sound, say, preview){
+  if (!sound && !say) return;
+  if (preview) _aqFlush();
+  // a ping with nothing to say, while that same ping is already ringing or waiting: the one covers both
+  else if (!say && ((_aqCur && _aqCur.sound === sound) || _aq.some(q => q.sound === sound))) return;
+  _aq.push({ sound: sound || '', say: say || '', preview: !!preview, ts: Date.now() });
+  while (_aq.length > ALERT_AUDIO_MAX) _aq.shift();
+  if (!_aqCur || Date.now() > _aqCur.until) _aqNext();   // idle — or the current step's end event is overdue
+}
+function _aqNext(){
+  clearTimeout(_aqTimer);
+  const gen = ++_aqGen, it = _aqCur = _aq.shift() || null;
+  if (!it) return;
+  if (Date.now() - it.ts > ALERT_AUDIO_STALE_MS) return _aqNext();
+  const step = (name, ms, run, then) => {
+    let over = false;
+    const fin = () => { if (over || gen !== _aqGen) return; over = true; clearTimeout(_aqTimer); then(); };
+    it.step = name; it.until = Date.now() + ms;
+    _aqTimer = setTimeout(fin, ms);
+    try { run(fin); } catch(e){ fin(); }
+  };
+  const finish = () => { if (it.sound) _aqPrev = { sound: it.sound, at: Date.now() }; _aqNext(); };
+  const voice = () => it.say ? step('say', 4000 + it.say.length * 120, fin => speakAlert(it.say, fin), finish) : finish();
+  // Same ping as the alert just before it (three crafts finishing together, each with a line to speak):
+  // ring it once, then just read the lines.
+  const again = !it.preview && it.sound === _aqPrev.sound && Date.now() - _aqPrev.at < ALERT_AUDIO_SAME_MS;
+  if (!it.sound || again) voice();
+  else step('ping', 3500, fin => playAlertSound(it.sound, null, fin), voice);
+}
+// Clear the way: drop what's waiting and stop a line being spoken. A ping already ringing is left to
+// finish (cutting a tone mid-wave clicks, and the longest is under a second), minus its spoken line.
+function _aqFlush(){
+  _aq.length = 0;
+  const cur = _aqCur; if (!cur) return;
+  if (cur.step === 'say'){ _aqGen++; clearTimeout(_aqTimer); _aqCur = null; try { speechSynthesis.cancel(); } catch(e){} }
+  else cur.say = '';
 }
 // Suppress an identical alert repeated within a few seconds. There is more than one route to the same
 // ping — stamina in particular has two, the live feed (st.liveStamBelow) and the REST poll
@@ -14331,8 +14459,7 @@ function fireAlert(typeKey, msg){
   const key = typeKey + '|' + msg, now = Date.now();
   if (_lastAlert[key] && (now - _lastAlert[key]) < ALERT_DEDUPE_MS) return;
   _lastAlert[key] = now;
-  if (alertSettings.master) playAlertSound(t.sound);
-  if (alertSettings.tts && alertSettings.tts.on) speakAlert(msg);
+  queueAlertAudio(alertSettings.master ? t.sound : '', alertSpeaks(typeKey) ? msg : '');
   alertToast(msg, (ALERT_META[typeKey]||{}).icon);
   recordNotif(typeKey, msg);
 }
@@ -14657,13 +14784,17 @@ function renderAlerts(){
     if (key==='idle') extra = `<label class="al-secs">after <input type="number" min="10" step="5" value="${t.seconds}" class="sj-input" style="width:64px" onchange="setAlertIdleSecs(this.value)"> s</label>`;
     if (key==='stamina') extra = `<label class="al-secs" title="Only alert when stamina refills to full IF it first dropped below this % of max. 0 = alert on any refill.">only if it fell below <input type="number" min="0" max="99" step="5" value="${t.dropPct||0}" class="sj-input" style="width:56px" onchange="setAlertStaminaDrop(this.value)">%</label>`;
     if (key==='craftDone') extra = `<label class="al-secs" title="After a craft-done ping, stay quiet this long so a wave of stations finishing together pings once.">quiet for <input type="number" min="0" step="5" value="${t.muteSecs!=null?t.muteSecs:60}" class="sj-input" style="width:56px" onchange="setAlertCraftMute(this.value)"> s</label>`;
+    // Read this alert aloud? Only means something while spoken alerts are on, so it is locked until then.
+    const say = t.speak !== false, voiceOn = !!alertSettings.tts.on;
+    const sayChip = !('speechSynthesis' in window) ? '' : `<label class="al-pchip al-say${say && voiceOn ? ' on' : ''}${voiceOn ? '' : ' al-say-off'}" title="${voiceOn ? 'Read this alert aloud' : 'Turn on Spoken alerts (voice) above to choose which alerts are read aloud'}"><input type="checkbox" ${say?'checked':''} ${voiceOn?'':'disabled'} onchange="toggleAlertSpeak('${key}',this.checked)"> <i class="ti ti-message-2"></i> Voice</label>`;
     return `<div class="al-row${t.on?'':' al-off'}">
       <label class="al-toggle"><input type="checkbox" ${t.on?'checked':''} onchange="toggleAlertType('${key}',this.checked)"> <i class="ti ${m.icon}"></i> <span class="al-name">${m.label}</span></label>
       <div class="al-desc">${m.desc}</div>
       <div class="al-controls">
         ${extra}
         <select class="sj-input al-sound" onchange="setAlertSound('${key}',this.value)">${soundOpts(t.sound)}</select>
-        <button class="btn ctrl-btn" onclick="testAlert('${key}')" title="Test sound"><i class="ti ti-volume"></i></button>
+        ${sayChip}
+        <button class="btn ctrl-btn" onclick="testAlert('${key}')" title="Test this alert — its sound, then its spoken line if Voice is ticked"><i class="ti ti-volume"></i></button>
       </div>
     </div>`;
   };
@@ -14706,7 +14837,7 @@ function renderAlerts(){
     <div class="al-wrap">
       <div class="al-head">
         <label class="al-toggle al-master"><input type="checkbox" ${alertSettings.master?'checked':''} onchange="toggleAlertMaster(this.checked)"> <i class="ti ti-bell"></i> <b>Sound alerts</b></label>
-        <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="playAlertSound('chime')">Test</button></div>
+        <div class="al-vol"><i class="ti ti-volume"></i><input type="range" min="0" max="1" step="0.05" value="${alertSettings.volume}" oninput="setAlertVolume(this.value)"><button class="btn ctrl-btn" onclick="queueAlertAudio('chime','',true)">Test</button></div>
       </div>
       ${_ttsSection}
       <div class="al-note"><i class="ti ti-info-circle"></i> Alerts run in the background for your tracked (non-paused) players as long as the app is open — you don't have to stay on this tab. Checked every ~15s. <b>Max stamina</b> fires when a player's stamina refills to full, driven by a live stamina stream rather than polling — so it lands the moment it happens.</div>
@@ -14720,10 +14851,11 @@ function renderAlerts(){
 }
 function toggleAlertMaster(on){ loadAlerts(); alertSettings.master = !!on; saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertVolume(v){ loadAlerts(); alertSettings.volume = parseFloat(v); saveAlerts(); }
-function toggleAlertTts(on){ loadAlerts(); alertSettings.tts.on = !!on; saveAlerts(); restartAlerts(); if (!on && 'speechSynthesis' in window) speechSynthesis.cancel(); if (on) testAlertTts(); renderAlerts(); }
+function toggleAlertTts(on){ loadAlerts(); alertSettings.tts.on = !!on; saveAlerts(); restartAlerts(); if (!on) _aqFlush(); if (on) testAlertTts(); renderAlerts(); }
 function setAlertTtsVoice(uri){ loadAlerts(); alertSettings.tts.voice = uri; saveAlerts(); testAlertTts(); }
 function setAlertTtsRate(v){ loadAlerts(); alertSettings.tts.rate = parseFloat(v) || 0.95; saveAlerts(); }
-function testAlertTts(){ loadAlerts(); speakAlert('Alert test — stamina is full.'); }
+function testAlertTts(){ loadAlerts(); queueAlertAudio('', 'Alert test — stamina is full.', true); }
+function toggleAlertSpeak(key, on){ loadAlerts(); alertSettings.types[key].speak = !!on; saveAlerts(); renderAlerts(); }
 // A change on a "Default alerts" row applies to EVERY tracked player. The per-player chips store explicit
 // overrides, and before this the default only reached players without one — so a player whose chip had
 // ever been ticked by hand stayed pinned, and "turn idle off for everyone" silently skipped them (the
@@ -14731,12 +14863,17 @@ function testAlertTts(){ loadAlerts(); speakAlert('Alert test — stamina is ful
 // overrides makes the default row a real bulk switch; chips can still diverge again afterwards.
 function palClearOverride(field){ const ps = palPlayers(); Object.values(ps).forEach(p => { if (p && field in p) delete p[field]; }); }
 function toggleAlertType(key, on){ loadAlerts(); alertSettings.types[key].on = !!on; palClearOverride(key); saveAlerts(); restartAlerts(); renderAlerts(); }
-function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); playAlertSound(v); }
+function setAlertSound(key, v){ loadAlerts(); alertSettings.types[key].sound = v; saveAlerts(); queueAlertAudio(v, '', true); }
 function setAlertScope(v){ loadAlerts(); alertSettings.types.buffLost.scope = v; saveAlerts(); restartAlerts(); }
 function setAlertIdleSecs(v){ loadAlerts(); alertSettings.types.idle.seconds = Math.max(10, parseInt(v,10)||60); palClearOverride('idleSecs'); saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertStaminaDrop(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n)) n = 0; alertSettings.types.stamina.dropPct = Math.max(0, Math.min(99, n)); palClearOverride('staminaDrop'); saveAlerts(); restartAlerts(); renderAlerts(); }
 function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n) || n < 0) n = 60; alertSettings.types.craftDone.muteSecs = n; palClearOverride('craftMuteSecs'); saveAlerts(); renderAlerts(); }
-function testAlert(key){ loadAlerts(); playAlertSound(alertSettings.types[key].sound); }
+// The row's Test: the alert as it will really arrive — its sound, then its line if this alert is read aloud.
+function testAlert(key){
+  loadAlerts();
+  const who = trackedPlayers[0] ? playerName(trackedPlayers[0]) : 'Player';
+  queueAlertAudio(alertSettings.types[key].sound, alertSpeaks(key) ? ALERT_META[key].sample(who) : '', true);
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 // PLAYER STATE (stamina / XP / buffs) — delivered by the live layer (see liveBridge).
