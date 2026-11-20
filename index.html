@@ -4953,6 +4953,7 @@ function loadRelayRegions(){
       else if (out.added.length) BC_REGIONS = [...old, ...out.added].sort((a, b) => a - b);
       _relayHealthOk = true; _relayHealthAt = Date.now();
     } catch(e){ /* keep what we have */ }
+    relayBackupHealth();   // the backup relay's own list, alongside — nothing waits for it
     return out;
   })();
   p.finally(() => { if (_relayHealthBusy === p) _relayHealthBusy = null; });
@@ -5007,7 +5008,61 @@ function relayDialPump(){
 }
 function relayDialRefund(){ const now = Date.now(); relayDialWrite(Math.min(RELAY_DIAL_BURST, relayDialRead(now) + 1), now); relayDialPump(); }   // a slot that ended up unused
 function relayDialRefused(){ const now = Date.now(); relayDialWrite(Math.min(relayDialRead(now), 0), now); }                                   // the relay's own bucket is evidently empty
-const relayWsUrl = region => { const s = relayDb[region]; return `wss://relay.bitcraftsync.app:${s ? s.port : 3000 + region}/v1/database/${s ? s.db : relayWorld + '-' + region}/subscribe?compression=None`; };
+// ── Two relays ──
+// `sync` (relay.bitcraftsync.app) is the relay the app runs on. `jita` (relay.bitjita.com, bitjita's own) mirrors the
+// same stored tables and stands in for a region whose `sync` mirror is late or down — one relay per region at a time,
+// never both. What differs between them, measured 2026-11-20:
+//   · address: sync has a port per region (from its /health); jita is one host and the database name picks the region
+//   · rows: sync names snapshot rows, jita sends bare arrays for everything (liveRow / LIVE_COLS)
+//   · one-off queries: sync answers them on an open socket; jita refuses them (relayAsk → a scratch socket there)
+//   · new sockets: sync admits ~30 a minute per address (relayDialSlot); jita showed no limit, but a browser opens
+//     sockets to one host:port ONE AT A TIME (~0.2 s each), so nine regions there take 2–3 s to come up
+//   · web lookups (/player, /claim, /storage-logs …): sync only
+//   · event tables (trades, deaths …): sync only — the app reads none
+// Neither stamps its update frames with the game's clock, and sync's /health says "live" while minutes behind, so
+// how late a relay is has to be measured from a game timestamp inside a row.
+const RELAYS = {
+  sync: { label: 'bitcraftsync', oneOff: true, dialLimit: true,
+    wsUrl: rg => { const s = relayDb[rg]; return `wss://relay.bitcraftsync.app:${s ? s.port : 3000 + rg}/v1/database/${s ? s.db : relayWorld + '-' + rg}/subscribe?compression=None`; },
+    schemaUrl: rg => { const s = relayDb[rg]; return `https://relay.bitcraftsync.app:${s ? s.port : 3000 + rg}/v1/database/${s ? s.db : relayWorld + '-' + rg}/schema?version=9`; } },
+  jita: { label: 'bitjita relay', oneOff: false, dialLimit: false,
+    wsUrl: rg => `wss://relay.bitjita.com/v1/database/${relayWorld}-${rg}/subscribe?compression=None`,
+    schemaUrl: rg => `https://relay.bitjita.com/v1/database/${relayWorld}-${rg}/schema?version=9` },
+};
+const RELAY_ORDER = ['sync', 'jita'];   // [0] is where every region starts, and where it returns to
+const regionRelay = {};                 // region -> the relay it is on right now (absent = RELAY_ORDER[0])
+const relayOf = rg => regionRelay[rg] || RELAY_ORDER[0];
+const relayOther = relay => RELAY_ORDER.find(r => r !== relay);
+const relayWsUrl = (region, relay) => RELAYS[relay || relayOf(region)].wsUrl(region);
+// bitjita's relay: which regions it holds, from its own /health (per region: connected, seconds since its last
+// update). Optional — nothing waits for it, and a region it does not vouch for is simply never moved there.
+const relayJita = { at: 0, ok: false, regions: {}, busy: null };
+function relayBackupHealth(force){
+  if (relayJita.busy) return relayJita.busy;
+  if (!force && Date.now() - relayJita.at < 30000) return Promise.resolve(relayJita);
+  relayJita.at = Date.now();
+  const p = relayJita.busy = (async () => {
+    try {
+      const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 8000);
+      let j; try { j = await (await fetch('https://relay.bitjita.com/health', { signal: ctrl.signal, cache: 'no-store' })).json(); } finally { clearTimeout(tm); }
+      const regions = {};
+      Object.keys(j.modules || {}).forEach(k => {
+        const m = /^(.+?)-(\d+)$/.exec(k), v = j.modules[k];
+        if (m && m[1] === relayWorld) regions[+m[2]] = { connected: !!(v && v.connected), age: v && typeof v.last_update_age_seconds === 'number' ? v.last_update_age_seconds : null };   // another world's databases don't count
+      });
+      relayJita.regions = regions; relayJita.ok = true;
+    } catch(e){ relayJita.ok = false; }
+    return relayJita;
+  })();
+  p.finally(() => { if (relayJita.busy === p) relayJita.busy = null; });
+  return p;
+}
+// May a region be moved onto this relay at all? The main relay's own sockets answer that for it.
+function relayEligible(relay, rg){
+  if (relay !== 'jita') return true;
+  const r = relayJita.regions[rg];
+  return relayJita.ok && !!(r && r.connected);
+}
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
 // Buildings never move and claims rarely rename, so the building→claim→name maps are worth keeping
@@ -5172,10 +5227,7 @@ function liveColsHeal(relay, table){
   })();
 }
 // The schema a relay publishes for one region's database (every region's is the same game schema).
-function relaySchemaUrl(relay){
-  const rg = BC_REGIONS[0], s = relayDb[rg];
-  return `https://relay.bitcraftsync.app:${s ? s.port : 3000 + rg}/v1/database/${s ? s.db : relayWorld + '-' + rg}/schema?version=9`;
-}
+function relaySchemaUrl(relay){ return (RELAYS[relay] || RELAYS.sync).schemaUrl(BC_REGIONS[0]); }
 const livePk = r => String(r.entity_id != null ? r.entity_id : (r.id != null ? r.id : r.scheduled_id));
 // ── Change notification: coalesced per ~40ms burst (one game action lands as several table updates).
 // Listeners get [{table, region, isDelta, rows, deletes}] and typically re-read the cache; row-level
@@ -5205,7 +5257,7 @@ function liveRowsByRegion(table, pred){
 }
 function liveStatus(){
   const out = {};
-  Object.keys(liveConns).forEach(rg => { const c = liveConns[rg]; out[rg] = { status: c.status, snapshotTs: c.snapshotTs }; });
+  Object.keys(liveConns).forEach(rg => { const c = liveConns[rg]; out[rg] = { status: c.status, snapshotTs: c.snapshotTs, relay: c.relay || relayOf(+rg) }; });
   return out;
 }
 // ⚠️ TWO different questions, and conflating them made ONE sick mirror disable the whole relay path.
@@ -5272,7 +5324,7 @@ function liveApplySnapshot(c, frame){
     // inventory by owner + banks by player_owner + container contents by id), and the snapshot may
     // report them as separate table entries.
     const m = fresh[t.table_name] || (fresh[t.table_name] = new Map());
-    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) m.set(livePk(r), r); }));
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw, c.relay); if (r) m.set(livePk(r), r); }));
   });
   const evs = [];
   // §2.3: atomic region-slice replacement — EVERY subscribed table gets a fresh slice (empty if the
@@ -5332,8 +5384,8 @@ function liveApplyDelta(c, frame){
     (t.updates || []).forEach(u => {
       // deletes first: a value change arrives as delete(old)+insert(new) for the same pk, so this order
       // makes the insert win; a pure removal (craft finished, order filled) has no insert and the row dies.
-      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'delete', r); return; } slice.delete(livePk(r)); del.push(r); } });
-      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
+      (u.deletes || []).forEach(raw => { const r = liveRow(tb, raw, c.relay); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'delete', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'delete', r); return; } slice.delete(livePk(r)); del.push(r); } });
+      (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw, c.relay); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
   });
@@ -5629,9 +5681,10 @@ function liveStopAll(){
 function liveDrop(rg){
   const c = liveConns[rg];
   if (!c) return;
-  c.closed = true; clearTimeout(c.timer);
+  c.closed = true; clearTimeout(c.timer); clearTimeout(c.snapTimer); clearTimeout(c.addTimer);
   liveAsksFail(c, false);   // asks sent or still waiting on this socket: fail now, so relayAsk moves on at once
   try { c.ws && c.ws.close(); } catch(e){}
+  c.cre = null;   // its creature/herd sets are gone now, not when the close event arrives (seconds later on a dead peer) — or a settings request it made would keep every other socket from asking (bcHerd.paramsReq)
   delete liveConns[rg];
 }
 function liveDial(rg){
@@ -5683,7 +5736,7 @@ function liveApplyAdded(c, a){
   ((a.update && a.update.tables) || []).forEach(t => {
     const tb = t.table_name, byRegion = liveCache[tb] || (liveCache[tb] = {}), slice = byRegion[c.region] || (byRegion[c.region] = new Map());
     let got = 0;
-    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw); if (r){ slice.set(livePk(r), r); got++; } }));
+    (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw, c.relay); if (r){ slice.set(livePk(r), r); got++; } }));
     if (got) evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
   });
   if (c.addWait) c.addWait.delete(qid);
@@ -5697,9 +5750,10 @@ const liveSetId = v => { const q = v && v.query_id; const id = q == null ? null 
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey || c.queued) return;
   c.status = 'connecting'; c.queued = true;
-  relayDialSlot().then(() => {
+  const limited = RELAYS[relayOf(c.region)].dialLimit;   // only the main relay paces new sockets
+  (limited ? relayDialSlot() : Promise.resolve()).then(() => {
     c.queued = false;
-    if (c.closed || c.key !== liveRosterKey || c.ws){ relayDialRefund(); return; }
+    if (c.closed || c.key !== liveRosterKey || c.ws){ if (limited) relayDialRefund(); return; }
     liveOpenNow(c);
   });
 }
@@ -5709,8 +5763,9 @@ function liveOpenNow(c){
   // (a house's first load is its whole 14 days).
   { const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
   c.subs = null; c.adds = 0; c.addWait = null; clearTimeout(c.addTimer);
+  c.relay = relayOf(c.region);   // which relay this socket is on — names its rows (liveRow) and picks its lookups (relayAsk)
   let ws, opened = false;
-  try { ws = new WebSocket(relayWsUrl(c.region), ['v1.json.spacetimedb']); }
+  try { ws = new WebSocket(relayWsUrl(c.region, c.relay), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
   c.ws = ws; c.status = 'connecting';
   // §8.3 stuck-CONNECTING watchdog: past the browser's ~22-socket SHARED budget a socket hangs in
@@ -5749,6 +5804,7 @@ function liveOpenNow(c){
   };
   ws.onmessage = ev => {
     if (typeof ev.data !== 'string') return;
+    if (c.closed || c.ws !== ws) return;   // a dropped connection's late frames must never write into the region's rows (its successor may be on another relay)
     c.lastMsgAt = Date.now();   // liveness (see liveWatchdog) — ANY frame counts, including IdentityToken
     let m; try { m = JSON.parse(ev.data); } catch(e){ return; }   // outer frame is safe to parse plainly — rows are still strings inside it
     if (m.InitialSubscription){
@@ -5783,7 +5839,10 @@ function liveOpenNow(c){
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     // Never opened = the upgrade was refused or the relay is unreachable, and a browser can't tell which. The one
     // cause we can fix from here is a database the relay has renamed or moved, so re-read /health (throttled).
-    if (!opened){ relayDialRefused(); relayRecheck(); }
+    if (!opened){
+      if (RELAYS[c.relay].dialLimit){ relayDialRefused(); relayRecheck(); }
+      else relayBackupHealth(true);
+    }
     liveReschedule(c);
   };
 }
@@ -5844,14 +5903,14 @@ document.addEventListener('visibilitychange', () => {
 // column-order dependency there; a relay that sends bare arrays is named from LIVE_COLS, which is why
 // every table asked for this way has a list. Returns { tableName: [rows] }; throws on error/timeout so
 // callers fall back.
-function relayFetchOnce(region, sqls, timeoutMs = 9000){
-  return relayReady().then(relayDialSlot).then(() => new Promise((resolve, reject) => {
+function relayFetchOnce(region, sqls, timeoutMs = 9000, relay){
+  return relayReady().then(() => { relay = relay || relayOf(region); return RELAYS[relay].dialLimit ? relayDialSlot() : null; }).then(() => new Promise((resolve, reject) => {
     let ws, opened = false;
-    try { ws = new WebSocket(relayWsUrl(region), ['v1.json.spacetimedb']); }
+    try { ws = new WebSocket(relayWsUrl(region, relay), ['v1.json.spacetimedb']); }
     catch(e){ return reject(e); }
     const t = setTimeout(() => { try { ws.close(); } catch(e){} reject(new Error('fetch-once timeout r' + region)); }, timeoutMs);
     ws.onerror = () => { try { ws.close(); } catch(e){} };
-    ws.onclose = () => { clearTimeout(t); if (!opened) relayDialRefused(); reject(new Error('fetch-once closed r' + region)); };   // no-op if already settled
+    ws.onclose = () => { clearTimeout(t); if (!opened && RELAYS[relay].dialLimit) relayDialRefused(); reject(new Error('fetch-once closed r' + region)); };   // no-op if already settled
     ws.onopen = () => { opened = true; try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: sqls } })); } catch(e){} };
     ws.onmessage = ev => {
       if (typeof ev.data !== 'string') return;
@@ -5862,7 +5921,7 @@ function relayFetchOnce(region, sqls, timeoutMs = 9000){
       const byTable = {};
       ((m.InitialSubscription.database_update && m.InitialSubscription.database_update.tables) || []).forEach(tb => {
         const list = byTable[tb.table_name] || (byTable[tb.table_name] = []);
-        (tb.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb.table_name, raw); if (r) list.push(r); }));
+        (tb.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(tb.table_name, raw, relay); if (r) list.push(r); }));
       });
       ws.onclose = null;
       try { ws.close(); } catch(e){}
@@ -5880,11 +5939,15 @@ function relayFetchOnce(region, sqls, timeoutMs = 9000){
 // So: the region's held socket if the live layer has one (waiting for it while it is still coming up), a scratch
 // socket (relayFetchOnce) when it has none — or when the held one fails mid-ask, or the relay stops taking
 // one-offs. Either way the result is { tableName: [rows] }, and a query the relay refuses rejects with .queryError.
-let _relayAskSeq = 0, _relayOneOffOff = false, _relayAskSilent = 0;
+// A region on the backup relay always takes the scratch socket: that relay refuses one-offs outright, and a named set
+// on its held socket is no substitute — update frames don't say which query they belong to, so until the set was
+// dropped again other players' rows would be written into the cache and run through the alerts.
+let _relayAskSeq = 0, _relayAskSilent = 0;
+const _relayOneOffOff = {};   // relay -> true while it is not answering one-offs (per relay: one relay's refusal says nothing about the other)
 function relayAsk(region, sqls, timeoutMs = 9000){
   return relayReady().then(async () => {
-    const c = liveConns[region];
-    if (c && !c.closed && !_relayOneOffOff){
+    const c = liveConns[region], relay = (c && !c.closed && c.relay) || relayOf(region);
+    if (c && !c.closed && RELAYS[relay].oneOff && !_relayOneOffOff[relay]){
       try { const t = await liveAsk(c, sqls, timeoutMs); _relayAskSilent = 0; return t; }
       catch(e){
         if (e && e.queryError) throw e;                            // a scratch socket would be refused the same way
@@ -5892,9 +5955,9 @@ function relayAsk(region, sqls, timeoutMs = 9000){
         // asking this way for a while, so lookups don't each sit out a timeout first.
         const silent = e && /^ask timeout/.test(e.message) && c.ws && c.ws.readyState === 1 && c.snapshotTs > 0;
         if ((e && e.unsupported) || (silent && ++_relayAskSilent >= 2)){
-          _relayOneOffOff = true; _relayAskSilent = 0;
+          _relayOneOffOff[relay] = true; _relayAskSilent = 0;
           console.warn('[live] one-off queries are not being answered — lookups use scratch sockets for the next 10 minutes');
-          setTimeout(() => { _relayOneOffOff = false; }, 10 * 60 * 1000);
+          setTimeout(() => { _relayOneOffOff[relay] = false; }, 10 * 60 * 1000);
         }
       }
     }
@@ -5926,7 +5989,7 @@ function liveAsk(c, sqls, timeoutMs){
           if (err){ const e = new Error('relay refused the query: ' + String(err).slice(0, 200)); if (/one-?off|not supported through|subscribe to the table/i.test(String(err))) e.unsupported = true; else e.queryError = true; return finish(e); }
           (resp.tables || []).forEach(tb => {
             const list = byTable[tb.table_name] || (byTable[tb.table_name] = []);
-            (tb.rows || []).forEach(raw => { const r = liveRow(tb.table_name, typeof raw === 'string' ? raw : JSON.stringify(raw)); if (r) list.push(r); });
+            (tb.rows || []).forEach(raw => { const r = liveRow(tb.table_name, typeof raw === 'string' ? raw : JSON.stringify(raw), c.relay); if (r) list.push(r); });
           });
           if (--left === 0) finish();
         });
@@ -5940,8 +6003,52 @@ function liveAsk(c, sqls, timeoutMs){
 }
 // The socket closed (sentOnly: asks not yet sent keep waiting for the reconnect) or the region was dropped (all).
 function liveAsksFail(c, sentOnly){ if (c.askSet) [...c.askSet].forEach(a => { if (a.sent || !sentOnly) a.fail(); }); }
+// ── Moving a region to the other relay ──
+// The ordinary reconnect, pointed elsewhere: drop the region's socket, dial it again, and liveOpenNow picks the relay up
+// from regionRelay. Its rows stay on screen until the new relay's snapshot replaces them in one step
+// (liveApplySnapshot), and dataSource()'s grace covers the moment in between. Never a second socket for the region
+// held "in reserve": nothing in the connection code asks whether a socket is still the region's own, so a standby
+// would write into the same rows, feed the same creature maps and survive every liveDrop.
+function liveSwap(rg, relay){
+  rg = +rg;
+  if (!RELAYS[relay] || relayOf(rg) === relay) return false;
+  regionRelay[rg] = relay;
+  if (liveOn() && liveConns[rg]){ liveDrop(rg); liveDial(rg); }
+  return true;
+}
+// Debug: the same questions put to BOTH relays over scratch sockets, decoded, and compared table by table. Rows are
+// compared by their values in column order, so a named row and a bare-array row of the same data are equal. Rows that
+// change between the two reads (a stamina tick, a craft in progress) show up as one "only" on each side.
+async function liveParity(rg){
+  rg = +rg;
+  const c = liveConns[rg];
+  if (!c || !c.sqls || !c.sqls.length) throw new Error('no live connection for region ' + rg);
+  const flat = v => (v === null || typeof v !== 'object') ? v : (Array.isArray(v) ? v : Object.values(v)).map(flat);
+  const got = await Promise.all(RELAY_ORDER.map(relay => relayFetchOnce(rg, c.sqls.slice(), 60000, relay).catch(e => ({ __error: e.message }))));
+  const out = { region: rg, queries: c.sqls.length, tables: {}, different: 0 };
+  RELAY_ORDER.forEach((relay, i) => { if (got[i].__error) out[relay + 'Error'] = got[i].__error; });
+  if (got.some(g => g.__error)) return out;
+  new Set(got.flatMap(g => Object.keys(g))).forEach(t => {
+    const bags = got.map(g => { const m = new Map(); (g[t] || []).forEach(r => { const k = JSON.stringify(flat(r)); m.set(k, (m.get(k) || 0) + 1); }); return m; });
+    const only = bags.map((m, i) => [...m.keys()].filter(k => !bags[1 - i].has(k)));
+    const row = { [RELAY_ORDER[0]]: (got[0][t] || []).length, [RELAY_ORDER[1]]: (got[1][t] || []).length };
+    if (only[0].length || only[1].length){
+      row.only = { [RELAY_ORDER[0]]: only[0].length, [RELAY_ORDER[1]]: only[1].length };
+      row.sample = { [RELAY_ORDER[0]]: (only[0][0] || '').slice(0, 220), [RELAY_ORDER[1]]: (only[1][0] || '').slice(0, 220) };
+      out.different += only[0].length + only[1].length;
+    }
+    out.tables[t] = row;
+  });
+  return out;
+}
 // Console/debug handle (not a public API): window.__live.status() etc.
-window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns };
+//   relays()            which relay each region is on
+//   use(region, relay)  move a region ('all' for every region) onto 'sync' or 'jita' by hand
+//   parity(region)      compare what the two relays answer for that region's queries
+window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns,
+  relays: () => Object.fromEntries(BC_REGIONS.map(rg => [rg, relayOf(rg)])),
+  use: (rg, relay) => (rg === 'all' ? BC_REGIONS.slice() : [rg]).map(r => liveSwap(r, relay)),
+  parity: liveParity, backup: relayJita };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
 // Fold the cache's building/nickname/claim rows into the persisted place maps. NO NETWORK — these
@@ -12314,7 +12421,7 @@ function bcCreOnApplied(c, a){
   const s = c.cre; if (!s) return;
   const qid = a.query_id && a.query_id.id;
   const rows = {};
-  ((a.update && a.update.tables) || []).forEach(t => { const l = rows[t.table_name] || (rows[t.table_name] = []); (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw); if (r) l.push(r); })); });
+  ((a.update && a.update.tables) || []).forEach(t => { const l = rows[t.table_name] || (rows[t.table_name] = []); (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(t.table_name, raw, c.relay); if (r) l.push(r); })); });
   if (qid === s.rosterQid){
     const ro = new Map(); (rows[BC_CRE_ROSTER_TABLE] || []).forEach(r => ro.set(String(r.entity_id), bcCreTypeOf(r)));
     bcCre.roster[c.region] = ro; s.rosterReady = true;
@@ -12343,8 +12450,8 @@ function bcCreOnRosterDelta(c, t){
   const types = new Set(bcRelayEnemyTypes().map(x => +x.id));
   let resub = false, redraw = false;
   (t.updates || []).forEach(u => {
-    (u.deletes || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const id = String(r.entity_id); ro.delete(id); const p = bcCre.pos[rg]; if (p && p.delete(id)) redraw = true; });
-    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; bcHerdNoteSpawn(rg, String(r.herd_entity_id)); });
+    (u.deletes || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw, c.relay); if (!r) return; const id = String(r.entity_id); ro.delete(id); const p = bcCre.pos[rg]; if (p && p.delete(id)) redraw = true; });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_CRE_ROSTER_TABLE, raw, c.relay); if (!r) return; const ty = bcCreTypeOf(r); ro.set(String(r.entity_id), ty); if (types.has(ty)) resub = true; bcHerdNoteSpawn(rg, String(r.herd_entity_id)); });
   });
   if (redraw) bcCreScheduleRedraw();
   if (resub && !bcCre.resubT[rg]) bcCre.resubT[rg] = setTimeout(() => { delete bcCre.resubT[rg]; bcCreSyncSocket(liveConns[rg]); }, BC_CRE_RESUB_DEBOUNCE_MS);
@@ -12513,8 +12620,8 @@ function bcHerdOnDelta(c, t){
   const rg = c.region, m = bcHerd.herds[rg], s = c.cre; if (!m) return;
   const gone = new Set(), ins = [];
   (t.updates || []).forEach(u => {
-    (u.deletes || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) gone.add(String(r.entity_id)); });
-    (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) ins.push(r); });
+    (u.deletes || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw, c.relay); if (r) gone.add(String(r.entity_id)); });
+    (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw, c.relay); if (r) ins.push(r); });
   });
   ins.forEach(r => {
     const id = String(r.entity_id); gone.delete(id);
@@ -12529,7 +12636,7 @@ function bcHerdOnDelta(c, t){
 // A herd created in this transaction has its location row in the same one, in any table order.
 function bcHerdPrescan(c, tables){
   const s = c.cre; if (!s || !s.herdQid) return;
-  tables.forEach(t => { if (t.table_name === BC_HERD_TABLE) (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw); if (r) s.herdIds.add(String(r.entity_id)); })); });
+  tables.forEach(t => { if (t.table_name === BC_HERD_TABLE) (t.updates || []).forEach(u => (u.inserts || []).forEach(raw => { const r = liveRow(BC_HERD_TABLE, raw, c.relay); if (r) s.herdIds.add(String(r.entity_id)); })); });
 }
 // Is this location row one of our herds' spawn points? (liveApplyDelta diverts those from the row cache.)
 function bcHerdOwns(c, table, r){ return table === 'location_state' && !!(c.cre && c.cre.herdIds && c.cre.herdIds.has(String(r.entity_id))); }
