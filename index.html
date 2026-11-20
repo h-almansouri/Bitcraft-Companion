@@ -5317,7 +5317,11 @@ function dataSource(){
   return 'bitjita';
 }
 const usingCache = () => dataSource() === 'cache';
-function liveApplySnapshot(c, frame){
+// `older`: this snapshot comes from a relay that may be behind the one the region was on a moment ago (liveSwap), so
+// what it shows can be EARLIER than what the alerts last saw. Its events say so, and the alert baselines are re-set
+// from them instead of being compared (liveBridge) — else a stamina bar jumping back up reads as "refilled" and a
+// buff that had not been eaten yet reads as "lost".
+function liveApplySnapshot(c, frame, older){
   const fresh = {};
   ((frame.database_update && frame.database_update.tables) || []).forEach(t => {
     // UNION, not overwrite: one subscribe can carry several queries against the SAME table (personal
@@ -5332,7 +5336,7 @@ function liveApplySnapshot(c, frame){
   c.tables.forEach(tb => {
     const slice = fresh[tb] || new Map();
     (liveCache[tb] || (liveCache[tb] = {}))[c.region] = slice;
-    evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
+    evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [], older: !!older });
   });
   liveNotify(evs);
   liveHandoffKick();
@@ -5681,7 +5685,7 @@ function liveStopAll(){
 function liveDrop(rg){
   const c = liveConns[rg];
   if (!c) return;
-  c.closed = true; clearTimeout(c.timer); clearTimeout(c.snapTimer); clearTimeout(c.addTimer);
+  c.closed = true; clearTimeout(c.timer); clearTimeout(c.snapTimer); clearTimeout(c.addTimer); clearTimeout(c.swapTimer);
   liveAsksFail(c, false);   // asks sent or still waiting on this socket: fail now, so relayAsk moves on at once
   try { c.ws && c.ws.close(); } catch(e){}
   c.cre = null;   // its creature/herd sets are gone now, not when the close event arrives (seconds later on a dead peer) — or a settings request it made would keep every other socket from asking (bcHerd.paramsReq)
@@ -5694,7 +5698,9 @@ function liveDial(rg){
   if (ex && !ex.closed && liveExtend(ex, sqls, tables)) return;   // its socket takes the difference — no new dial
   if (ex) liveDrop(rg);
   const c = { region: rg, key: liveRosterKey, tables, sqls, status: 'connecting', backoff: 1500, snapshotTs: 0, timer: null, ws: null, closed: false };
+  if (_liveDialOpts) Object.assign(c, _liveDialOpts);   // a move to another relay: its dial is already paid for and it is on a deadline (liveSwap)
   liveConns[rg] = c;
+  if (c.swap) c.swapTimer = setTimeout(() => liveSwapFailed(c), LIVE_SWAP_OPEN_MS);
   liveOpen(c);
 }
 // ── The query set changed: give the region's socket the DIFFERENCE instead of hanging up ──
@@ -5750,7 +5756,8 @@ const liveSetId = v => { const q = v && v.query_id; const id = q == null ? null 
 function liveOpen(c){
   if (c.closed || c.key !== liveRosterKey || c.queued) return;
   c.status = 'connecting'; c.queued = true;
-  const limited = RELAYS[relayOf(c.region)].dialLimit;   // only the main relay paces new sockets
+  const limited = RELAYS[relayOf(c.region)].dialLimit && !c.prepaid;   // only the main relay paces new sockets; a move there took its token before letting go of the old socket
+  c.prepaid = false;
   (limited ? relayDialSlot() : Promise.resolve()).then(() => {
     c.queued = false;
     if (c.closed || c.key !== liveRosterKey || c.ws){ if (limited) relayDialRefund(); return; }
@@ -5788,6 +5795,7 @@ function liveOpenNow(c){
     // ~15s forever and its ingest never recovered. Resetting on success instead lets a mirror that keeps
     // stalling decay to the 60s ceiling on its own.
     c.subs = new Set(c.sqls.map(liveSqlKey));   // what this socket holds; liveExtendFlush adds what's missing later
+    if (c.swap){ clearTimeout(c.swapTimer); c.swapTimer = setTimeout(() => liveSwapFailed(c), LIVE_SWAP_WAIT_MS); }   // the move's deadline runs from here: it opened, now it has to answer
     try { ws.send(JSON.stringify({ Subscribe: { request_id: 1, query_strings: c.sqls } })); } catch(e){}
     bcCreOnOpen(c);   // creature roster/position sets ride this socket as NAMED subscriptions (SubscribeMulti) — see bcCre*
     if (c.askSet) c.askSet.forEach(a => { if (!a.sent) a.send(); });   // lookups that were waiting for this socket (relayAsk)
@@ -5811,7 +5819,9 @@ function liveOpenNow(c){
       clearTimeout(c.snapTimer);
       const first = !c.snapshotTs;
       c.status = 'live'; c.snapshotTs = Date.now(); c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
-      liveApplySnapshot(c, m.InitialSubscription);
+      const older = !!(c.swap && c.swap.older);   // this region just moved onto a relay that may be BEHIND the one it left
+      if (c.swap){ clearTimeout(c.swapTimer); c.swap = null; }
+      liveApplySnapshot(c, m.InitialSubscription, older);
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
       // snapshot is not a delta so the doorbell ignores it — ring it explicitly.
       if (_liveCompleteKicked && first){ _feedWant.crafts = _feedWant.orders = _feedWant.inv = _feedWant.tasks = true; feedKick(); }
@@ -5836,6 +5846,7 @@ function liveOpenNow(c){
     c.ws = null; c.cre = null; clearTimeout(c.snapTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
     liveAsksFail(c, true);   // answers that will never come; asks not sent yet wait for the reconnect
     if (c.closed || c.key !== liveRosterKey) return;
+    if (c.swap && !c.snapshotTs){ liveSwapFailed(c); return; }   // moved here and it hung up before answering: back where it came from
     c.status = 'reconnecting';   // cache slice stays — stale beats blank, and the next snapshot replaces it atomically
     // Never opened = the upgrade was refused or the relay is unreachable, and a browser can't tell which. The one
     // cause we can fix from here is a database the relay has renamed or moved, so re-read /health (throttled).
@@ -6009,12 +6020,40 @@ function liveAsksFail(c, sentOnly){ if (c.askSet) [...c.askSet].forEach(a => { i
 // (liveApplySnapshot), and dataSource()'s grace covers the moment in between. Never a second socket for the region
 // held "in reserve": nothing in the connection code asks whether a socket is still the region's own, so a standby
 // would write into the same rows, feed the same creature maps and survive every liveDrop.
-function liveSwap(rg, relay){
-  rg = +rg;
-  if (!RELAYS[relay] || relayOf(rg) === relay) return false;
-  regionRelay[rg] = relay;
-  if (liveOn() && liveConns[rg]){ liveDrop(rg); liveDial(rg); }
+// A move is on a deadline. The new relay has LIVE_SWAP_OPEN_MS to open its socket and LIVE_SWAP_WAIT_MS after that
+// to answer; if it does neither (or hangs up first) the region goes back where it came from and that relay is left
+// alone for it for LIVE_SWAP_BAR_MS — both inside dataSource()'s 10 s grace, so a move that fails costs nothing
+// visible. A move ONTO the main relay takes its dial token before letting go of the socket it has (opts.prepaid),
+// so waiting for the relay's pacing never leaves the region without one.
+//   opts.fresher  the new relay was just measured ahead of this one: its snapshot is compared normally by the alerts.
+//                 Anything else (a move because the socket died, a move back, a move by hand) may land on OLDER rows.
+//   opts.force    no deadline and no way back (debug: __live.use)
+const LIVE_SWAP_OPEN_MS = 10000, LIVE_SWAP_WAIT_MS = 6000, LIVE_SWAP_BAR_MS = 5 * 60 * 1000;
+const regionBar = {};   // "region:relay" -> ms until which that relay is not tried again for the region
+const relayBarred = (rg, relay) => (regionBar[rg + ':' + relay] || 0) > Date.now();
+let _liveDialOpts = null;
+function liveSwap(rg, relay, opts){
+  rg = +rg; opts = opts || {};
+  const from = relayOf(rg);
+  if (!RELAYS[relay] || from === relay) return false;
+  const go = prepaid => {
+    if (relayOf(rg) !== from){ if (prepaid) relayDialRefund(); return; }   // moved by something else while this waited for its token
+    regionRelay[rg] = relay;
+    if (!liveOn() || !liveConns[rg]){ if (prepaid) relayDialRefund(); return; }   // nothing dialled for this region: the next dial simply uses the new relay
+    liveDrop(rg);
+    _liveDialOpts = { prepaid, swap: opts.force ? null : { from, older: !opts.fresher } };
+    try { liveDial(rg); } finally { _liveDialOpts = null; }
+  };
+  if (RELAYS[relay].dialLimit) relayDialSlot().then(() => go(true)); else go(false);
   return true;
+}
+function liveSwapFailed(c){
+  const sw = c.swap;
+  if (!sw || c.closed || liveConns[c.region] !== c) return;
+  c.swap = null; clearTimeout(c.swapTimer);
+  regionBar[c.region + ':' + c.relay] = Date.now() + LIVE_SWAP_BAR_MS;
+  console.warn(`[live] r${c.region}: ${RELAYS[c.relay || relayOf(c.region)].label} did not answer — back on ${RELAYS[sw.from].label}`);
+  liveSwap(c.region, sw.from, { force: true });
 }
 // Debug: the same questions put to BOTH relays over scratch sockets, decoded, and compared table by table. Rows are
 // compared by their values in column order, so a named row and a bare-array row of the same data are equal. Rows that
@@ -6047,8 +6086,9 @@ async function liveParity(rg){
 //   parity(region)      compare what the two relays answer for that region's queries
 window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete: liveComplete, conns: liveConns,
   relays: () => Object.fromEntries(BC_REGIONS.map(rg => [rg, relayOf(rg)])),
-  use: (rg, relay) => (rg === 'all' ? BC_REGIONS.slice() : [rg]).map(r => liveSwap(r, relay)),
-  parity: liveParity, backup: relayJita };
+  use: (rg, relay) => (rg === 'all' ? BC_REGIONS.slice() : [rg]).map(r => liveSwap(r, relay, { force: true })),
+  swap: (rg, relay) => liveSwap(rg, relay || relayOther(relayOf(+rg))),   // as the app would: on a deadline, back again if the other relay doesn't answer
+  parity: liveParity, backup: relayJita, bars: regionBar };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
 // Fold the cache's building/nickname/claim rows into the persisted place maps. NO NETWORK — these
@@ -7074,7 +7114,7 @@ function liveBridge(evs){
       craftProgressLatest(ev.rows.map(r => ({ entityId: r.entity_id, progress: r.progress })))
         .forEach(x => onLiveCraftProgress({ entity_id: x.entityId, progress: x.progress }, ev.isDelta));
     } else if (ev.table === 'stamina_state'){
-      ev.rows.forEach(r => onLiveStamina(r.entity_id, { stamina: r.stamina }));
+      ev.rows.forEach(r => onLiveStamina(r.entity_id, { stamina: r.stamina }, ev.older));   // older: a move onto a relay that may be behind — re-set the baseline, don't compare
     } else if (ev.table === 'mobile_entity_state'){
       // A DELTA here = this player just MOVED (new move segment) — proven activity even when no XP is
       // flowing (hauling, sailing, walking between towns). Snapshots are just the current position.
@@ -7086,6 +7126,10 @@ function liveBridge(evs){
       // v1 JSON renders the stacks as [skill_id, quantity] PAIRS, not objects — normalise for the handler
       ev.rows.forEach(r => onLiveExperience(r.entity_id,
         (r.experience_stacks || []).map(s => Array.isArray(s) ? { skill_id: +s[0], quantity: +s[1] } : s)));
+    } else if (ev.table === 'active_buff_state' && ev.older){
+      // The same move, for buffs: the row may be from before a buff was eaten, so the next check must not read its
+      // absence as "lost". Dropping the baseline makes that check record what it finds without comparing.
+      ev.rows.forEach(r => { const st = alertState[String(r.entity_id)]; if (st) st.buffs = null; });
     } else if (ev.table === 'active_buff_state' && ev.isDelta){
       ev.rows.forEach(r => onLiveBuffs(r.entity_id));
     } else if (ev.table === 'signed_in_player_state'){
@@ -15131,7 +15175,10 @@ function onLiveBuffs(id){
 // The live feed carries CURRENT stamina (a float that drains as you act); max stamina isn't in it,
 // so we read the true max from the REST stats endpoint (values[1]) and cache it per player.
 let liveStaminaMax = {};   // entityId -> { max, ts }
-function onLiveStamina(id, data){
+// `rebase`: the value comes from a relay that may be BEHIND the one this player's rows were on a moment ago (a region
+// moved relays — liveApplySnapshot). It can be earlier than the last one seen, so it only re-sets the baseline: a
+// lower number is not a drain (no activity stamp) and a higher one is not a refill (no alert).
+function onLiveStamina(id, data, rebase){
   if (!data || typeof data !== 'object') return;
   const cur = liveNum(data.stamina ?? data.current ?? data.value);
   if (cur == null) return;
@@ -15139,7 +15186,7 @@ function onLiveStamina(id, data){
   // A stamina DECREASE = the player did something (sprint/climb/action). Regen rows tick ~1/s while
   // AFK, so only drains count as activity for the idle alert. 0.25 guards against float jitter.
   const prevCur = liveStamina[id] ? liveStamina[id].current : null;
-  if (prevCur != null && cur < prevCur - 0.25) liveActivity[String(id)] = Date.now();
+  if (!rebase && prevCur != null && cur < prevCur - 0.25) liveActivity[String(id)] = Date.now();
   liveStamina[id] = { current: cur, max };
   if (!usingCache()) vitalsSchedule(id);   // bitjita fallback: the banner's stamina comes from here (the relay path repaints from liveBridge)
   loadAlerts();
@@ -15147,6 +15194,7 @@ function onLiveStamina(id, data){
   const st = alertState[id] || (alertState[id] = {});
   const _dp = palStaminaDrop(id);
   const dropLine = _dp > 0 ? max * _dp / 100 : max - 1;
+  if (rebase){ st.liveStamBelow = cur < dropLine; return; }
   if (cur < dropLine) st.liveStamBelow = true;                 // dipped below the (customizable) threshold — arm the alert
   else if (cur >= max - 1 && st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to full
 }
