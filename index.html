@@ -83,6 +83,23 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .notif-clear:hover{color:var(--red)}
 .notif-settings{background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:0;margin-right:.7rem;display:inline-flex;align-items:center;gap:.25rem}
 .notif-settings:hover{color:var(--teal-light)}
+/* Live-data status: the dot beside the bell — which relay each region reads from, and whether it is live (relayStatus) */
+.relay-dot{background:var(--bg3);border:1px solid var(--border);width:32px;height:32px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:all .12s}
+.relay-dot:hover{border-color:var(--border2)}
+.rd-dot{width:9px;height:9px;border-radius:50%;background:var(--text3);transition:background .3s}
+.relay-dot.rd-ok .rd-dot{background:var(--green-light)}
+.relay-dot.rd-warn .rd-dot{background:var(--amber-light)}
+.relay-dot.rd-bad .rd-dot{background:var(--red)}
+.relay-panel{width:340px}
+.rd-sum{padding:.6rem .8rem;font-size:12px;line-height:1.45;color:var(--text2);border-bottom:1px solid var(--border)}
+.rd-row{display:flex;align-items:center;gap:.5rem;padding:.4rem .8rem;font-size:12px;border-bottom:1px solid var(--border)}
+.rd-row:last-child{border-bottom:none}
+.rd-pip{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--text3)}
+.rd-pip.ok{background:var(--green-light)}.rd-pip.warn{background:var(--amber-light)}.rd-pip.bad{background:var(--red)}
+.rd-name{flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rd-relay{color:var(--text3);white-space:nowrap}
+.rd-state{white-space:nowrap;min-width:5.5em;text-align:right;color:var(--text2)}
+.rd-state.warn{color:var(--amber-light)}.rd-state.bad{color:var(--red-light)}
 /* alert settings modal */
 .al-modal{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 1rem;overflow-y:auto}
 .al-modal-box{background:var(--bg);border:1px solid var(--border2);border-radius:12px;width:100%;max-width:820px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
@@ -972,7 +989,7 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
   .topbar-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .topbar-actions{display:contents}
   .topbar-right{display:none}
-  .notif-bell{width:36px;height:36px}
+  .notif-bell,.relay-dot{width:36px;height:36px}
   .notif-panel{position:fixed;top:52px;left:.5rem;right:.5rem;width:auto;max-height:70vh}
   .tb-search{display:none;order:9;flex:1 1 100%;width:auto;padding-bottom:.5rem}
   body.lookup-open .tb-search{display:block}
@@ -1141,6 +1158,10 @@ body.bc-resizing{cursor:ew-resize;user-select:none}
         <div class="search-results" id="lookup-results" style="display:none"></div>
       </div>
       <div class="topbar-right" id="topbar-right"></div>
+      <div style="position:relative">
+        <button id="relay-dot" class="relay-dot" onclick="toggleRelayPanel(event)" title="Live data"><span class="rd-dot"></span></button>
+        <div id="relay-panel" class="notif-panel relay-panel" style="display:none"></div>
+      </div>
       <div style="position:relative">
         <button id="notif-bell-btn" class="notif-bell" onclick="toggleNotifPanel(event)" title="Notification history"><i class="ti ti-bell"></i><span id="notif-badge" class="notif-badge" style="display:none">0</span></button>
         <div id="notif-panel" class="notif-panel" style="display:none"></div>
@@ -14797,6 +14818,76 @@ document.addEventListener('click', (e) => {
   if (e.target.closest && (e.target.closest('#notif-panel') || e.target.closest('#notif-bell-btn'))) return;
   notifPanelOpen = false; const p = document.getElementById('notif-panel'); if (p) p.style.display = 'none';
 });
+
+// ── Live-data status: the dot beside the bell ──
+// The live layer reads each region from one of two relays (RELAYS) and nothing on screen used to say which, or
+// whether a region was live at all — a region quietly stuck reconnecting looked exactly like a healthy one. The dot
+// is the whole picture at a glance; its panel lists every region with the relay it is on and its state.
+//   green  every region live on the main relay
+//   amber  a region is on the backup relay, or is not live right now
+//   red    a region has had no working relay for a while, so the app is on bitjita's website copy (dataSource)
+//   grey   the live layer is off (nobody and nothing tracked)
+const RELAY_DOWN_AFTER_MS = 12000;   // a region not live for this long counts as having no working relay (dataSource's own grace is 10 s)
+const _relayNotLiveSince = {};       // region -> ms when it was first seen without a live socket
+let relayPanelOpen = false;
+function relayRegionInfo(rg, now){
+  const c = liveConns[rg], relay = (c && c.relay) || relayOf(rg);
+  const live = !!(c && c.snapshotTs && (c.status === 'live' || c.status === 'extending'));   // extending = live, plus an added question on its way
+  if (live) delete _relayNotLiveSince[rg]; else if (!_relayNotLiveSince[rg]) _relayNotLiveSince[rg] = now;
+  const downFor = live ? 0 : now - _relayNotLiveSince[rg];
+  const name = liveRegionName(rg);
+  return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup: relay !== RELAY_ORDER[0], live, downFor, status: c ? c.status : 'off' };
+}
+function relayStatus(){
+  const now = Date.now();
+  if (!liveOn()) return { level: 'off', text: 'Live data is off: no player, claim or map layer is tracked.', regions: [] };
+  const regions = BC_REGIONS.map(rg => relayRegionInfo(rg, now));
+  const list = a => a.map(r => r.name).join(', ');
+  const down = regions.filter(r => !r.live && r.downFor >= RELAY_DOWN_AFTER_MS), waiting = regions.filter(r => !r.live && r.downFor < RELAY_DOWN_AFTER_MS), onBackup = regions.filter(r => r.live && r.backup);
+  const main = RELAYS[RELAY_ORDER[0]].label, parts = [];
+  if (down.length) parts.push(`${list(down)} ${down.length > 1 ? 'have' : 'has'} no working relay${usingCache() ? '' : ' — the app is showing bitjita’s website data until ' + (down.length > 1 ? 'they come' : 'it comes') + ' back'}.`);
+  if (waiting.length) parts.push(`${list(waiting)} ${waiting.length > 1 ? 'are' : 'is'} connecting.`);
+  if (onBackup.length) parts.push(`${list(onBackup)} ${onBackup.length > 1 ? 'are' : 'is'} on the backup relay (${RELAYS[RELAY_ORDER[1]].label}).`);
+  if (!parts.length) parts.push(`All ${regions.length} regions are live on ${main}.`);
+  return { level: down.length ? 'bad' : (waiting.length || onBackup.length) ? 'warn' : 'ok', text: parts.join(' '), regions };
+}
+function relayRowState(r){
+  if (r.live) return { cls: r.backup ? 'warn' : 'ok', text: 'live' };
+  if (r.downFor >= RELAY_DOWN_AFTER_MS) return { cls: 'bad', text: r.status === 'blocked' ? 'blocked' : 'no answer' };
+  return { cls: 'warn', text: 'connecting…' };
+}
+function relayPanelHtml(s){
+  return `<div class="notif-hdr"><span><i class="ti ti-broadcast"></i> Live data</span></div>
+    <div class="rd-sum">${escHtml(s.text)}</div>` +
+    s.regions.map(r => { const st = relayRowState(r); return `<div class="rd-row"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('');
+}
+let _relayDotSig = '';
+function relayDotRender(){
+  const btn = document.getElementById('relay-dot'); if (!btn) return;
+  const s = relayStatus();
+  const sig = s.level + '|' + s.text + '|' + s.regions.map(r => r.relay + relayRowState(r).text).join(',');
+  if (sig === _relayDotSig) return;   // nothing to repaint: this runs on a timer
+  _relayDotSig = sig;
+  btn.className = 'relay-dot' + (s.level === 'ok' ? ' rd-ok' : s.level === 'warn' ? ' rd-warn' : s.level === 'bad' ? ' rd-bad' : '');
+  btn.title = 'Live data — ' + s.text;
+  if (relayPanelOpen){ const p = document.getElementById('relay-panel'); if (p) p.innerHTML = relayPanelHtml(s); }
+}
+function toggleRelayPanel(ev){
+  if (ev) ev.stopPropagation();
+  const panel = document.getElementById('relay-panel'); if (!panel) return;
+  relayPanelOpen = !relayPanelOpen;
+  if (relayPanelOpen){
+    if (notifPanelOpen) toggleNotifPanel();   // one panel at a time: they open in the same corner
+    _relayDotSig = ''; panel.style.display = ''; relayDotRender();
+  } else panel.style.display = 'none';
+}
+document.addEventListener('click', (e) => {
+  if (!relayPanelOpen) return;
+  if (e.target.closest && (e.target.closest('#relay-panel') || e.target.closest('#relay-dot'))) return;
+  relayPanelOpen = false; const p = document.getElementById('relay-panel'); if (p) p.style.display = 'none';
+});
+setInterval(() => { if (!document.hidden) relayDotRender(); }, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) relayDotRender(); });
 
 // ── Poller ──
 let alertTimer = null;
