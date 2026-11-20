@@ -5413,6 +5413,7 @@ function liveApplyDelta(c, frame){
       (u.inserts || []).forEach(raw => { const r = liveRow(tb, raw, c.relay); if (r){ if (bcCreOwns(c, tb, r)){ bcCreOnPosDelta(c, 'insert', r); return; } if (bcHerdOwns(c, tb, r)){ bcHerdOnLoc(c, 'insert', r); return; } slice.set(livePk(r), r); ins.push(r); } });
     });
     if (ins.length || del.length) evs.push({ table: tb, region: c.region, isDelta: true, rows: ins, deletes: del });
+    if (ins.length && (tb === 'stamina_state' || tb === 'storage_log_state')) relayRowsSeen(c, tb, ins);   // rows that say when they happened: how late is this relay?
   });
   if (evs.length) liveNotify(evs);
 }
@@ -6101,6 +6102,144 @@ async function liveParity(rg){
   });
   return out;
 }
+// ═══════════ HOW LATE IS A REGION? ═══════════
+// A relay can deliver every row and still be minutes behind the game (measured 2026-11-20: three regions of the
+// main relay 14–39 min late, the rest freezing 15–29 s at a time, its health page reading "live" throughout). Its
+// frames carry the relay's own clock and its health page knows nothing, so the only evidence is a GAME timestamp
+// inside a row:
+//   · free: a tracked player's stamina decrease and a new storage-log entry carry the moment they happened
+//     (relayRowsSeen) — while someone tracked is active the region is measured continuously at no cost;
+//   · a probe otherwise (relayProbe): the freshest stamina decrease among the players signed in to the region. With
+//     hundreds online somebody spent stamina within the last second, so its age is the relay's lateness.
+// Age is measured against this PC's clock, which may be off, and a quiet region (a dozen players) can go 20 s with
+// nobody spending stamina. So a clock-based reading is only ever a SUSPICION: what settles it is the same probe put
+// to the other relay at the same moment (relayCheck) — the difference between the two ages needs no clock and is
+// immune to quiet regions. The clock offset (relayClock) only makes the single-relay number worth showing.
+const RELAY_PROBE_SQL = 'SELECT stamina_state.* FROM stamina_state JOIN signed_in_player_state ON stamina_state.entity_id = signed_in_player_state.entity_id';
+const RELAY_LATE_MS = 8000;             // behind by this much = late
+const RELAY_LATE_QUIET_MS = 30000;      // …for a suspicion in a quiet region, where the freshest decrease is naturally older
+const RELAY_QUIET_ONLINE = 60;          // fewer signed-in players than this = quiet
+const RELAY_SLOW_PROBE_MS = 5000;       // a probe that takes this long to answer is itself a stall
+const RELAY_CHECK_USED_MS = 3 * 60 * 1000, RELAY_CHECK_IDLE_MS = 15 * 60 * 1000;   // how often a region is measured: one holding tracked rows / any other
+const RELAY_COMPARE_EVERY_MS = 10 * 60 * 1000;   // a region in use is put side by side with the other relay this often even with no suspicion — the clock offset can hide a lateness that was there from the start
+const relayFresh = {};    // region -> { relay, at, late (ms, null = could not tell), basis: 'compare'|'clock'|'row', took, online, comparedAt, hist: [{at, late, basis}] }
+const relayClock = { list: [], off: 0 };   // ages seen in the last half hour, from either relay; the smallest ≈ (this PC's clock − the game's) + the network delay
+const relayFake = {};     // "region:relay" -> ms of pretend lateness (debug: __live.fakeLate)
+const _relayChecking = {}, _relayStamTs = {};
+const relayBackupOn = () => { try { return localStorage.getItem('bc_relay_backup') !== '0'; } catch(e){ return true; } };
+function relayClockNote(age){
+  const now = Date.now(), l = relayClock.list;
+  l.push([now, age]);
+  while (l.length > 240 || (l.length && now - l[0][0] > 30 * 60 * 1000)) l.shift();
+  relayClock.off = l.reduce((m, x) => Math.min(m, x[1]), Infinity);
+}
+// Does this region hold anything the user is watching? Those are measured often; the rest only now and then.
+function relayRegionUsed(rg){
+  if (trackedClaims.some(c => claimRegion(c) === rg)) return true;
+  if (bcPlayersWanted(rg) || bcCreRegionWanted(rg)) return true;
+  return ['stamina_state', 'inventory_state', 'progressive_action_state', 'passive_craft_state', 'sell_order_state', 'buy_order_state', 'placeable_state', 'storage_log_state']
+    .some(t => { const m = liveCache[t] && liveCache[t][rg]; return !!(m && m.size); });
+}
+// One probe of one relay → { age (ms: how old its freshest stamina decrease is, by this PC's clock), took, online }.
+// A one-off on the region's own socket where the relay takes them (no new socket, no subscription); a scratch socket
+// otherwise — never a named set on the held socket, which would pour every online player's stamina into the cache.
+async function relayProbe(rg, relay){
+  const c = liveConns[rg], t0 = Date.now();
+  const held = c && !c.closed && c.relay === relay && c.ws && c.ws.readyState === 1 && RELAYS[relay].oneOff && !_relayOneOffOff[relay];
+  const got = held ? await liveAsk(c, [RELAY_PROBE_SQL], 25000) : await relayFetchOnce(rg, [RELAY_PROBE_SQL], 25000, relay);
+  const rows = got.stamina_state || [], at = Date.now();
+  let newest = 0;
+  rows.forEach(r => { const ts = +r.last_stamina_decrease_timestamp; if (ts > newest) newest = ts; });
+  if (!newest) throw new Error('probe found nobody signed in');
+  return { age: at - newest + (relayFake[rg + ':' + relay] || 0), took: at - t0, online: rows.length, at };
+}
+function relayNote(rg, r){
+  const prev = relayFresh[rg], hist = prev && prev.relay === r.relay ? prev.hist : [];
+  hist.push({ at: r.at, late: r.late, basis: r.basis });
+  while (hist.length > 12) hist.shift();
+  relayFresh[rg] = Object.assign({ comparedAt: prev && prev.relay === r.relay ? prev.comparedAt : 0, hist }, r);
+  _relayDotSig = '';   // repaint on the next pass
+}
+// Measure a region now. `compare` asks both relays whatever the first reading says.
+function relayCheck(rg, compare){
+  rg = +rg;
+  const c = liveConns[rg];
+  if (!c || c.closed || !c.snapshotTs || c.status !== 'live') return Promise.resolve(null);   // only a settled region is measured
+  if (_relayChecking[rg]) return _relayChecking[rg];
+  const p = _relayChecking[rg] = (async () => {
+    const relay = c.relay, other = relayOther(relay), mine = await relayProbe(rg, relay).catch(() => null);
+    if (liveConns[rg] !== c) return null;   // the region moved meanwhile: this reading is about a socket that is gone
+    if (!mine){ relayNote(rg, { relay, at: Date.now(), late: null, basis: 'clock' }); return relayFresh[rg]; }
+    relayClockNote(mine.age);
+    let late = Math.max(0, mine.age - relayClock.off), basis = 'clock', comparedAt = 0;
+    if (mine.took > RELAY_SLOW_PROBE_MS) late = Math.max(late, mine.took);
+    const suspicious = late >= (mine.online < RELAY_QUIET_ONLINE ? RELAY_LATE_QUIET_MS : RELAY_LATE_MS);
+    if ((suspicious || compare) && relayEligible(other, rg) && !relayBarred(rg, other)){
+      // Both relays, the same moment. Each age is taken at its own arrival, so a slow answer does not flatter itself.
+      const [a, b] = await Promise.all([relayProbe(rg, relay).catch(() => null), relayProbe(rg, other).catch(() => null)]);
+      if (liveConns[rg] !== c) return null;
+      if (a && b){
+        relayClockNote(a.age); relayClockNote(b.age);
+        late = Math.max(0, a.age - b.age, a.took > RELAY_SLOW_PROBE_MS ? a.took - b.took : 0);
+        basis = 'compare'; comparedAt = Date.now();
+        relayNote(rg, { relay, at: comparedAt, late, basis, took: a.took, online: a.online, comparedAt, otherLate: Math.max(0, b.age - a.age) });
+        return relayFresh[rg];
+      }
+    }
+    relayNote(rg, { relay, at: Date.now(), late, basis, took: mine.took, online: mine.online });
+    return relayFresh[rg];
+  })();
+  p.finally(() => { if (_relayChecking[rg] === p) delete _relayChecking[rg]; });
+  return p;
+}
+// Free evidence from rows the region's own socket just delivered (liveApplyDelta): a stamina decrease or a new log
+// entry says when it happened. A fresh one proves the relay is current and spares a probe; a stale one is a
+// suspicion, settled at once by a comparison.
+function relayRowsSeen(c, table, rows){
+  if (!rows.length || !relayBackupOn()) return;
+  const now = Date.now();
+  let age = null;
+  rows.forEach(r => {
+    let ts = null;
+    if (table === 'stamina_state'){
+      const id = String(r.entity_id), t = +r.last_stamina_decrease_timestamp, prev = _relayStamTs[id];
+      _relayStamTs[id] = t;
+      if (prev != null && t > prev) ts = t;   // the decrease time moved: a real decrease, not a regen tick repeating the old one
+    } else ts = +r.timestamp;
+    if (ts && (age == null || now - ts < age)) age = now - ts;
+  });
+  if (age == null) return;
+  age += relayFake[c.region + ':' + c.relay] || 0;
+  relayClockNote(age);
+  const late = Math.max(0, age - relayClock.off), f = relayFresh[c.region];
+  if (late >= RELAY_LATE_MS){ if (!f || now - f.at > 20000) relayCheck(c.region, true); return; }
+  relayNote(c.region, { relay: c.relay, at: now, late, basis: 'row', online: f && f.online, comparedAt: f && f.relay === c.relay ? f.comparedAt : 0 });
+}
+// The routine pass: at most ONE region measured per tick, whichever has waited longest for its turn (regions in use
+// first). A region in use is compared with the other relay on its first reading and every 10 minutes after.
+function relayMonitorTick(){
+  if (!liveOn() || !relayBackupOn()) return;
+  relayBackupHealth();
+  const now = Date.now();
+  const due = BC_REGIONS.map(rg => {
+    const c = liveConns[rg]; if (!c || c.status !== 'live' || !c.snapshotTs || _relayChecking[rg]) return null;
+    const f = relayFresh[rg], used = relayRegionUsed(rg), every = used ? RELAY_CHECK_USED_MS : RELAY_CHECK_IDLE_MS;
+    const stale = !f || f.relay !== c.relay;
+    const compare = used && (stale || !f.comparedAt || now - f.comparedAt >= RELAY_COMPARE_EVERY_MS);
+    if (!stale && !compare && now - f.at < every) return null;
+    return { rg, compare, rank: (used ? 0 : 1e12) + (stale ? 0 : f.at) };
+  }).filter(Boolean).sort((a, b) => a.rank - b.rank);
+  if (due.length) relayCheck(due[0].rg, due[0].compare);
+}
+setInterval(relayMonitorTick, 10000);
+// Every region, side by side with the other relay, one after another (the panel's "Check now").
+let _relayCheckAllBusy = false;
+async function relayCheckAll(){
+  if (_relayCheckAllBusy) return;
+  _relayCheckAllBusy = true; _relayDotSig = ''; relayDotRender();
+  try { await relayBackupHealth(true); for (const rg of BC_REGIONS){ await relayCheck(rg, true); relayDotRender(); } }
+  finally { _relayCheckAllBusy = false; _relayDotSig = ''; relayDotRender(); }
+}
 // Console/debug handle (not a public API): window.__live.status() etc.
 //   relays()            which relay each region is on
 //   use(region, relay)  move a region ('all' for every region) onto 'sync' or 'jita' by hand
@@ -6109,7 +6248,11 @@ window.__live = { cache: liveCache, rows: liveRows, status: liveStatus, complete
   relays: () => Object.fromEntries(BC_REGIONS.map(rg => [rg, relayOf(rg)])),
   use: (rg, relay) => (rg === 'all' ? BC_REGIONS.slice() : [rg]).map(r => liveSwap(r, relay, { force: true })),
   swap: (rg, relay) => liveSwap(rg, relay || relayOther(relayOf(+rg))),   // as the app would: on a deadline, back again if the other relay doesn't answer
-  parity: liveParity, backup: relayJita, bars: regionBar };
+  parity: liveParity, backup: relayJita, bars: regionBar,
+  //   fresh               the latest lateness reading per region;  check(region, true) measures one now, against both relays
+  //   fakeLate(region, relay, ms)   pretend that relay is ms behind for that region (0 clears it) — to watch the app react
+  fresh: relayFresh, clock: relayClock, check: relayCheck, probe: relayProbe,
+  fakeLate: (rg, relay, ms) => { if (ms) relayFake[rg + ':' + relay] = +ms; else delete relayFake[rg + ':' + relay]; return Object.assign({}, relayFake); } };
 // ═══════════════ end LIVE LAYER core ═══════════════
 
 // Fold the cache's building/nickname/claim rows into the persisted place maps. NO NETWORK — these
@@ -14835,9 +14978,11 @@ function relayRegionInfo(rg, now){
   const live = !!(c && c.snapshotTs && (c.status === 'live' || c.status === 'extending'));   // extending = live, plus an added question on its way
   if (live) delete _relayNotLiveSince[rg]; else if (!_relayNotLiveSince[rg]) _relayNotLiveSince[rg] = now;
   const downFor = live ? 0 : now - _relayNotLiveSince[rg];
-  const name = liveRegionName(rg);
-  return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup: relay !== RELAY_ORDER[0], live, downFor, status: c ? c.status : 'off' };
+  const name = liveRegionName(rg), f = relayFresh[rg], known = live && f && f.relay === relay && f.late != null;
+  return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup: relay !== RELAY_ORDER[0], live, downFor, status: c ? c.status : 'off',
+    late: known ? f.late : null, isLate: !!(known && f.late >= RELAY_LATE_MS), checkedAt: known ? f.at : 0, basis: known ? f.basis : '' };
 }
+const relayLateText = ms => { const s = ms / 1000; return s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; };
 function relayStatus(){
   const now = Date.now();
   if (!liveOn()) return { level: 'off', text: 'Live data is off: no player, claim or map layer is tracked.', regions: [] };
@@ -14848,24 +14993,31 @@ function relayStatus(){
   if (down.length) parts.push(`${list(down)} ${down.length > 1 ? 'have' : 'has'} no working relay${usingCache() ? '' : ' — the app is showing bitjita’s website data until ' + (down.length > 1 ? 'they come' : 'it comes') + ' back'}.`);
   if (waiting.length) parts.push(`${list(waiting)} ${waiting.length > 1 ? 'are' : 'is'} connecting.`);
   if (onBackup.length) parts.push(`${list(onBackup)} ${onBackup.length > 1 ? 'are' : 'is'} on the backup relay (${RELAYS[RELAY_ORDER[1]].label}).`);
+  const late = regions.filter(r => r.isLate);
+  if (late.length) parts.push(late.map(r => `${r.name} is ${relayLateText(r.late)} behind the game`).join(', ') + '.');
   if (!parts.length) parts.push(`All ${regions.length} regions are live on ${main}.`);
-  return { level: down.length ? 'bad' : (waiting.length || onBackup.length) ? 'warn' : 'ok', text: parts.join(' '), regions };
+  return { level: down.length ? 'bad' : (waiting.length || onBackup.length || late.length) ? 'warn' : 'ok', text: parts.join(' '), regions };
 }
 function relayRowState(r){
+  if (r.live && r.isLate) return { cls: 'warn', text: relayLateText(r.late) + ' late' };
   if (r.live) return { cls: r.backup ? 'warn' : 'ok', text: 'live' };
   if (r.downFor >= RELAY_DOWN_AFTER_MS) return { cls: 'bad', text: r.status === 'blocked' ? 'blocked' : 'no answer' };
   return { cls: 'warn', text: 'connecting…' };
 }
 function relayPanelHtml(s){
-  return `<div class="notif-hdr"><span><i class="ti ti-broadcast"></i> Live data</span></div>
+  const now = Date.now();
+  // What each row's reading rests on, for the hover text: when it was taken, and against what.
+  const tip = r => !r.live ? '' : !r.checkedAt ? 'Not measured yet'
+    : `Measured ${relayLateText(now - r.checkedAt)} ago ` + (r.basis === 'compare' ? 'against the other relay' : r.basis === 'row' ? 'from a row it just delivered' : 'against this device’s clock') + (r.late != null ? ` — ${r.late < 1000 ? 'under a second' : relayLateText(r.late)} behind` : '');
+  return `<div class="notif-hdr"><span><i class="ti ti-broadcast"></i> Live data</span>${s.regions.length ? `<button class="notif-clear" onclick="relayCheckAll()"${_relayCheckAllBusy ? ' disabled' : ''}>${_relayCheckAllBusy ? 'Checking…' : 'Check now'}</button>` : ''}</div>
     <div class="rd-sum">${escHtml(s.text)}</div>` +
-    s.regions.map(r => { const st = relayRowState(r); return `<div class="rd-row"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('');
+    s.regions.map(r => { const st = relayRowState(r); return `<div class="rd-row" title="${escHtml(tip(r))}"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('');
 }
 let _relayDotSig = '';
 function relayDotRender(){
   const btn = document.getElementById('relay-dot'); if (!btn) return;
   const s = relayStatus();
-  const sig = s.level + '|' + s.text + '|' + s.regions.map(r => r.relay + relayRowState(r).text).join(',');
+  const sig = s.level + '|' + s.text + '|' + _relayCheckAllBusy + '|' + s.regions.map(r => r.relay + relayRowState(r).text + r.checkedAt).join(',');
   if (sig === _relayDotSig) return;   // nothing to repaint: this runs on a timer
   _relayDotSig = sig;
   btn.className = 'relay-dot' + (s.level === 'ok' ? ' rd-ok' : s.level === 'warn' ? ' rd-warn' : s.level === 'bad' ? ' rd-bad' : '');
