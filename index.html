@@ -175,6 +175,7 @@ input[type="search"]::-webkit-search-cancel-button:hover{opacity:1;color:var(--t
 .psec-move{color:var(--text3);font-size:15px;cursor:pointer;padding:0 1px}
 .psec-move:hover{color:var(--text)}
 .psec-move.off{opacity:.25;pointer-events:none}
+#inv-sections>.player-section:only-child .psec-move{display:none}   /* Inventory windows always carry the arrows (a claim can join later) — a lone one has nowhere to go */
 /* Player banner vitals: HP + stamina bars (same size) and the food-buff countdown — see playerVitalsHtml.
    Bars are 380px and shrink together when the header runs short (a real width, not a flex-basis: the
    banner sizes itself from its contents, and a basis alone left the bars at their text's width). A player
@@ -2194,7 +2195,7 @@ function renderPlayerArea() {
 //     the stamp is all that changes.
 const WORLD_KEY = 'bc_world', WAITING_KEY = 'bc_players_waiting';
 // Stored picks that name entities of one world…
-const WORLD_PICK_KEYS = ['bc_claims_v1', 'bc_claims_collapsed_v1', 'bc_opencraft_claims', 'bc_opencraft_custom', 'bc_opencraft_home', 'bc_jsn_claims', 'bc_map_tracked_players_v1'];
+const WORLD_PICK_KEYS = ['bc_claims_v1', 'bc_claims_collapsed_v1', 'bc_claim_log_open_v1','bc_opencraft_claims', 'bc_opencraft_custom', 'bc_opencraft_home', 'bc_jsn_claims', 'bc_map_tracked_players_v1'];
 // …and caches keyed by them, which simply refill.
 const WORLD_CACHE_KEYS = ['bcRelayPlaces', 'bcLiveContainers2', 'bcOcPlaces', 'bcOcOwners', 'bc_region_names_v1', 'bcTaskRefs2', 'bcBuffDescs2', 'bcSkillDescs', 'bc_herd_params_v1', 'bc_herd_clocks_v2', 'bc_claim_log_v1', 'bc_house_log_v1'];
 let waitingPlayers = [];   // [{ username, oldId, ord }] — tracked names with no character in the relay's world yet
@@ -2415,11 +2416,10 @@ function activePlayers(){ return trackedPlayers.filter(p => !isPlayerPaused(p.en
 // (playersFor), and the Experience tab's windows can be resized (psecResize*).
 function playerSection(p, innerHtml, bodyId, tab){
   const id = String(p.entityId), collapsed = isPlayerCollapsed(id), paused = isPlayerPaused(id), muted = isPlayerAlertsMuted(id);
-  const order = tab ? playersFor(tab).map(x => String(x.entityId)) : [];
-  const idx = order.indexOf(id);
-  const arrows = order.length > 1
-    ? `<i class="ti ti-chevron-up psec-move psec-up${idx <= 0 ? ' off' : ''}" title="Move this window up" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',-1)"></i><i class="ti ti-chevron-down psec-move psec-dn${idx >= order.length - 1 ? ' off' : ''}" title="Move this window down" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',1)"></i>`
-    : '';
+  const order = tab ? sectionKeysFor(tab) : [];
+  // Inventory always carries the arrows: a claim tracked later joins the list without this window being redrawn
+  // (CSS hides them while the window is alone).
+  const arrows = (order.length > 1 || tab === 'inventory') ? psecArrowsHtml(tab, order.indexOf(id), order.length) : '';
   const resizable = tab === 'skills', sz = resizable ? psecSize : {};   // one size shared by every player's window
   const secStyle = resizable ? (sz.f ? `flex:0 0 auto;width:${psecWidthCss(sz.f)};max-width:100%` : `flex:1 1 100%;max-width:${PSEC_DEFAULT_MAX}px`) : 'margin-bottom:1.1rem';
   const bodyExtra = sz.h ? `;height:${sz.h}px;overflow:auto` : '';
@@ -2601,6 +2601,17 @@ function playersFor(tab){
     .map((p, i) => ({ p, k: pos.has(String(p.entityId)) ? pos.get(String(p.entityId)) : saved.length + i }))
     .sort((a, b) => a.k - b.k).map(x => x.p);
 }
+// Every window of a tab, in order, by key (a window's data-pid). The Inventory tab's list also holds the tracked
+// claims, as 'c' + claim id: they share the players' saved order, and sit below the players until moved.
+function sectionKeysFor(tab){
+  const keys = trackedPlayers.map(p => String(p.entityId));
+  if (tab === 'inventory') trackedClaims.forEach(c => keys.push('c' + c.entityId));
+  const saved = (playerOrder[tab] || []).map(String), pos = new Map(saved.map((id, i) => [id, i]));
+  return keys.map((k, i) => ({ k, at: pos.has(k) ? pos.get(k) : saved.length + i })).sort((a, b) => a.at - b.at).map(x => x.k);
+}
+function psecArrowsHtml(tab, idx, n){
+  return `<i class="ti ti-chevron-up psec-move psec-up${idx <= 0 ? ' off' : ''}" title="Move this window up" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',-1)"></i><i class="ti ti-chevron-down psec-move psec-dn${idx >= n - 1 ? ' off' : ''}" title="Move this window down" onclick="event.stopPropagation();movePlayerSection(this,'${tab}',1)"></i>`;
+}
 // Move a window one place up (dir -1) or down (+1). The window itself moves — no re-render, so nothing
 // reloads or flashes — and the tab's new order is read back off the page and saved.
 function movePlayerSection(btn, tab, dir){
@@ -2608,12 +2619,16 @@ function movePlayerSection(btn, tab, dir){
   const sibs = [...host.children].filter(c => c.classList.contains('player-section'));
   const other = sibs[sibs.indexOf(sec) + dir]; if (!other) return;
   if (dir < 0) host.insertBefore(sec, other); else host.insertBefore(other, sec);
-  const now = [...host.children].filter(c => c.classList.contains('player-section'));
-  playerOrder[tab] = now.map(s => s.dataset.pid);
+  playerOrder[tab] = [...host.children].filter(c => c.classList.contains('player-section')).map(s => s.dataset.pid);
   safeSetItem(PLAYER_ORDER_KEY, JSON.stringify(playerOrder));
-  now.forEach((s, i) => {
+  psecArrowsSync(host);
+}
+// The first window can't go up and the last can't go down.
+function psecArrowsSync(host){
+  const secs = [...host.children].filter(c => c.classList.contains('player-section'));
+  secs.forEach((s, i) => {
     const up = s.querySelector('.player-section-hdr .psec-up'), dn = s.querySelector('.player-section-hdr .psec-dn');
-    if (up) up.classList.toggle('off', i === 0); if (dn) dn.classList.toggle('off', i === now.length - 1);
+    if (up) up.classList.toggle('off', i === 0); if (dn) dn.classList.toggle('off', i === secs.length - 1);
   });
 }
 // ── Experience tab: resizable player windows — ONE size shared by every player's window ──
@@ -3852,8 +3867,7 @@ async function renderInventoryTab(silent) {
         </div>
         <div style="position:relative"><i class="ti ti-search" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px"></i><input type="search" id="inv-search-input" value="${escHtml(invSearch)}" placeholder="Search items…" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px 6px 30px;font-size:13px;outline:none;width:200px"></div>
       </div>
-      <div id="inv-sections">${playersFor('inventory').map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId, 'inventory')).join('')}</div>
-      <div id="inv-claims"></div>`;
+      <div id="inv-sections">${playersFor('inventory').map(p => playerSection(p, loading(), 'psec-inv-' + p.entityId, 'inventory')).join('')}</div>`;   // the tracked claims' windows join this list (fillClaimSections)
     const inp = document.getElementById('inv-search-input');
     inp.addEventListener('input', () => { invSearch = inp.value; if (!invSearch.trim()) invLocHidden = {}; renderAllInvBodies(); });
     updateLiveBtns();
@@ -6121,10 +6135,11 @@ function claimHttpFetch(c){
   fetch(`${RELAY_HTTP}/claim/${cid}/inventory`).then(r => r.ok ? r.json() : null).then(d => { if (d && d.dimensions) h.d = d; }).catch(() => {})
     .finally(() => { h.busy = false; fillClaimInv(cid); });
 }
-// ── The claim sections (under the players in the Inventory tab) ──
+// ── The claim sections (among the players' windows in the Inventory tab: below them until moved) ──
 function claimSectionEl(c){
   const cid = String(c.entityId), shut = claimCollapsed.has(cid), el = document.createElement('div');
-  el.className = 'player-section psec claim-section'; el.dataset.plKey = cid;
+  const order = sectionKeysFor('inventory');
+  el.className = 'player-section psec claim-section'; el.dataset.pid = 'c' + cid;   // its key in the tab's window order
   el.style.cssText = 'margin-bottom:1.1rem;position:relative;border:1px solid var(--border);border-radius:8px;overflow:hidden';
   el.innerHTML = `<div class="player-section-hdr" onclick="toggleClaimCollapse('${escHtml(cid)}', this)" style="display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem;background:var(--bg3);cursor:pointer;user-select:none">
       <i class="ti ti-chevron-${shut ? 'right' : 'down'} psec-chev" style="color:var(--text3);font-size:14px;flex-shrink:0"></i>
@@ -6132,6 +6147,7 @@ function claimSectionEl(c){
       <span style="font-weight:600;color:var(--text);white-space:nowrap">${escHtml(c.name || 'Claim')}</span>
       <span class="csec-meta" id="csec-meta-${escHtml(cid)}"></span>
       <span style="flex:1"></span>
+      ${psecArrowsHtml('inventory', order.indexOf('c' + cid), order.length)}
       <i class="ti ti-x" title="Stop tracking this claim" onclick="event.stopPropagation();untrackClaim('${escHtml(cid)}')" style="color:var(--text3);font-size:15px;cursor:pointer"></i>
     </div>
     <div id="csec-body-${escHtml(cid)}" style="display:${shut ? 'none' : ''};padding:.65rem .75rem"><div id="csec-inv-${escHtml(cid)}">${loading()}</div><div id="csec-log-${escHtml(cid)}" style="margin-top:.5rem"></div></div>`;
@@ -6145,10 +6161,20 @@ function toggleClaimCollapse(cid, hdr){
   const body = document.getElementById('csec-body-' + cid); if (body) body.style.display = shut ? 'none' : '';
   const chev = hdr && hdr.querySelector('.psec-chev'); if (chev) chev.className = `ti ti-chevron-${shut ? 'right' : 'down'} psec-chev`;
 }
-// Keep one section per tracked claim (kept, never rebuilt), then fill each one's storage and activity.
+// Keep one section per tracked claim (kept, never rebuilt) in the same list as the players' windows, then fill each
+// one's storage and activity. Only when a claim's window is added or dropped are the windows put back in the tab's
+// saved order (moves only — a new claim lands under everything else) and the move arrows brought up to date.
 function fillClaimSections(){
-  const host = document.getElementById('inv-claims'); if (!host) return;
-  plSync(host, trackedClaims.map(c => ({ key: String(c.entityId), c })), it => claimSectionEl(it.c), () => {});
+  const host = document.getElementById('inv-sections'); if (!host) return;
+  const old = new Map([...host.children].filter(el => el.classList.contains('claim-section')).map(el => [el.dataset.pid, el]));
+  let changed = false;
+  trackedClaims.forEach(c => { if (!old.delete('c' + c.entityId)){ host.appendChild(claimSectionEl(c)); changed = true; } });
+  old.forEach(el => { el.remove(); changed = true; });
+  if (changed){
+    const at = new Map([...host.children].map(el => [el.dataset.pid, el]));
+    sectionKeysFor('inventory').map(k => at.get(k)).filter(Boolean).forEach((el, i) => { if (host.children[i] !== el) host.insertBefore(el, host.children[i] || null); });
+    psecArrowsSync(host);
+  }
   trackedClaims.forEach(c => { fillClaimInv(c.entityId); claimLogRender(c.entityId); });
 }
 const claimWaitT = {};
@@ -6228,7 +6254,7 @@ function claimsChanged(){
   liveStart();   // the query set changed → one redial (stops the layer when nothing at all is tracked)
   claimPickRender();
   const btn = document.getElementById('claim-pick-btn'); if (btn) btn.innerHTML = claimBtnInner();
-  if (document.getElementById('inv-claims') && (trackedPlayers.length || trackedClaims.length)) fillClaimSections();
+  if (document.getElementById('inv-sections') && (trackedPlayers.length || trackedClaims.length)) fillClaimSections();
   else if (currentTab === 'inventory') renderInventoryTab();
 }
 function trackClaim(c){
@@ -6299,7 +6325,16 @@ onLiveChange(evs => { if (evs.some(e => e.table === 'storage_log_state' || (e.ta
 // The foot of every activity list (this one and each house's): Show more pages on by 50, up to the CLAIM_LOG_KEEP
 // kept; Show less goes straight back to the newest CLOG_PAGE, no reload needed. Dropping a long tail can leave the
 // list's own header above the screen — you'd be looking at whatever sat below the list — so it scrolls back to it.
-const CLOG_PAGE = 25;
+// The claim's list is collapsed until opened, the same as each house's (it started open until 2026-11-19). Its header
+// says how many today and when the latest was; a list you open stays open (per claim, remembered).
+const CLOG_PAGE = 25, CLAIM_LOG_OPEN_KEY = 'bc_claim_log_open_v1';
+let claimLogOpen = (() => { try { return new Set((JSON.parse(localStorage.getItem(CLAIM_LOG_OPEN_KEY) || '[]') || []).map(String)); } catch(e){ return new Set(); } })();
+// An activity header's summary (claim and house): "12 today · latest 5m ago" — rows newest first, at least one. The
+// "+" marks a count that stopped at the newest CLAIM_LOG_KEEP kept. The time keeps itself current (timer below).
+function clogSummaryHtml(rows){
+  const mid = new Date().setHours(0, 0, 0, 0), today = rows.filter(x => x.e.ts >= mid).length, newest = rows[0].e.ts;
+  return `${today ? `${today}${today === rows.length && rows.length >= CLAIM_LOG_KEEP ? '+' : ''} today · ` : ''}latest <span class="hlog-latest" data-ts="${newest}">${clogTime(newest)}</span>`;
+}
 function clogFootHtml(n, limit, more, less){
   return (n > limit ? `<button class="clog-more" onclick="${more}">Show more</button>` : '') +
     (limit > CLOG_PAGE && n > CLOG_PAGE ? `<button class="clog-more" onclick="${less}">Show less</button>` : '');
@@ -6309,22 +6344,34 @@ const claimLogLimit = {};
 function claimLogRender(cid){
   cid = String(cid);
   const wrap = document.getElementById('csec-log-' + cid); if (!wrap) return;
-  const secKey = 'c' + cid + '|log';
+  const open = claimLogOpen.has(cid);
   if (!wrap.firstElementChild){
-    const shut = !!invSectionCollapsed[secKey];
-    wrap.innerHTML = `<div class="inv-group"><div class="inv-group-header" onclick="toggleInvSection('${escHtml(secKey)}')"><span class="inv-group-name"><i class="ti ti-history"></i>Activity</span><span class="inv-group-meta clog-meta" style="font-size:11px;color:var(--text3)"></span>` +
-      `<i class="ti ti-chevron-down" id="inv-sec-chev-${escHtml(secKey)}" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${shut ? 'transform:rotate(-90deg)' : ''}"></i></div>` +
-      `<div id="inv-sec-body-${escHtml(secKey)}"${shut ? ' style="display:none"' : ''}><div class="clog-list"></div><div class="clog-foot"></div></div></div>`;
+    wrap.innerHTML = `<div class="inv-group"><div class="inv-group-header" onclick="toggleClaimLog('${escHtml(cid)}')"><span class="inv-group-name"><i class="ti ti-history"></i>Activity</span><span class="inv-group-meta clog-meta"></span>` +
+      `<i class="ti ti-chevron-down clog-chev" style="font-size:13px;color:var(--text3);flex-shrink:0;transition:transform .2s;${open ? '' : 'transform:rotate(-90deg)'}"></i></div>` +
+      `<div class="clog-body"${open ? '' : ' style="display:none"'}><div class="clog-list"></div><div class="clog-foot"></div></div></div>`;
   }
   const L = claimLog[cid], names = claimNames[cid] || new Map(), q = (invSearch || '').trim().toLowerCase();
   let rows = L ? [...L.ev.values()].sort((a, b) => b.id - a.id).map(e => ({ e, item: claimLogItem(e), where: names.get(e.b) || 'storage' })) : [];
   if (q){ const words = searchWords(q); rows = rows.filter(x => matchesWords(words, x.item, x.e.who)); }   // items and players — not container names ("Potions and Consumables" would match every scroll in it)
+  const meta = wrap.querySelector('.clog-meta');
+  if (q) meta.textContent = `${rows.length} matching`;
+  else if (!rows.length) meta.textContent = '';
+  else meta.innerHTML = clogSummaryHtml(rows);
+  if (!open) return;   // collapsed: the header is all there is
   const limit = claimLogLimit[cid] || CLOG_PAGE;
-  wrap.querySelector('.clog-meta').textContent = !rows.length ? '' : q ? `${rows.length} matching` : rows.length > limit ? `latest ${limit} of ${rows.length}` : `${rows.length}`;
   plSync(wrap.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
   wrap.querySelector('.clog-foot').innerHTML = !rows.length
     ? `<div class="clog-empty">${q ? 'No activity matches' : 'No deposits or withdrawals yet — new ones show up here as they happen'}</div>`
     : clogFootHtml(rows.length, limit, `claimLogMore('${escHtml(cid)}')`, `claimLogLess('${escHtml(cid)}')`);
+}
+function toggleClaimLog(cid){
+  cid = String(cid);
+  if (claimLogOpen.has(cid)) claimLogOpen.delete(cid); else claimLogOpen.add(cid);
+  safeSetItem(CLAIM_LOG_OPEN_KEY, JSON.stringify([...claimLogOpen]));
+  const wrap = document.getElementById('csec-log-' + cid), open = claimLogOpen.has(cid); if (!wrap || !wrap.firstElementChild) return;
+  wrap.querySelector('.clog-body').style.display = open ? '' : 'none';
+  wrap.querySelector('.clog-chev').style.transform = open ? '' : 'rotate(-90deg)';
+  claimLogRender(cid);
 }
 function claimLogMore(cid){ claimLogLimit[cid] = Math.min(CLAIM_LOG_KEEP, (claimLogLimit[cid] || CLOG_PAGE) + 50); claimLogRender(cid); }
 function claimLogLess(cid){
@@ -6469,10 +6516,7 @@ function houseLogRender(pid){
   const meta = el.querySelector('.hlog-meta');
   if (q) meta.textContent = `${rows.length} matching`;
   else if (!all) meta.textContent = `none in ${HOUSE_LOG_DAYS} days`;
-  else {
-    const mid = new Date().setHours(0, 0, 0, 0), today = rows.filter(x => x.e.ts >= mid).length, newest = rows[0].e.ts;
-    meta.innerHTML = `${today ? `${today}${today === all && all >= CLAIM_LOG_KEEP ? '+' : ''} today · ` : ''}latest <span class="hlog-latest" data-ts="${newest}">${clogTime(newest)}</span>`;
-  }
+  else meta.innerHTML = clogSummaryHtml(rows);
   if (!houseLogOpen.has(pid)) return;   // collapsed: the header is all there is
   const limit = houseLogLimit[pid] || CLOG_PAGE;
   plSync(el.querySelector('.clog-list'), rows.slice(0, limit).map(x => ({ key: String(x.e.id), ...x })), claimLogRowEl, claimLogRowPatch);
