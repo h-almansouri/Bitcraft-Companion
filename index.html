@@ -5078,11 +5078,20 @@ const LIVE_COLS = {
   dimension_description_state: ['entity_id','dimension_network_entity_id','collapse_timestamp','interior_instance_id','dimension_position_large_x','dimension_position_large_z','dimension_size_large_x','dimension_size_large_z','dimension_id','dimension_type'],
   location_state: ['entity_id','chunk_index','x','z','dimension'],
   // order = server struct field order (BitCraftPublic components.rs MobileEntityState)
-  mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','_pad1','_pad2','_pad3'],
+  mobile_entity_state: ['entity_id','chunk_index','timestamp','location_x','location_z','destination_x','destination_z','dimension','is_walking','pad_1','pad_2','pad_3'],
   enemy_mob_monitor_state: ['entity_id','enemy_type','herd_entity_id','herd_location'],   // creature roster (bcCre*): id → type, herd
   herd_state: ['entity_id','enemy_ai_params_desc_id','current_population','ignore_eagerness','population_variance','crumb_trail_entity_id'],   // herd respawn timers (bcHerd*)
   placeable_state: ['entity_id','owner_entity_id','placeable_id','direction_index'],   // Crafts → Placeables (from /schema 2026-10-11)
   placeable_growth_timer: ['scheduled_id','scheduled_at','entity_id','growth_recipe_id'],   // scheduled_at = ScheduleAt sum, [1, Timestamp]
+  // Lookup tables (relayAsk). The main relay answers these with named rows, so it never needed their order; a relay
+  // that sends bare arrays for snapshots too (bitjita's) does. From /schema, 2026-11-20.
+  skill_desc: ['id','skill_type','name','description','icon_asset_name','title','skill_category','max_level'],
+  traveler_task_desc: ['id','level_requirement','required_items','rewarded_items','rewarded_experience','description'],
+  npc_desc: ['npc_type','name','population','speed','min_time_at_ruin','max_time_at_ruin','prefab_address','icon_address','force_market_mode','task_skill_check'],
+  claim_member_state: ['entity_id','claim_entity_id','player_entity_id','user_name','inventory_permission','build_permission','officer_permission','co_owner_permission'],
+  claim_local_state: ['entity_id','supplies','building_maintenance','num_tiles','num_tile_neighbors','location','treasury','xp_gained_since_last_coin_minting','supplies_purchase_threshold','supplies_purchase_price','building_description_id'],
+  dimension_network_state: ['entity_id','building_id','collapse_respawn_timestamp','rent_entity_id','claim_entity_id','entrance_dimension_id','is_collapsed'],
+  enemy_ai_params_desc: ['id','enemy_type','biome','avg_herd_size','var_herd_size','herds_per_chunk','roaming_distance','spawn_eagerness','time_of_day_start','time_of_day_end','spawn_frequency_minutes'],
 };
 // Timestamp columns, normalised to plain ms in liveRow. Their wire shape differs BY FRAME TYPE —
 // {"__timestamp_micros_since_unix_epoch__":N} in snapshots, bare [N] in deltas — so one shape here.
@@ -5092,7 +5101,11 @@ const LIVE_TS = {
   stamina_state: ['last_stamina_decrease_timestamp'], storage_log_state: ['timestamp'],
 };
 const liveCache = {};      // table -> region -> Map(pk -> row)   Sum-typed fields stay raw ([variantIdx, payload]).
-const liveColOrder = {};   // table -> key order captured from a snapshot row (authoritative; overrides LIVE_COLS)
+// relay -> table -> key order captured from one of THAT relay's named snapshot rows (authoritative for its bare-array
+// rows; overrides the lists below). Per relay: an order learned from one relay's named rows must never name another
+// relay's arrays — if the two ever disagreed on a table of the same width, every column would be mislabelled in silence.
+const liveColOrder = { sync: {} };
+const liveSchemaCols = {};   // table -> column names read from a relay's published schema (liveColsHeal); beats LIVE_COLS once loaded
 const liveConns = {};      // region -> { ws, key, tables, status, backoff, snapshotTs, timer, closed }
 let liveRosterKey = '';    // roster fingerprint the current subscriptions cover
 const _liveColWarned = {};
@@ -5104,22 +5117,64 @@ const liveMicrosToMs = v => {
 };
 // One row string → named object. Every insert AND delete goes through here — deletes must decode too,
 // or a completed craft's row could never be removed from the cache (§2.3.2).
-function liveRow(table, raw){
+function liveRow(table, raw, relay){
+  relay = relay || 'sync';
+  const seen = liveColOrder[relay] || (liveColOrder[relay] = {});
   let v;
   try { v = JSON.parse(raw.replace(/([\[,:])\s*(-?\d{16,})/g, '$1"$2"')); }
   catch(e){ try { v = JSON.parse(raw); } catch(e2){ return null; } }   // quoting broke it (16+ digits inside a string) → ids may round but the row survives
   if (Array.isArray(v)){
-    const cols = liveColOrder[table] || LIVE_COLS[table];
+    const cols = seen[table] || liveSchemaCols[table] || LIVE_COLS[table];
     if (!cols || cols.length !== v.length){
-      if (!_liveColWarned[table]){ _liveColWarned[table] = true; console.warn('[live] cannot name delta for', table, '— cols', cols ? cols.length : 'unknown', 'vs', v.length); }
+      if (!_liveColWarned[table]){ _liveColWarned[table] = true; console.warn('[live] cannot name row for', table, '— cols', cols ? cols.length : 'unknown', 'vs', v.length, '— reading the schema'); }
+      liveColsHeal(relay, table);
       return null;
     }
     const o = {}; cols.forEach((c, i) => o[c] = v[i]); v = o;
-  } else if (!liveColOrder[table]){
-    liveColOrder[table] = Object.keys(v);
+  } else if (!seen[table]){
+    seen[table] = Object.keys(v);
   }
   (LIVE_TS[table] || []).forEach(c => { if (c in v) v[c] = liveMicrosToMs(v[c]); });
   return v;
+}
+// ── A bare-array row the lists above cannot name: read the relay's own schema ──
+// The lists are a copy of the game's schema, so a patch that adds a column to a table makes every bare-array row of it
+// the wrong width — and a row that can't be named is dropped, which empties the table with nothing on screen to say
+// so. The relays publish the schema they mirror (809 KB, readable from a browser), so on the first such row it is read
+// once and every public table's column order taken from it. Rows already dropped are gone, so the held sockets are
+// then redialled, once, to fetch their snapshots again under the new names. Never more than one read per 10 minutes.
+let _liveHealAt = 0, _liveHealBusy = false;
+const _liveHealTables = new Set();
+function liveColsHeal(relay, table){
+  _liveHealTables.add(table);
+  if (_liveHealBusy || Date.now() - _liveHealAt < 10 * 60 * 1000) return;
+  _liveHealBusy = true; _liveHealAt = Date.now();
+  (async () => {
+    try {
+      const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 20000);
+      let j; try { j = await (await fetch(relaySchemaUrl(relay), { signal: ctrl.signal })).json(); } finally { clearTimeout(tm); }
+      const types = (j.typespace && j.typespace.types) || [];
+      let changed = false;
+      (j.tables || []).forEach(t => {
+        const p = types[t.product_type_ref], els = p && p.Product && p.Product.elements;
+        if (!els || !(t.table_access && t.table_access.Public)) return;
+        const cols = els.map(e => (e.name && e.name.some) || '');
+        const had = liveSchemaCols[t.name] || LIVE_COLS[t.name];
+        if (_liveHealTables.has(t.name) && (!had || had.join() !== cols.join())) changed = true;
+        liveSchemaCols[t.name] = cols;
+      });
+      _liveHealTables.forEach(t => { delete _liveColWarned[t]; });
+      _liveHealTables.clear();
+      console.warn(`[live] column names re-read from the ${relay} relay's schema —`, changed ? 'they had changed: reconnecting to fetch the rows that were dropped' : 'no change for the rows that could not be named');
+      if (changed && liveOn()){ liveStopAll(); liveStart(); }
+    } catch(e){ console.warn('[live] could not read the relay schema:', e && e.message); }
+    finally { _liveHealBusy = false; }
+  })();
+}
+// The schema a relay publishes for one region's database (every region's is the same game schema).
+function relaySchemaUrl(relay){
+  const rg = BC_REGIONS[0], s = relayDb[rg];
+  return `https://relay.bitcraftsync.app:${s ? s.port : 3000 + rg}/v1/database/${s ? s.db : relayWorld + '-' + rg}/schema?version=9`;
 }
 const livePk = r => String(r.entity_id != null ? r.entity_id : (r.id != null ? r.id : r.scheduled_id));
 // ── Change notification: coalesced per ~40ms burst (one game action lands as several table updates).
@@ -5785,8 +5840,10 @@ document.addEventListener('visibilitychange', () => {
 // The explorer's own model: open, ONE subscribe, take the snapshot, hang up. Nothing accumulates
 // because the socket dies with its subscription. Used only for by-id/name resolution that can't be a
 // held subscription (the id set is dynamic and the results are persisted forever); everything else
-// reads the cache. Rows decode through liveRow — snapshots are NAMED objects, so no column-order
-// dependency. Returns { tableName: [rows] }; throws on error/timeout so callers fall back.
+// reads the cache. Rows decode through liveRow — the main relay's snapshots are NAMED objects, so no
+// column-order dependency there; a relay that sends bare arrays is named from LIVE_COLS, which is why
+// every table asked for this way has a list. Returns { tableName: [rows] }; throws on error/timeout so
+// callers fall back.
 function relayFetchOnce(region, sqls, timeoutMs = 9000){
   return relayReady().then(relayDialSlot).then(() => new Promise((resolve, reject) => {
     let ws, opened = false;
@@ -7596,8 +7653,13 @@ function ocActionsPerItem(recipeId){
   const rec = ((craftingData && craftingData.recipesById) || {})[recipeId], ro = gameItemDefs && gameItemDefs.recipeOuts && gameItemDefs.recipeOuts[recipeId];
   return (rec && rec.actionsRequired) || (ro && ro[2]) || 0;
 }
-// claim_local_state.location is an Option on the wire: [0, {x, z, dimension}] when the claim has one.
-function ocLocOf(v){ const o = Array.isArray(v) ? (v[0] === 0 ? v[1] : null) : (v && v.some) || null; return o && o.x != null ? [+o.x, +o.z] : null; }
+// claim_local_state.location is an Option on the wire: [0, {x, z, dimension}] when the claim has one — or [0, [x, z,
+// dimension]] from a relay that sends rows as bare arrays all the way down.
+function ocLocOf(v){
+  const o = Array.isArray(v) ? (v[0] === 0 ? v[1] : null) : (v && v.some) || null;
+  if (Array.isArray(o)) return o.length >= 2 && o[0] != null ? [+o[0], +o[1]] : null;
+  return o && o.x != null ? [+o.x, +o.z] : null;
+}
 // fn over every job, OC_SCRATCH_MAX at a time. One result per job, an Error where it failed — one silent mirror never
 // sinks the rest.
 async function ocRelayEach(jobs, fn){
