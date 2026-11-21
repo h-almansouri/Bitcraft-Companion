@@ -5082,10 +5082,14 @@ const relayOther = relay => RELAY_ORDER.find(r => r !== relay);
 const relayWsUrl = (region, relay) => RELAYS[relay || relayOf(region)].wsUrl(region);
 // bitjita's relay: which regions it holds, from its own /health (per region: connected, seconds since its last
 // update). Optional — nothing waits for it, and a region it does not vouch for is simply never moved there.
-const relayJita = { at: 0, ok: false, regions: {}, busy: null };
+// One failed read means little — the page answered 502 once in a dozen tries while its sockets were fine (measured
+// 2026-11-20) — so the last good answer stands for RELAY_HEALTH_KEEP_MS and a failed read is repeated after a few
+// seconds instead of waiting out the usual minute.
+const RELAY_HEALTH_EVERY_MS = 60000, RELAY_HEALTH_RETRY_MS = 5000, RELAY_HEALTH_KEEP_MS = 5 * 60 * 1000;
+const relayJita = { at: 0, ok: false, goodAt: 0, regions: {}, busy: null };
 function relayBackupHealth(force){
   if (relayJita.busy) return relayJita.busy;
-  if (!force && Date.now() - relayJita.at < 30000) return Promise.resolve(relayJita);
+  if (!force && Date.now() - relayJita.at < (relayJita.ok ? RELAY_HEALTH_EVERY_MS : RELAY_HEALTH_RETRY_MS)) return Promise.resolve(relayJita);
   relayJita.at = Date.now();
   const p = relayJita.busy = (async () => {
     try {
@@ -5096,18 +5100,19 @@ function relayBackupHealth(force){
         const m = /^(.+?)-(\d+)$/.exec(k), v = j.modules[k];
         if (m && m[1] === relayWorld) regions[+m[2]] = { connected: !!(v && v.connected), age: v && typeof v.last_update_age_seconds === 'number' ? v.last_update_age_seconds : null };   // another world's databases don't count
       });
-      relayJita.regions = regions; relayJita.ok = true;
-    } catch(e){ relayJita.ok = false; }
+      relayJita.regions = regions; relayJita.ok = true; relayJita.goodAt = Date.now();
+    } catch(e){ relayJita.ok = false; }   // regions and goodAt stay: the last good answer still counts for a while (relayEligible)
     return relayJita;
   })();
   p.finally(() => { if (relayJita.busy === p) relayJita.busy = null; });
   return p;
 }
-// May a region be moved onto this relay at all? The main relay's own sockets answer that for it.
+// May a region be moved onto this relay at all? The main relay's own sockets answer that for it; the backup has to
+// have vouched for the region recently.
 function relayEligible(relay, rg){
   if (relay !== 'jita') return true;
   const r = relayJita.regions[rg];
-  return relayJita.ok && !!(r && r.connected);
+  return !!(r && r.connected) && Date.now() - relayJita.goodAt < RELAY_HEALTH_KEEP_MS;
 }
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
@@ -6141,7 +6146,21 @@ const _relayRefused = {};   // relay -> region -> ms of its last refused socket
 function liveDownMove(c, why){
   if (c.closed || c.swap || liveConns[c.region] !== c) return false;
   const relay = c.relay || relayOf(c.region), other = relayOther(relay);
-  if (!relayBackupOn() || !other || !relayEligible(other, c.region) || relayBarred(c.region, other)) return false;
+  if (!relayBackupOn() || !other || relayBarred(c.region, other)) return false;
+  if (!relayEligible(other, c.region)){
+    // Not vouched for — or just not asked lately (its health page failed, or was never read). Ask now, once, and
+    // decide again when it answers, provided this socket is still the region's and still has nothing to show.
+    if (!c.downAsked && Date.now() - relayJita.goodAt >= RELAY_HEALTH_KEEP_MS){
+      c.downAsked = true;
+      const ask = left => relayBackupHealth(true).then(() => {
+        if (c.closed || liveConns[c.region] !== c || c.status === 'live' || c.status === 'extending') return;   // answered meanwhile, or no longer the region's socket
+        if (relayEligible(other, c.region)) liveDownMove(c, why);
+        else if (left > 0 && !relayJita.ok) setTimeout(() => ask(left - 1), RELAY_HEALTH_RETRY_MS);            // the health page itself failed: twice more, a few seconds apart
+      });
+      ask(2);
+    }
+    return false;
+  }
   console.warn(`[live] r${c.region}: ${RELAYS[relay].label} ${why} — moving to ${RELAYS[other].label}`);
   relayMoveNote(c.region, relay, other, 'it ' + why);
   return liveSwap(c.region, other);
