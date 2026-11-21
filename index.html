@@ -100,6 +100,8 @@ aside{width:var(--sidebar);background:var(--bg2);border-right:1px solid var(--bo
 .rd-relay{color:var(--text3);white-space:nowrap}
 .rd-state{white-space:nowrap;min-width:5.5em;text-align:right;color:var(--text2)}
 .rd-state.warn{color:var(--amber-light)}.rd-state.bad{color:var(--red-light)}
+.rd-opt{display:flex;align-items:center;gap:.5rem;padding:.6rem .8rem;font-size:12px;color:var(--text2);border-top:1px solid var(--border);cursor:pointer}
+.rd-opt input{accent-color:var(--teal);margin:0;flex-shrink:0}
 /* alert settings modal */
 .al-modal{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:5vh 1rem;overflow-y:auto}
 .al-modal-box{background:var(--bg);border:1px solid var(--border2);border-radius:12px;width:100%;max-width:820px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
@@ -4967,7 +4969,17 @@ function loadRelayRegions(){
       if (world !== relayWorld){ relayWorld = world; out.world = true; Object.keys(relayDb).forEach(k => delete relayDb[k]); }
       list.forEach(s => { const prev = relayDb[s.region]; if (!prev || prev.db !== s.db || prev.port !== s.port){ relayDb[s.region] = { db: s.db, port: s.port }; if (prev) out.names = true; } });
       const live = list.filter(s => s.live).map(s => s.region);
-      const want = (live.length ? live : list.map(s => s.region)).sort((a, b) => a - b);   // nothing reported live: keep trying them all
+      // A region the relay lists but is not mirroring right now used to be left out — the app simply ran without it.
+      // With a backup relay it need not be: if that relay vouches for the region it is kept, and starts there. Only
+      // this case waits for the backup's own health page, and only briefly.
+      let rescued = [];
+      const idle = list.filter(s => !s.live).map(s => s.region);
+      if (live.length && idle.length && relayBackupOn()){
+        await Promise.race([relayBackupHealth(), new Promise(res => setTimeout(res, 2000))]);
+        rescued = idle.filter(rg => relayEligible(RELAY_ORDER[1], rg));
+        rescued.forEach(rg => { if (!liveConns[rg] && relayOf(rg) === RELAY_ORDER[0]){ regionRelay[rg] = RELAY_ORDER[1]; relayMoveNote(rg, RELAY_ORDER[0], RELAY_ORDER[1], 'it is not mirroring this region right now'); } });
+      }
+      const want = (live.length ? [...live, ...rescued] : list.map(s => s.region)).sort((a, b) => a - b);   // nothing reported live: keep trying them all
       const old = BC_REGIONS;
       out.added = want.filter(r => !old.includes(r));
       if (firstRead || out.world){ out.removed = old.filter(r => !want.includes(r)); BC_REGIONS = want; }
@@ -5707,7 +5719,7 @@ function liveStopAll(){
 function liveDrop(rg){
   const c = liveConns[rg];
   if (!c) return;
-  c.closed = true; clearTimeout(c.timer); clearTimeout(c.snapTimer); clearTimeout(c.addTimer); clearTimeout(c.swapTimer);
+  c.closed = true; clearTimeout(c.timer); clearTimeout(c.snapTimer); clearTimeout(c.addTimer); clearTimeout(c.swapTimer); clearTimeout(c.downTimer); clearTimeout(c.addDownTimer);
   liveAsksFail(c, false);   // asks sent or still waiting on this socket: fail now, so relayAsk moves on at once
   try { c.ws && c.ws.close(); } catch(e){}
   c.cre = null;   // its creature/herd sets are gone now, not when the close event arrives (seconds later on a dead peer) — or a settings request it made would keep every other socket from asking (bcHerd.paramsReq)
@@ -5756,6 +5768,10 @@ function liveExtendFlush(c){
   const ws = c.ws;
   clearTimeout(c.addTimer);
   c.addTimer = setTimeout(() => { if (c.ws === ws && c.addWait && c.addWait.size){ console.warn(`[live] r${c.region} never answered an added set — reconnecting`); try { ws.close(); } catch(e){} } }, LIVE_SNAPSHOT_TIMEOUT_MS);
+  // Until it answers the region is not 'live', and one region not live puts the whole app on the website fallback
+  // (dataSource). So the same rule as a silent first subscribe: after LIVE_DOWN_SNAPSHOT_MS, ask the other relay.
+  clearTimeout(c.addDownTimer);
+  c.addDownTimer = setTimeout(() => { if (c.ws === ws && !c.closed && c.addWait && c.addWait.size) liveDownMove(c, `has not answered an added question in ${LIVE_DOWN_SNAPSHOT_MS / 1000} s`); }, LIVE_DOWN_SNAPSHOT_MS);
 }
 // An added set's rows: merged into the region's slices (a snapshot of just those queries, not of the region).
 function liveApplyAdded(c, a){
@@ -5768,7 +5784,7 @@ function liveApplyAdded(c, a){
     if (got) evs.push({ table: tb, region: c.region, isDelta: false, rows: [...slice.values()], deletes: [] });
   });
   if (c.addWait) c.addWait.delete(qid);
-  if (!c.addWait || !c.addWait.size){ clearTimeout(c.addTimer); if (c.status === 'extending') c.status = 'live'; c.snapshotTs = Date.now(); }
+  if (!c.addWait || !c.addWait.size){ clearTimeout(c.addTimer); clearTimeout(c.addDownTimer); if (c.status === 'extending') c.status = 'live'; c.snapshotTs = Date.now(); }
   if (evs.length) liveNotify(evs);
   liveDiscoverSoon();   // an answer with no rows still has to let the boot hold settle
   liveHandoffKick();
@@ -5793,7 +5809,7 @@ function liveOpenNow(c){
   { const q = liveQuerySet(liveRosterIds, c.region); c.sqls = q.sqls; c.tables = q.tables; }
   c.subs = null; c.adds = 0; c.addWait = null; clearTimeout(c.addTimer);
   c.relay = relayOf(c.region);   // which relay this socket is on — names its rows (liveRow) and picks its lookups (relayAsk)
-  let ws, opened = false;
+  let ws, opened = false, answered = false;   // answered: THIS socket's subscribe came back (c.snapshotTs also remembers earlier sockets')
   try { ws = new WebSocket(relayWsUrl(c.region, c.relay), ['v1.json.spacetimedb']); }
   catch(e){ return liveReschedule(c); }
   c.ws = ws; c.status = 'connecting';
@@ -5824,9 +5840,14 @@ function liveOpenNow(c){
     // A mirror can accept the socket and then never answer the subscribe (no error, no close). Without
     // this the region sits at 'open' forever and liveComplete() never trips. Give up and let onclose
     // reschedule with backoff — the region rejoins the moment it starts answering again.
+    // With a second relay there is somewhere else to go long before that: a socket that opened and has said nothing
+    // for LIVE_DOWN_SNAPSHOT_MS moves the region there (liveDownMove) — once, not in a loop, and only if that relay
+    // vouches for the region. A move's own socket is on liveSwap's deadline instead.
+    clearTimeout(c.downTimer);
+    if (!c.swap) c.downTimer = setTimeout(() => { if (!answered && !c.closed && c.ws === ws) liveDownMove(c, `opened its socket but has not answered in ${LIVE_DOWN_SNAPSHOT_MS / 1000} s`); }, LIVE_DOWN_SNAPSHOT_MS);
     clearTimeout(c.snapTimer);
     c.snapTimer = setTimeout(() => {
-      if (c.snapshotTs || c.closed) return;
+      if (answered || c.closed || c.ws !== ws) return;
       c.status = 'stalled';
       console.warn(`[live] r${c.region} accepted the socket but never answered its subscribe in ${LIVE_SNAPSHOT_TIMEOUT_MS}ms — backing off ${Math.round(c.backoff * 2 / 1000)}s`);
       try { ws.close(); } catch(e){}
@@ -5838,7 +5859,8 @@ function liveOpenNow(c){
     c.lastMsgAt = Date.now();   // liveness (see liveWatchdog) — ANY frame counts, including IdentityToken
     let m; try { m = JSON.parse(ev.data); } catch(e){ return; }   // outer frame is safe to parse plainly — rows are still strings inside it
     if (m.InitialSubscription){
-      clearTimeout(c.snapTimer);
+      clearTimeout(c.snapTimer); clearTimeout(c.downTimer);
+      answered = true; c.fails = 0;
       const first = !c.snapshotTs;
       c.status = 'live'; c.snapshotTs = Date.now(); c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
       const older = !!(c.swap && c.swap.older);   // this region just moved onto a relay that may be BEHIND the one it left
@@ -5865,7 +5887,8 @@ function liveOpenNow(c){
   };
   ws.onerror = () => { try { ws.close(); } catch(e){} };
   ws.onclose = () => {
-    c.ws = null; c.cre = null; clearTimeout(c.snapTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
+    const blocked = c.status === 'blocked';   // the browser never let this socket out (see the watchdog above): says nothing about the relay
+    c.ws = null; c.cre = null; clearTimeout(c.snapTimer); clearTimeout(c.downTimer);   // the named sets died with the socket; the redial re-adds them (dots stay meanwhile)
     liveAsksFail(c, true);   // answers that will never come; asks not sent yet wait for the reconnect
     if (c.closed || c.key !== liveRosterKey) return;
     if (c.swap && !c.snapshotTs){ liveSwapFailed(c); return; }   // moved here and it hung up before answering: back where it came from
@@ -5875,6 +5898,19 @@ function liveOpenNow(c){
     if (!opened){
       if (RELAYS[c.relay].dialLimit){ relayDialRefused(); relayRecheck(); }
       else relayBackupHealth(true);
+      // …and the one thing we can do about a relay that is simply not there: use the other. One refusal is retried
+      // at once (the relay's pacing still applies, so "at once" is a couple of seconds on the main relay); a second
+      // in a row moves the region. The count starts over with every snapshot.
+      // Three regions refused within 20 s is not a blip in one mirror: the relay is not taking sockets, and waiting
+      // for each region's second refusal (paced two seconds apart) would only keep the app on the fallback longer.
+      if (!blocked){
+        const now = Date.now(), seen = _relayRefused[c.relay] || (_relayRefused[c.relay] = {});
+        seen[c.region] = now;
+        const many = Object.values(seen).filter(t => now - t < 20000).length >= 3;
+        c.fails = (c.fails || 0) + 1;
+        if ((c.fails >= 2 || many) && liveDownMove(c, many ? 'is refusing sockets in several regions' : 'refused its socket twice')) return;
+        if (c.fails === 1){ clearTimeout(c.timer); liveOpen(c); return; }
+      }
     }
     liveReschedule(c);
   };
@@ -6075,7 +6111,46 @@ function liveSwapFailed(c){
   c.swap = null; clearTimeout(c.swapTimer);
   regionBar[c.region + ':' + c.relay] = Date.now() + LIVE_SWAP_BAR_MS;
   console.warn(`[live] r${c.region}: ${RELAYS[c.relay || relayOf(c.region)].label} did not answer — back on ${RELAYS[sw.from].label}`);
+  if (sw.from === RELAY_ORDER[0]) delete relayMoves[c.region];   // it never got away (a failed return to the main relay leaves it away, as it was)
   liveSwap(c.region, sw.from, { force: true });
+}
+// ── A region whose relay is not there: use the other ──
+// "Not there" = its socket was refused twice in a row, or opened and then said nothing for LIVE_DOWN_SNAPSHOT_MS
+// (liveOpenNow, liveExtendFlush). The region moves to the other relay, provided the backup is switched on, that relay
+// vouches for the region and has not just failed it. This walks away from ONE slow answer and goes elsewhere; it
+// never hangs up on the main relay and redials it, which is the loop that flattened a mirror in August (each
+// abandoned snapshot made the mirror recompute it). Coming back is a separate, gentle decision (relayHandBack).
+const LIVE_DOWN_SNAPSHOT_MS = 8000;
+const relayMoves = {};   // region -> { at, from, to, why, bounces } while it is away from the main relay
+const _relayRefused = {};   // relay -> region -> ms of its last refused socket
+function liveDownMove(c, why){
+  if (c.closed || c.swap || liveConns[c.region] !== c) return false;
+  const relay = c.relay || relayOf(c.region), other = relayOther(relay);
+  if (!relayBackupOn() || !other || !relayEligible(other, c.region) || relayBarred(c.region, other)) return false;
+  console.warn(`[live] r${c.region}: ${RELAYS[relay].label} ${why} — moving to ${RELAYS[other].label}`);
+  relayMoveNote(c.region, relay, other, 'it ' + why);
+  return liveSwap(c.region, other);
+}
+function relayMoveNote(rg, from, to, why){
+  const prev = relayMoves[rg];
+  if (to === RELAY_ORDER[0]){ if (prev) prev.backAt = Date.now(); return; }   // home again: the entry stays as "when did it last leave" for the bounce count
+  const bounces = prev && prev.backAt && Date.now() - prev.backAt < 60 * 60 * 1000 ? (prev.bounces || 0) + 1 : 0;   // left again within the hour of coming back
+  relayMoves[rg] = { at: Date.now(), from, to, why, bounces };
+  _relayDotSig = '';
+}
+// The backup switch (status panel). Off = exactly what the app did before it had a second relay: every region on the
+// main one, nothing measured, nothing moved.
+function setRelayBackup(on){
+  safeSetItem('bc_relay_backup', on ? '1' : '0');
+  if (!on){
+    BC_REGIONS.forEach(rg => { if (relayOf(rg) !== RELAY_ORDER[0]) liveSwap(rg, RELAY_ORDER[0], { force: true }); delete relayMoves[rg]; delete relayFresh[rg]; });
+  } else {
+    // regions that were left waiting on a silent socket while this was off get their move now
+    const now = Date.now();
+    Object.values(liveConns).forEach(c => { if (!c.closed && c.status !== 'live' && c.status !== 'extending' && _relayNotLiveSince[c.region] && now - _relayNotLiveSince[c.region] >= LIVE_DOWN_SNAPSHOT_MS) liveDownMove(c, 'is not answering'); });
+    relayMonitorTick();
+  }
+  _relayDotSig = ''; relayDotRender();
 }
 // Debug: the same questions put to BOTH relays over scratch sockets, decoded, and compared table by table. Rows are
 // compared by their values in column order, so a named row and a bare-array row of the same data are equal. Rows that
@@ -15011,7 +15086,8 @@ function relayPanelHtml(s){
     : `Measured ${relayLateText(now - r.checkedAt)} ago ` + (r.basis === 'compare' ? 'against the other relay' : r.basis === 'row' ? 'from a row it just delivered' : 'against this device’s clock') + (r.late != null ? ` — ${r.late < 1000 ? 'under a second' : relayLateText(r.late)} behind` : '');
   return `<div class="notif-hdr"><span><i class="ti ti-broadcast"></i> Live data</span>${s.regions.length ? `<button class="notif-clear" onclick="relayCheckAll()"${_relayCheckAllBusy ? ' disabled' : ''}>${_relayCheckAllBusy ? 'Checking…' : 'Check now'}</button>` : ''}</div>
     <div class="rd-sum">${escHtml(s.text)}</div>` +
-    s.regions.map(r => { const st = relayRowState(r); return `<div class="rd-row" title="${escHtml(tip(r))}"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('');
+    s.regions.map(r => { const st = relayRowState(r), mv = relayMoves[r.rg], away = r.backup && mv ? `On the backup for ${relayLateText(now - mv.at)}: ${RELAYS[mv.from].label} — ${mv.why}. ` : ''; return `<div class="rd-row" title="${escHtml(away + tip(r))}"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('') +
+    `<label class="rd-opt" title="When a region is late or not answering on ${escHtml(RELAYS[RELAY_ORDER[0]].label)}, read it from ${escHtml(RELAYS[RELAY_ORDER[1]].label)} until it recovers. Off: everything stays on ${escHtml(RELAYS[RELAY_ORDER[0]].label)} and nothing is measured."><input type="checkbox" ${relayBackupOn() ? 'checked' : ''} onchange="setRelayBackup(this.checked)"> Use the backup relay when a region is late or down</label>`;
 }
 let _relayDotSig = '';
 function relayDotRender(){
