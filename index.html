@@ -766,6 +766,10 @@ tr.shop-item-drop td{background:rgba(29,158,117,.12)!important}
    lifts the cap and the shell carries the width instead — the old 1152px by default, or what the user
    dragged it to (--map-w: a px width, or 100% = fill the window). max-width keeps it inside small windows. */
 main.map-mode{max-width:none}
+/* A map dragged wide must not hold the page wider than a window that has since shrunk: without this the
+   column (a flex item) refuses to go below the saved map width and the page runs off the right edge. With
+   it the column follows the window and the shell's max-width:100% fits the map into what is left. */
+.main-wrap:has(>main.map-mode){min-width:0}
 main.skills-mode{max-width:none}   /* Experience: windows default to the old 1152px (PSEC_DEFAULT_MAX) but can be dragged wider */
 .map-shell{width:var(--map-w,1152px);max-width:100%}
 .map-wrap{position:relative;display:flex;gap:.6rem;height:calc(100vh - 130px);min-height:460px}
