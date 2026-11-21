@@ -1018,6 +1018,12 @@ timestamp inside a row:
   difference of the two ages needs no clock. Regions in use are compared every
   10 minutes regardless, because the learned clock offset (`relayClock`) would
   hide a lateness that was there from the first reading.
+- **No answer is an answer.** A probe the region's own relay never answers
+  while the other relay does counts as late by the time waited, not as
+  "unknown"; and the hand-back treats any probe it could not complete as "not
+  yet". (Both were wrong at first: an unanswered probe ended the check and the
+  panel went back to "live", and a hand-back whose probe threw fell through to
+  the move home — returning regions exactly when the main relay was at its worst.)
 
 ### 13.3 When a region moves
 

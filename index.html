@@ -5882,6 +5882,9 @@ function liveOpenNow(c){
       const first = !c.snapshotTs;
       c.status = 'live'; c.snapshotTs = Date.now(); c.backoff = 1500;   // reset on SUCCESS (see ws.onopen)
       const older = !!(c.swap && c.swap.older);   // this region just moved onto a relay that may be BEHIND the one it left
+      // A region that has just come HOME is put side by side with the backup straight away rather than at its next
+      // routine turn: if the return was a mistake, it is found in seconds, not minutes.
+      if (c.swap && c.relay === RELAY_ORDER[0] && relayBackupOn()) setTimeout(() => { if (liveConns[c.region] === c) relayCheck(c.region, true); }, 2000);
       if (c.swap){ clearTimeout(c.swapTimer); c.swap = null; }
       liveApplySnapshot(c, m.InitialSubscription, older);
       // A region that joins (or rejoins) AFTER the initial kick brings rows the tabs haven't seen, and a
@@ -6272,27 +6275,38 @@ function relayCheck(rg, compare){
   if (!c || c.closed || !c.snapshotTs || c.status !== 'live') return Promise.resolve(null);   // only a settled region is measured
   if (_relayChecking[rg]) return _relayChecking[rg];
   const p = _relayChecking[rg] = (async () => {
-    const relay = c.relay, other = relayOther(relay), mine = await relayProbe(rg, relay).catch(() => null);
-    if (liveConns[rg] !== c) return null;   // the region moved meanwhile: this reading is about a socket that is gone
-    if (!mine){ relayNote(rg, { relay, at: Date.now(), late: null, basis: 'clock' }); return relayFresh[rg]; }
-    relayClockNote(mine.age);
-    let late = Math.max(0, mine.age - relayClock.off), basis = 'clock', comparedAt = 0;
-    if (mine.took > RELAY_SLOW_PROBE_MS) late = Math.max(late, mine.took);
-    const suspicious = late >= (mine.online < RELAY_QUIET_ONLINE ? RELAY_LATE_QUIET_MS : RELAY_LATE_MS);
-    if ((suspicious || compare) && relayEligible(other, rg) && !relayBarred(rg, other)){
-      // Both relays, the same moment. Each age is taken at its own arrival, so a slow answer does not flatter itself.
-      const [a, b] = await Promise.all([relayProbe(rg, relay).catch(() => null), relayProbe(rg, other).catch(() => null)]);
-      if (liveConns[rg] !== c) return null;
-      if (a && b){
-        relayClockNote(a.age); relayClockNote(b.age);
-        late = Math.max(0, a.age - b.age, a.took > RELAY_SLOW_PROBE_MS ? a.took - b.took : 0);
-        basis = 'compare'; comparedAt = Date.now();
-        relayNote(rg, { relay, at: comparedAt, late, basis, took: a.took, online: a.online, comparedAt, otherLate: Math.max(0, b.age - a.age) });
-        if (late >= RELAY_LATE_MS) relayLateRun(rg);   // confirmed behind the other relay just now: is it a pattern? (decides whether the region moves)
+    const relay = c.relay, other = relayOther(relay), canCompare = relayEligible(other, rg) && !relayBarred(rg, other);
+    const noteClock = m => { let late = Math.max(0, m.age - relayClock.off); if (m.took > RELAY_SLOW_PROBE_MS) late = Math.max(late, m.took); relayNote(rg, { relay, at: Date.now(), late, basis: 'clock', took: m.took, online: m.online }); return late; };
+    // This relay alone first, unless a comparison was asked for: most readings end here.
+    if (!(compare && canCompare)){
+      const t0 = Date.now(), mine = await relayProbe(rg, relay).catch(() => null);
+      if (liveConns[rg] !== c) return null;   // the region moved meanwhile: this reading is about a socket that is gone
+      if (mine){
+        relayClockNote(mine.age);
+        const late = noteClock(mine);
+        if (late < (mine.online < RELAY_QUIET_ONLINE ? RELAY_LATE_QUIET_MS : RELAY_LATE_MS) || !canCompare) return relayFresh[rg];
+      } else if (!canCompare){
+        // It did not answer its own probe, and there is nobody to compare with: "late by as long as we waited".
+        relayNote(rg, { relay, at: Date.now(), late: Date.now() - t0, basis: 'clock', noAnswer: true });
         return relayFresh[rg];
       }
     }
-    relayNote(rg, { relay, at: Date.now(), late, basis, took: mine.took, online: mine.online });
+    // Both relays, the same moment. Each age is taken at its own arrival, so a slow answer does not flatter itself.
+    const t1 = Date.now();
+    const [a, b] = await Promise.all([relayProbe(rg, relay).catch(() => null), relayProbe(rg, other).catch(() => null)]);
+    if (liveConns[rg] !== c) return null;
+    const at = Date.now();
+    if (a) relayClockNote(a.age);
+    if (b) relayClockNote(b.age);
+    if (b){
+      // A probe this relay never answered, while the other did, is not "unknown": it is behind by at least the wait.
+      const late = a ? Math.max(0, a.age - b.age, a.took > RELAY_SLOW_PROBE_MS ? a.took - b.took : 0) : at - t1;
+      relayNote(rg, { relay, at, late, basis: 'compare', took: a ? a.took : at - t1, online: a ? a.online : b.online, comparedAt: at, noAnswer: !a, otherLate: a ? Math.max(0, b.age - a.age) : 0 });
+      if (late >= RELAY_LATE_MS) relayLateRun(rg);   // confirmed behind the other relay just now: is it a pattern? (decides whether the region moves)
+      return relayFresh[rg];
+    }
+    if (a){ noteClock(a); return relayFresh[rg]; }   // the other relay could not be asked: this one's own reading stands
+    relayNote(rg, { relay, at, late: null, basis: 'clock' });   // neither answered: nothing can be said
     return relayFresh[rg];
   })();
   p.finally(() => { if (_relayChecking[rg] === p) delete _relayChecking[rg]; });
@@ -6438,13 +6452,16 @@ async function relayHandBack(rg){
       if (m.homeLate > t.handWithinMs) return;   // still behind: not yet
     }
     ok = true;
-  } catch(e){ m.homeLate = null; m.homeAt = Date.now(); }   // the main relay could not be asked at all: not yet
+  } catch(e){ m.homeLate = null; m.homeAt = Date.now(); }   // the main relay could not be asked at all (refused, or a probe timed out): not yet
   finally {
     if (asker) asker.close();
     delete _relayRun[rg];
     if (!ok){ m.every = Math.min(m.every ? m.every * 2 : t.handEveryMs, t.handMaxMs); m.nextCheckAt = Date.now() + m.every; }
   }
-  if (liveConns[rg] !== c0 || relayOf(rg) === home || !relayBackupOn()) return;
+  // ⚠️ `ok` is the ONLY way through. A probe that throws lands in the catch above and execution carries on to here —
+  // without this test a main relay too far gone to answer at all was "handed back" its region (seen in testing: five
+  // regions returned at the worst possible moment, each caught and moved out again within the minute).
+  if (!ok || liveConns[rg] !== c0 || relayOf(rg) === home || !relayBackupOn()) return;
   console.warn(`[live] r${rg}: ${RELAYS[home].label} kept pace for a minute — moving back from ${RELAYS[c0.relay].label}`);
   relayMoveNote(rg, c0.relay, home, '');
   liveSwap(rg, home);
@@ -15226,9 +15243,10 @@ function relayRegionInfo(rg, now){
   const live = !!(c && c.snapshotTs && (c.status === 'live' || c.status === 'extending'));   // extending = live, plus an added question on its way
   if (live) delete _relayNotLiveSince[rg]; else if (!_relayNotLiveSince[rg]) _relayNotLiveSince[rg] = now;
   const downFor = live ? 0 : now - _relayNotLiveSince[rg];
-  const name = liveRegionName(rg), f = relayFresh[rg], known = live && f && f.relay === relay && f.late != null;
+  const name = liveRegionName(rg), f = relayFresh[rg], read = live && f && f.relay === relay, known = read && f.late != null;
   return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup: relay !== RELAY_ORDER[0], live, downFor, status: c ? c.status : 'off',
-    late: known ? f.late : null, isLate: !!(known && f.late >= RELAY_LATE_MS), checkedAt: known ? f.at : 0, basis: known ? f.basis : '' };
+    late: known ? f.late : null, isLate: !!(known && f.late >= RELAY_LATE_MS), checkedAt: read ? f.at : 0, basis: known ? f.basis : '',
+    unmeasured: !!(read && f.late == null), noAnswer: !!(known && f.noAnswer) };   // unmeasured: asked, and neither relay answered the probe
 }
 const relayLateText = ms => { const s = ms / 1000; return s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; };
 function relayStatus(){
@@ -15242,12 +15260,13 @@ function relayStatus(){
   if (waiting.length) parts.push(`${list(waiting)} ${waiting.length > 1 ? 'are' : 'is'} connecting.`);
   if (onBackup.length) parts.push(`${list(onBackup)} ${onBackup.length > 1 ? 'are' : 'is'} on the backup relay (${RELAYS[RELAY_ORDER[1]].label}).`);
   const late = regions.filter(r => r.isLate);
-  if (late.length) parts.push(late.map(r => `${r.name} is ${relayLateText(r.late)} behind the game`).join(', ') + '.');
+  if (late.length) parts.push(late.map(r => r.noAnswer ? `${r.name} is slow to answer` : `${r.name} is ${relayLateText(r.late)} behind the game`).join(', ') + '.');
   if (!parts.length) parts.push(`All ${regions.length} regions are live on ${main}.`);
   return { level: down.length ? 'bad' : (waiting.length || onBackup.length || late.length) ? 'warn' : 'ok', text: parts.join(' '), regions };
 }
 function relayRowState(r){
-  if (r.live && r.isLate) return { cls: 'warn', text: relayLateText(r.late) + ' late' };
+  if (r.live && r.isLate) return { cls: 'warn', text: r.noAnswer ? 'slow to answer' : relayLateText(r.late) + ' late' };
+  if (r.live && r.unmeasured) return { cls: 'warn', text: 'unmeasured' };
   if (r.live) return { cls: r.backup ? 'warn' : 'ok', text: 'live' };
   if (r.downFor >= RELAY_DOWN_AFTER_MS) return { cls: 'bad', text: r.status === 'blocked' ? 'blocked' : 'no answer' };
   return { cls: 'warn', text: 'connecting…' };
