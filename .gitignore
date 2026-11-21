@@ -14,6 +14,10 @@ _bcm3*
 # lives outside the project, in the user folder)
 tools/oldworld-test-log.txt
 
+# Notes and design docs (OVERHAUL.md, memory.md, docs/): kept on this PC only, the app never reads them
+*.md
+docs/
+
 # OS / editor cruft
 *.log
 .DS_Store
