@@ -1977,6 +1977,18 @@ function playerSearchFetch(q, src){
     ? relayGet('/player?name=' + encodeURIComponent(q), 10000).then(list => {
         if (!Array.isArray(list)) throw new Error('no player list');
         return psSort(list.filter(d => d && d.entity_id && d.username).map(relayPlayerRow), k, src);
+      }).catch(e => {
+        // The relay's web lookup is out (only the main relay has one). bitjita's search knows the same characters
+        // while it is on the same world — but it returns the first 50 matches, not every one, so this answer is
+        // marked and never cached as the relay's complete list (which later, longer queries would be narrowed from).
+        if (bitjitaWorld === false) throw e;
+        return apiFetch('/api/players?q=' + encodeURIComponent(q), 10000).then(d => {
+          const players = d && d.players;
+          if (!Array.isArray(players)) throw e;
+          const out = psSort(players.filter(p => p && p.entityId && p.username).map(p => ({ entityId: String(p.entityId), username: p.username, signedIn: p.signedIn === true })), k, src);
+          out.partial = true;
+          return out;
+        });
       })
     : apiFetch('/api/players?q=' + encodeURIComponent(q), 10000).then(d => {
         const players = d && d.players;
@@ -1984,6 +1996,7 @@ function playerSearchFetch(q, src){
         return players;
       })
   ).then(players => {
+    if (players.partial) return players;   // a stand-in answer (see above): shown, not remembered
     cache.delete(k); cache.set(k, { t: Date.now(), players });
     if (cache.size > 80) cache.delete(cache.keys().next().value);
     return players;
@@ -6769,12 +6782,19 @@ async function claimPickSearch(){
   const q = claimPickQ.trim();
   claimPickErr = '';
   if (q.length < 2){ claimPickRes = []; claimPickRender(); return; }
+  let d;
   try {
     const r = await fetch(`${RELAY_HTTP}/claim?name=${encodeURIComponent(q)}`);
-    const d = r.ok ? await r.json() : [];
-    if (q !== claimPickQ.trim()) return;   // a newer search owns the list
-    claimPickRes = Array.isArray(d) ? d.slice(0, 10) : [];
-  } catch(e){ claimPickRes = []; claimPickErr = "Claim search isn't answering right now"; }
+    if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
+    d = r.ok ? await r.json() : [];
+  } catch(e){
+    // The relay's web lookups are out (only the main relay has them): bitjita's search knows the same claims, under its
+    // own field names. Landmarks and ruins are claims too there — left out, as nobody tracks their storage.
+    try { const j = await apiFetch(`/api/claims?q=${encodeURIComponent(q)}`); d = (j.claims || []).filter(c => c && c.entityId && !c.neutral).map(c => ({ entity_id: String(c.entityId), name: c.name, region: +c.regionId, tier: c.tier || null })); }
+    catch(e2){ if (q === claimPickQ.trim()){ claimPickRes = []; claimPickErr = "Claim search isn't answering right now"; claimPickRender(); } return; }
+  }
+  if (q !== claimPickQ.trim()) return;   // a newer search owns the list
+  claimPickRes = Array.isArray(d) ? d.slice(0, 10) : [];
   claimPickRender();
 }
 function claimPickRender(){
@@ -8466,16 +8486,47 @@ function ocOwnerName(cr){
   if (!/^\d+$/.test(id) || Date.now() - (ocOwnerFailAt[id] || 0) < 60000) return '?';
   if (!ocOwnerWait.has(id)){ ocOwnerWait.set(id, new Set()); ocOwnerQueue.push(id); }
   ocOwnerWait.get(id).add(String(cr.claimEntityId));
+  if (cr.regionId) ocOwnerRegion[id] = +cr.regionId;   // where to ask over a socket if the web lookup is out (ocOwnerViaSocket)
   ocOwnerPump();
   return '…';
 }
+// The web lookup failed: ask a relay socket instead. Only the main relay has web lookups, but both relays hold
+// player_username_state — one row per player, in whichever region the player is (or last was), which for the owner
+// of a craft is usually the craft's region. Ids are gathered for a moment and asked a region at a time, so a board of
+// fifty unknown owners is one question per region, not fifty sockets. Not found there = still unknown ("?").
+const ocOwnerRegion = {}, ocOwnerSock = { by: {}, t: null };
+function ocOwnerViaSocket(id){
+  return new Promise((resolve, reject) => {
+    const rg = ocOwnerRegion[id];
+    if (!rg || !BC_REGIONS.includes(rg)) return reject(new Error('no region to ask'));
+    (ocOwnerSock.by[rg] || (ocOwnerSock.by[rg] = [])).push({ id, resolve, reject });
+    clearTimeout(ocOwnerSock.t);
+    ocOwnerSock.t = setTimeout(() => {
+      const by = ocOwnerSock.by; ocOwnerSock.by = {};
+      Object.keys(by).forEach(async r => {
+        const asks = by[r];
+        try {
+          const got = await relayAsk(+r, asks.slice(0, 150).map(a => `SELECT * FROM player_username_state WHERE entity_id = ${a.id}`), 12000);
+          const names = {}; (got.player_username_state || []).forEach(x => { names[String(x.entity_id)] = x.username; });
+          asks.forEach(a => names[a.id] ? a.resolve(names[a.id]) : a.reject(new Error('not in that region')));
+        } catch(e){ asks.forEach(a => a.reject(e)); }
+      });
+    }, 250);
+  });
+}
+let ocOwnerWebFailAt = 0;
 function ocOwnerPump(){
-  while (ocOwnerActive < 4 && ocOwnerQueue.length){
+  // While the web lookup is known to be out (it failed within the last minute) the whole queue goes to the sockets at
+  // once, so ocOwnerViaSocket can ask a region's worth together; otherwise four web lookups at a time, as before.
+  const webOut = Date.now() - ocOwnerWebFailAt < 60000;
+  while ((webOut || ocOwnerActive < 4) && ocOwnerQueue.length){
     const id = ocOwnerQueue.shift(); ocOwnerActive++;
-    fetch(`${RELAY_HTTP}/player/${id}`)
-      .then(r => r.ok ? r.json() : r.status === 404 ? {} : Promise.reject(new Error('HTTP ' + r.status)))
-      .then(d => { ocOwners[id] = [String((d && d.username) || ''), Date.now()]; clearTimeout(ocOwnerSaveT); ocOwnerSaveT = setTimeout(ocOwnersSave, 2000); })
-      .catch(() => { ocOwnerFailAt[id] = Date.now(); })   // relay hiccup: "?" for a minute, then the next render asks again
+    const save = name => { ocOwners[id] = [String(name || ''), Date.now()]; clearTimeout(ocOwnerSaveT); ocOwnerSaveT = setTimeout(ocOwnersSave, 2000); };
+    (webOut ? ocOwnerViaSocket(id).then(save)
+      : fetch(`${RELAY_HTTP}/player/${id}`)
+          .then(r => r.ok ? r.json() : r.status === 404 ? {} : Promise.reject(new Error('HTTP ' + r.status)))
+          .then(d => save(d && d.username), () => { ocOwnerWebFailAt = Date.now(); return ocOwnerViaSocket(id).then(save); }))
+      .catch(() => { ocOwnerFailAt[id] = Date.now(); })   // nobody could say: "?" for a minute, then the next render asks again
       .finally(() => {
         (ocOwnerWait.get(id) || []).forEach(c => ocOwnerPaint.add(c)); ocOwnerWait.delete(id);
         ocOwnerActive--; ocOwnerPump();
@@ -15713,7 +15764,7 @@ let gcState = { tools:[{family:'',topTier:6,qty:100}], rerolls:[], containers:[]
 let gcPriceCache = {};      // itemId -> avg7d number, or null when the market has no data
 let gcManualPrice = {};     // itemId -> manually-entered hex (only for mats with no 7d price)
 let gcCatalog = null;       // { family -> { tier -> {id,name} } } of base craftable metal tools
-let gcSeq = 0, gcTallySeq = 0;
+let gcSeq = 0, gcTallySeq = 0, gcTallyMissed = [];   // gcTallyMissed: containers whose log the last tally could not read
 let gcFoundContainers = [];  // transient: containers surfaced by the "find" search, for the picker
 let gcGathered = {};         // item_id -> total qty deposited (from the last tally) — drives the progress bars
 let gcContributors = [];     // ranked [{name,points,units,kinds,ids}] AFTER account-joining — used by the leaderboard + allocator
@@ -15970,7 +16021,10 @@ async function gcTally(){
   const gathered = {};  // item_id -> total qty deposited
   let logCount = 0;
   try {
-    const results = await Promise.all(containers.map(c => fetch(`${RELAY_HTTP}/storage-logs?storageId=${c.id}`).then(r=>r.json()).catch(()=>({logs:[]}))));
+    // A container whose log could not be read used to count as an empty one — its deposits silently missing from the
+    // tally. It is now named below the result (gcTallyMissed), so a short tally is never mistaken for a complete one.
+    const results = await Promise.all(containers.map(c => fetch(`${RELAY_HTTP}/storage-logs?storageId=${c.id}`).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).catch(() => ({ logs: [], failed: c.name || 'a container' }))));
+    gcTallyMissed = results.filter(j => j.failed).map(j => j.failed);
     const pkgById = packageByCargoId();
     results.forEach(j => (j.logs||[]).forEach(l => {
       logCount++;
@@ -15993,7 +16047,7 @@ async function gcTally(){
   gcGathered = gathered;
   gcRawPlayers = Object.values(players).sort((a,b)=>b.points-a.points);
   gcContributors = gcApplyGroups(gcRawPlayers);
-  box.innerHTML = gcContribHtml(gcContributors, logCount);
+  box.innerHTML = gcContribHtml(gcContributors, logCount) + (gcTallyMissed.length ? `<div class="gc-empty-note" style="color:var(--amber-light)"><i class="ti ti-alert-triangle"></i> Couldn't read the log of ${escHtml(gcTallyMissed.join(', '))} — ${gcTallyMissed.length > 1 ? 'their' : 'its'} deposits are missing from this tally. Try again in a moment.</div>` : '');
   gcRecompute();     // refresh the needed list so its gathered/progress bars reflect the new tally
   gcRenderAlloc();   // the allocator now has contributor points to split by
 }
