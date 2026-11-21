@@ -956,3 +956,120 @@ proven.
 - Moving static game data onto the WebSocket.
 - Eliminating HTTP entirely — see section 5.
 - Building `BroadcastChannel` tab coordination up front.
+
+---
+
+## 13. Two relays (added 2026-11-20)
+
+Everything above assumes one relay. On 2026-11-20 it ran late — frozen for
+15–29 s at a time in every region, 14–94 minutes behind in three — while its
+health page said "live" and its sockets stayed up, so nothing in sections 3 or 6
+noticed. A second public relay, bitjita's (`relay.bitjita.com`), mirrors the same
+stored tables. **Decision: bitcraftsync stays the main relay; bitjita's is the
+backup, region by region; bitjita's website API stays the last resort
+(section 6).** The order is `RELAY_ORDER`; flipping it is not planned.
+
+### 13.1 What differs (measured, both on `v1.json`)
+
+| | bitcraftsync (`sync`) | bitjita's (`jita`) |
+|---|---|---|
+| Address | a port per region (from `/health`) | one host; the database name picks the region |
+| Tables | 280 stored + 47 event (events on v2 only) | the same 280 stored; refuses the 47 event tables |
+| Snapshot rows | named objects | bare arrays, like deltas |
+| One-off queries | answered on an open socket | refused |
+| New sockets | ~30 a minute per address | no limit seen; a browser opens them one at a time (~0.2 s each) because they share one host:port |
+| Dropping a named set | resends its rows | resends its rows |
+| Timestamp on update frames | the relay's own clock | the relay's own clock |
+| Web lookups (`/player`, `/claim`, `/storage-logs`…) | yes | none |
+| Health page | "live" while minutes behind | per region `connected`, `last_update_age_seconds` |
+
+Consequences in the code:
+
+- **Row names.** A bare-array row is named from `liveColOrder[relay]` (learned
+  from that relay's own named rows — never the other relay's), then
+  `liveSchemaCols`, then `LIVE_COLS`. Every table asked for needs a list, lookup
+  tables included. A row whose width disagrees triggers `liveColsHeal`: the
+  relay's `/schema` is read once and the lists rebuilt.
+- **Lookups.** `relayAsk` uses a one-off on the held socket where the relay
+  takes them, a scratch socket otherwise. **Never a named set on a held socket
+  as a stand-in for a one-off:** a v1 update frame does not say which query it
+  belongs to, so until the set is dropped every matching row in the region is
+  written into the cache and run through the alerts.
+- **One relay per region, never two sockets.** Nothing in the connection code
+  asks whether a socket is still the region's own, so a standby socket would
+  write into the same rows and feed the same creature maps. A move is the
+  ordinary reconnect pointed elsewhere (`liveSwap` = `liveDrop` + `liveDial`);
+  the old rows stay on screen until the new snapshot replaces them, inside
+  `dataSource()`'s 10 s grace.
+
+### 13.2 How late is a region?
+
+Neither relay's frames nor health page can say, so the evidence is a game
+timestamp inside a row:
+
+- **Free:** a tracked player's stamina decrease, a new storage-log entry
+  (`relayRowsSeen`).
+- **Probe** (`relayProbe`): the freshest `last_stamina_decrease_timestamp` among
+  signed-in players, `stamina_state` joined to `signed_in_player_state`. A
+  one-off on a held `sync` socket; a scratch socket on `jita`. 1–61 KB.
+- **A clock-based reading is only a suspicion.** The device's clock may be off
+  and a quiet region can go 20 s with nobody spending stamina. What settles it is
+  the same probe on the other relay at the same moment (`relayCheck`): the
+  difference of the two ages needs no clock. Regions in use are compared every
+  10 minutes regardless, because the learned clock offset (`relayClock`) would
+  hide a lateness that was there from the first reading.
+
+### 13.3 When a region moves
+
+- **Down** (`liveDownMove`): its socket is refused twice in a row (once, if
+  three regions are being refused within 20 s), or it opens and says nothing for
+  8 s — on the first subscribe or on a set added later. This walks away from one
+  slow answer; it never hangs up on the main relay and redials it (8.5's loop).
+- **Late** (`relayLateRun`): the other relay is 8 s or more ahead in three of six
+  comparisons 10 s apart — which catches freeze-and-flush, a pattern no single
+  reading shows — or a minute ahead twice running. A run without a move is not
+  repeated for 3 minutes.
+- **A move is on a deadline** (`liveSwap`): 10 s to open, 6 s to answer, else the
+  region returns and that relay is barred for it for 5 minutes. A move onto the
+  main relay takes its dial token before letting go of the socket it has.
+- **Home again** (`relayHandBack`): at least 5 minutes away (15, then 45, if it
+  left again within the hour), then every 2 minutes (stretching to 10) the main
+  relay is asked six times over a minute on one scratch socket with one-off
+  probes, and must be within 3 s every time. Light questions only: a struggling
+  relay is not asked for a region's whole snapshot until it has kept pace.
+- **Alerts.** A snapshot from a relay that may be behind the one just left
+  (anything but a move onto a relay just measured ahead) re-sets the stamina and
+  buff baselines instead of being compared (`ev.older` in `liveBridge`).
+- A region the main relay lists but is not mirroring starts on the backup when
+  the backup has it (`loadRelayRegions`).
+
+Thresholds live in `RELAY_LATE_MS`, `LIVE_DOWN_SNAPSHOT_MS`, `LIVE_SWAP_*` and
+`relayTune`.
+
+### 13.4 What the user sees
+
+A dot beside the bell (`relayStatus`): green = every region live on the main
+relay; amber = a region is on the backup, connecting, or late; red = a region
+has had no working relay for 12 s and the app is on the website data. Its panel
+lists each region's relay, state and lateness, with "Check now" and the switch
+`bc_relay_backup` — off restores the single-relay behaviour exactly (no probes,
+no moves).
+
+### 13.5 Debugging
+
+`window.__live`: `relays()`, `fresh`, `moves`, `bars`, `tune`,
+`use(region|'all', relay)` (force, no deadline), `swap(region)` (as the app
+would), `check(region, true)`, `parity(region)` (the region's queries put to
+both relays and the decoded rows compared), `fakeLate(region, relay, ms)`.
+
+### 13.6 Not covered
+
+- bitcraftsync's storage-log, housing and claim-inventory web routes (Group
+  Craft's container finder, the Inventory claim fallback) have no second source.
+- Event tables exist only on bitcraftsync. The app reads none; the Stall Bot's
+  trades depend on one.
+- The world check on a device with no stored world stamp still needs
+  bitcraftsync's web side.
+- Lookups for a region on the backup cost a scratch socket each (Open Crafts,
+  all nine regions on the backup: ~2.5 s warm, ~5 s cold). A lookup socket kept
+  open per region would cut that; not built.
