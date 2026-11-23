@@ -5090,7 +5090,7 @@ const relayWsUrl = (region, relay) => RELAYS[relay || relayOf(region)].wsUrl(reg
 // 2026-11-20) — so the last good answer stands for RELAY_HEALTH_KEEP_MS and a failed read is repeated after a few
 // seconds instead of waiting out the usual minute.
 const RELAY_HEALTH_EVERY_MS = 60000, RELAY_HEALTH_RETRY_MS = 5000, RELAY_HEALTH_KEEP_MS = 5 * 60 * 1000;
-const relayJita = { at: 0, ok: false, goodAt: 0, regions: {}, busy: null };
+const relayJita = { at: 0, ok: false, goodAt: 0, fails: 0, regions: {}, busy: null };   // fails: failed reads of its health page in a row
 function relayBackupHealth(force){
   if (relayJita.busy) return relayJita.busy;
   if (!force && Date.now() - relayJita.at < (relayJita.ok ? RELAY_HEALTH_EVERY_MS : RELAY_HEALTH_RETRY_MS)) return Promise.resolve(relayJita);
@@ -5104,8 +5104,8 @@ function relayBackupHealth(force){
         const m = /^(.+?)-(\d+)$/.exec(k), v = j.modules[k];
         if (m && m[1] === relayWorld) regions[+m[2]] = { connected: !!(v && v.connected), age: v && typeof v.last_update_age_seconds === 'number' ? v.last_update_age_seconds : null };   // another world's databases don't count
       });
-      relayJita.regions = regions; relayJita.ok = true; relayJita.goodAt = Date.now();
-    } catch(e){ relayJita.ok = false; }   // regions and goodAt stay: the last good answer still counts for a while (relayEligible)
+      relayJita.regions = regions; relayJita.ok = true; relayJita.goodAt = Date.now(); relayJita.fails = 0;
+    } catch(e){ relayJita.ok = false; relayJita.fails++; }   // regions and goodAt stay: the last good answer still counts for a while (relayEligible)
     return relayJita;
   })();
   p.finally(() => { if (relayJita.busy === p) relayJita.busy = null; });
@@ -5118,6 +5118,9 @@ function relayEligible(relay, rg){
   const r = relayJita.regions[rg];
   return !!(r && r.connected) && Date.now() - relayJita.goodAt < RELAY_HEALTH_KEEP_MS;
 }
+// Is the backup itself out of reach? Its health page failed twice running (one miss means little, see above). Only
+// for telling the user: what may move where is still relayEligible's call.
+const relayBackupDown = () => relayBackupOn() && !relayJita.ok && relayJita.fails >= 2;
 const relayBuildingInfo = {};   // building entityId -> {claimId, descId, nickname}
 const relayClaimNames = {};     // claim entityId -> name
 // Buildings never move and claims rarely rename, so the building→claim→name maps are worth keeping
@@ -6309,7 +6312,7 @@ function relayCheck(rg, compare){
       if (late >= RELAY_LATE_MS) relayLateRun(rg);   // confirmed behind the other relay just now: is it a pattern? (decides whether the region moves)
       return relayFresh[rg];
     }
-    if (a){ noteClock(a); return relayFresh[rg]; }   // the other relay could not be asked: this one's own reading stands
+    if (a){ noteClock(a); relayFresh[rg].otherSilent = true; return relayFresh[rg]; }   // the other relay could not be asked: this one's own reading stands (otherSilent: so the panel can say why nothing moved)
     relayNote(rg, { relay, at, late: null, basis: 'clock' });   // neither answered: nothing can be said
     return relayFresh[rg];
   })();
@@ -15248,9 +15251,25 @@ function relayRegionInfo(rg, now){
   if (live) delete _relayNotLiveSince[rg]; else if (!_relayNotLiveSince[rg]) _relayNotLiveSince[rg] = now;
   const downFor = live ? 0 : now - _relayNotLiveSince[rg];
   const name = liveRegionName(rg), f = relayFresh[rg], read = live && f && f.relay === relay, known = read && f.late != null;
-  return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup: relay !== RELAY_ORDER[0], live, downFor, status: c ? c.status : 'off',
-    late: known ? f.late : null, isLate: !!(known && f.late >= RELAY_LATE_MS), checkedAt: read ? f.at : 0, basis: known ? f.basis : '',
-    unmeasured: !!(read && f.late == null), noAnswer: !!(known && f.noAnswer) };   // unmeasured: asked, and neither relay answered the probe
+  const isLate = !!(known && f.late >= RELAY_LATE_MS), backup = relay !== RELAY_ORDER[0];
+  return { rg, name: 'R' + rg + (name ? ' ' + name : ''), relay, backup, live, downFor, status: c ? c.status : 'off',
+    late: known ? f.late : null, isLate, checkedAt: read ? f.at : 0, basis: known ? f.basis : '',
+    unmeasured: !!(read && f.late == null), noAnswer: !!(known && f.noAnswer),   // unmeasured: asked, and neither relay answered the probe
+    stay: isLate && !backup ? relayStayWhy(rg, now) : '' };
+}
+// A region that reads late and is still on the main relay: why has it not moved? The panel used to show "8 min late"
+// beside a ticked backup box and nothing else, on a day the backup relay itself was down (2026-11-23) — which reads
+// as the switch not working. '' = nothing in the way (the next comparison decides).
+function relayStayWhy(rg, now){
+  const other = RELAY_ORDER[1], label = RELAYS[other].label;
+  if (relayBackupDown()) return `${label} is not answering`;
+  if (relayBarred(rg, other)) return `${label} did not answer when it was moved there — next try in ${relayLateText(regionBar[rg + ':' + other] - now)}`;
+  if (!relayEligible(other, rg)) return relayJita.ok ? `${label} does not have this region right now` : '';   // not read yet, or one miss: too early to say
+  if (_relayRun[rg]) return `being checked against ${label}`;
+  if ((_relayCoolUntil[rg] || 0) > now) return 'late on and off — not enough to move it';
+  const f = relayFresh[rg];
+  if (f && f.otherSilent) return `${label} did not answer the comparison`;   // its health page is fine, its probe was not
+  return '';
 }
 const relayLateText = ms => { const s = ms / 1000; return s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; };
 function relayStatus(){
@@ -15264,8 +15283,12 @@ function relayStatus(){
   if (waiting.length) parts.push(`${list(waiting)} ${waiting.length > 1 ? 'are' : 'is'} connecting.`);
   if (onBackup.length) parts.push(`${list(onBackup)} ${onBackup.length > 1 ? 'are' : 'is'} on the backup relay (${RELAYS[RELAY_ORDER[1]].label}).`);
   const late = regions.filter(r => r.isLate);
-  if (late.length) parts.push(late.map(r => r.noAnswer ? `${r.name} is slow to answer` : `${r.name} is ${relayLateText(r.late)} behind the game`).join(', ') + '.');
+  // A late region still on the main relay says why (relayStayWhy) — except when the backup is out of reach, which is
+  // one sentence for all of them, and is said even with nothing late: the safety net is gone either way.
+  const backupDown = relayBackupDown(), held = late.filter(r => !r.backup);
+  if (late.length) parts.push(late.map(r => (r.noAnswer ? `${r.name} is slow to answer` : `${r.name} is ${relayLateText(r.late)} behind the game`) + (r.stay && !backupDown ? ` (${r.stay})` : '')).join(', ') + '.');
   if (!parts.length) parts.push(`All ${regions.length} regions are live on ${main}.`);
+  if (backupDown) parts.push(`The backup relay (${RELAYS[RELAY_ORDER[1]].label}) is not answering` + (held.length ? `, so ${held.length < late.length ? list(held) + (held.length > 1 ? ' stay' : ' stays') : held.length > 1 ? 'they stay' : 'it stays'} on ${main}` : '') + '.');
   return { level: down.length ? 'bad' : (waiting.length || onBackup.length || late.length) ? 'warn' : 'ok', text: parts.join(' '), regions };
 }
 function relayRowState(r){
@@ -15282,7 +15305,7 @@ function relayPanelHtml(s){
     : `Measured ${relayLateText(now - r.checkedAt)} ago ` + (r.basis === 'compare' ? 'against the other relay' : r.basis === 'row' ? 'from a row it just delivered' : 'against this device’s clock') + (r.late != null ? ` — ${r.late < 1000 ? 'under a second' : relayLateText(r.late)} behind` : '');
   return `<div class="notif-hdr"><span><i class="ti ti-broadcast"></i> Live data</span>${s.regions.length ? `<button class="notif-clear" onclick="relayCheckAll()"${_relayCheckAllBusy ? ' disabled' : ''}>${_relayCheckAllBusy ? 'Checking…' : 'Check now'}</button>` : ''}</div>
     <div class="rd-sum">${escHtml(s.text)}</div>` +
-    s.regions.map(r => { const st = relayRowState(r), mv = relayMoves[r.rg], away = r.backup && mv ? `On the backup for ${relayLateText(now - mv.at)}: ${RELAYS[mv.from].label} — ${mv.why}. ` + (mv.homeAt ? `Asked again ${relayLateText(now - mv.homeAt)} ago: ${mv.homeLate == null ? 'no answer' : mv.homeLate <= relayTune.handWithinMs ? 'keeping pace' : relayLateText(mv.homeLate) + ' behind'}. ` : '') : ''; return `<div class="rd-row" title="${escHtml(away + tip(r))}"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('') +
+    s.regions.map(r => { const st = relayRowState(r), mv = relayMoves[r.rg], away = r.backup && mv ? `On the backup for ${relayLateText(now - mv.at)}: ${RELAYS[mv.from].label} — ${mv.why}. ` + (mv.homeAt ? `Asked again ${relayLateText(now - mv.homeAt)} ago: ${mv.homeLate == null ? 'no answer' : mv.homeLate <= relayTune.handWithinMs ? 'keeping pace' : relayLateText(mv.homeLate) + ' behind'}. ` : '') : ''; return `<div class="rd-row" title="${escHtml(away + (r.stay ? `Still on ${RELAYS[r.relay].label}: ${r.stay}. ` : '') + tip(r))}"><span class="rd-pip ${st.cls}"></span><span class="rd-name">${escHtml(r.name)}</span><span class="rd-relay">${escHtml(RELAYS[r.relay].label)}</span><span class="rd-state ${st.cls === 'ok' ? '' : st.cls}">${st.text}</span></div>`; }).join('') +
     `<label class="rd-opt" title="When a region is late or not answering on ${escHtml(RELAYS[RELAY_ORDER[0]].label)}, read it from ${escHtml(RELAYS[RELAY_ORDER[1]].label)} until it recovers. Off: everything stays on ${escHtml(RELAYS[RELAY_ORDER[0]].label)} and nothing is measured."><input type="checkbox" ${relayBackupOn() ? 'checked' : ''} onchange="setRelayBackup(this.checked)"> Use the backup relay when a region is late or down</label>`;
 }
 let _relayDotSig = '';
