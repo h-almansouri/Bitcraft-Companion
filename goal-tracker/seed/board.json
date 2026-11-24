@@ -103,9 +103,13 @@
       ],
       "routes": {},
       "countCrafts": true,
-      "assignments": {},
+      "assignments": {
+        "i.1481097878": [
+          "1008806316829653802"
+        ]
+      },
       "createdAt": "2026-11-23T20:57:02.654Z",
-      "updatedAt": "2026-11-24T00:20:32.958Z"
+      "updatedAt": "2026-11-24T06:41:24.740Z"
     }
   ]
 }
