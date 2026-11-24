@@ -47,7 +47,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const claim = useLoad<ClaimDetail>('claim', () => api.claim());
   const { ctx, error: gameError } = useGame();
   const players = useMemo(() => [...(push?.players ?? [])].sort().join(','), [push?.players]);
-  // Read once when the page opens, never on a timer.
+  // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
   const stock = useStock(push ? `stock:${players}` : null, players ? players.split(',') : []);
   const [saveError, setSaveError] = useState<string | null>(null);
   const access = useAccess(board.data);
@@ -238,7 +238,7 @@ function Stage({ label, stage, detail, hint }: { label: string; stage: StageProg
         <span className="num text-2xl font-semibold text-accent-ink">{pct(stage.pct)}</span>
         <span className="text-[13px] font-medium text-ink">{label}</span>
       </div>
-      <Bar value={stage.pct} tone={stage.pct >= 1 ? 'good' : 'accent'} className="mt-1.5 h-2" />
+      <Bar value={stage.pct} className="mt-1.5 h-2" />
       <p className="mt-1.5 text-xs text-ink-2">{detail}</p>
     </div>
   );

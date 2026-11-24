@@ -4,10 +4,12 @@
  *
  * Bitjita is a free community service. This tool is deliberately a light guest:
  *
- *  - Nothing is ever fetched in the background. Storage is read only when someone
- *    opens a page or presses refresh.
- *  - A finished snapshot is shared by everyone for 15 minutes. Pressing refresh
- *    can ask for a newer one, but never more often than every 5 minutes.
+ *  - The server never fetches by itself. Storage is read only because a page asked:
+ *    when it opens, when someone presses refresh, and every 15 minutes while it is
+ *    actually on screen (src/lib/refresh.ts). A closed or hidden tab asks nothing.
+ *  - A finished snapshot is shared by everyone for 15 minutes, so those automatic
+ *    asks add up to four reads an hour at most, however many people are looking.
+ *    Pressing refresh can ask for a newer one, but never more often than every 5 minutes.
  *  - Things that rarely change (who is in the claim, which buildings stand, who
  *    owns a house) are remembered for hours. What is left is one request for the
  *    claim's chests and three per counted member (storage, crafts, passive crafts).
@@ -18,7 +20,8 @@
  *    at 60 requests a minute or 240 an hour (Bitjita's own limit is 250 a minute).
  *    The minute cap is a safety net sized so one full read fits; the hour cap is
  *    what holds overall use down.
- *  - If a newer read comes back with gaps, the last complete one is shown instead.
+ *  - If a newer read comes back with gaps, the last complete one (up to an hour
+ *    old) is shown instead, and Bitjita is left alone for 5 minutes before the next try.
  *
  * Nothing in here depends on where the server runs. The host passes in a `Memo`
  * (Cloudflare's cache as a Worker, a map in memory under Node) and this file
@@ -37,8 +40,12 @@ const TTL = {
   houseList: 12 * 3600,
   /** Chest, bag and craft contents. Reused for as long as the snapshot they belong to. */
   storage: 900,
-  /** The assembled snapshot everyone shares. */
+  /** How long the assembled snapshot is the answer for everyone. */
   snapshot: 900,
+  /** How much longer a complete snapshot is kept, to fall back on when a newer read comes back with gaps. */
+  fallback: 3600,
+  /** After a newer read fails, how long everyone gets the older one before Bitjita is tried again. */
+  holdOff: 300,
 };
 /** Bump when what a snapshot contains changes, so copies saved in the old shape are not served. */
 const SNAPSHOT_SHAPE = 2;
@@ -209,12 +216,17 @@ export async function stockSnapshot(memo: Memo, claimId: string, wantedPlayers: 
   const playerIds = [...new Set(wantedPlayers)].filter((id) => members.has(id)).sort();
 
   const whole = `https://snapshot.internal/v${SNAPSHOT_SHAPE}/${claimId}?players=${playerIds.join(',')}`;
+  // A newer read failed a moment ago: everyone gets the same older answer until it is worth trying again.
+  const held = await memo.get(whole + '&held=1');
+  if (held) return JSON.parse(held);
+
   const ready = await memo.get(whole);
   let previous: StockSnapshot | null = null;
   if (ready) {
     const snapshot: StockSnapshot = JSON.parse(ready);
     const ageSeconds = (Date.now() - new Date(snapshot.at).getTime()) / 1000;
-    if (!fresh || ageSeconds < MIN_REFRESH_SECONDS) return snapshot;
+    // Shared as it is for 15 minutes. Someone pressing refresh can replace it once it is 5 minutes old.
+    if (ageSeconds < (fresh ? MIN_REFRESH_SECONDS : TTL.snapshot)) return snapshot;
     previous = snapshot;
   }
   // From here on this is a new read. An explicit refresh re-asks for contents; the slow-changing facts stay remembered.
@@ -330,18 +342,23 @@ export async function stockSnapshot(memo: Memo, claimId: string, wantedPlayers: 
     }
   });
 
-  try {
-    await Promise.all([claimPart, ...playerParts]);
-  } catch (err) {
+  // Every part is seen through to the end, so nothing is still asking Bitjita after the answer has gone out.
+  const [claimRead] = await Promise.allSettled([claimPart, ...playerParts]);
+  if (claimRead.status === 'rejected') {
     // The claim's own chests could not be read. With an older complete read on hand, show that rather than nothing.
-    if (!previous) throw err;
-    problems.push(`Could not read the claim's storage (${(err as Error).message}).`);
+    if (!previous) throw claimRead.reason;
+    problems.push(`Could not read the claim's storage (${(claimRead.reason as Error).message}).`);
   }
   // A read with pieces missing would make things look short that are not. The last complete one is the better answer.
-  if (problems.length && previous) return { ...previous, problems: [`Could not get a newer read, so this is still the one from earlier. ${problems[0]}`] };
+  if (problems.length && previous) {
+    const older: StockSnapshot = { ...previous, problems: [`Could not get a newer read, so this is still the one from earlier. ${problems[0]}`] };
+    memo.set(whole + '&held=1', JSON.stringify(older), TTL.holdOff);
+    return older;
+  }
   const snapshot: StockSnapshot = { at: new Date().toISOString(), claim: { id: detail.id, name: detail.name, tier: detail.tier }, locations, crafts, problems };
 
   // A snapshot with gaps is not worth keeping: the next ask should try again.
-  if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot);
+  // A complete one outlives its 15 minutes, so there is something to fall back on when the read after it fails.
+  if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot + TTL.fallback);
   return snapshot;
 }

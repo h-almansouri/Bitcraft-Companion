@@ -8,7 +8,7 @@ import { MultiSelect, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 
 /** Colours for "turns into something else" branches; plain use gets the neutral one. */
-const BRANCH_COLORS = ['var(--accent)', 'var(--tier-3)', 'var(--tier-5)', 'var(--tier-4)', 'var(--tier-7)', 'var(--tier-8)'];
+const BRANCH_COLORS = ['var(--accent)', 'var(--branch-1)', 'var(--branch-2)', 'var(--branch-3)', 'var(--branch-4)', 'var(--branch-5)'];
 const AS_IS_COLOR = 'var(--muted)';
 
 export function colorsFor(branches: FlowBranch[]): string[] {

@@ -61,7 +61,7 @@ export function Travelers() {
   const claim = useLoad<ClaimDetail>('claim', () => api.claim());
   const [withMembers, setWithMembers] = useLocal<boolean>('qm.restock.members', false);
   const players = useMemo(() => (withMembers ? (claim.data?.members.map((m) => m.id).sort() ?? []) : []), [withMembers, claim.data]);
-  // Read once when the page opens, never on a timer.
+  // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
   const stock = useStock(`stock:${players.join(',')}`, players);
   const view = useMemo(() => buildStock(stock.data, { excluded: [], players, countCrafts: false }), [stock.data, players]);
 

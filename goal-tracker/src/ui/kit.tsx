@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from 'react';
 import { Check, ChevronDown, X } from 'lucide-react';
+import { progressColor } from '../lib/colors.ts';
 
 export const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' ');
 
@@ -62,7 +63,6 @@ export function TierChip({ tier, className }: { tier: number; className?: string
 
 const toneText: Record<Tone, string> = { accent: 'text-accent-ink', good: 'text-good', warn: 'text-warn', bad: 'text-bad', info: 'text-info', neutral: 'text-ink-2' };
 const toneSoft: Record<Tone, string> = { accent: 'bg-accent-soft', good: 'bg-good-soft', warn: 'bg-warn-soft', bad: 'bg-bad-soft', info: 'bg-info-soft', neutral: 'bg-surface-2' };
-const toneFill: Record<Tone, string> = { accent: 'bg-accent', good: 'bg-good', warn: 'bg-warn', bad: 'bg-bad', info: 'bg-info', neutral: 'bg-muted' };
 
 /** Small label badge: status, type, counts. */
 export function Pill({ tone = 'neutral', children, className }: { tone?: Tone; children: ReactNode; className?: string }) {
@@ -71,12 +71,12 @@ export function Pill({ tone = 'neutral', children, className }: { tone?: Tone; c
   );
 }
 
-/** A plain progress bar. `value` is 0..1. */
-export function Bar({ value, tone = 'accent', className }: { value: number; tone?: Tone; className?: string }) {
+/** A progress bar. `value` is 0..1, and its colour follows it: red when barely started, through orange and yellow, to deep green when done. */
+export function Bar({ value, className }: { value: number; className?: string }) {
   const width = Math.max(0, Math.min(1, value)) * 100;
   return (
     <div className={cx('h-1.5 overflow-hidden rounded-full bg-surface-3', className)} role="progressbar" aria-valuenow={Math.round(width)} aria-valuemin={0} aria-valuemax={100}>
-      <div className={cx('h-full rounded-full transition-[width] duration-500', toneFill[tone])} style={{ width: `${width}%` }} />
+      <div className="h-full rounded-full transition-[width,background-color] duration-500" style={{ width: `${width}%`, background: progressColor(value) }} />
     </div>
   );
 }

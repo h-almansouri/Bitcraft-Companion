@@ -162,7 +162,7 @@ function StageBox({ stage, onOpen, wide, outlined }: { stage: ChainStage; onOpen
           <TierChip tier={row.tier} className="mt-px" />
           <span className="line-clamp-2 min-h-[2.5em] text-xs font-medium leading-tight text-ink">{row.name}</span>
         </div>
-        <Bar value={node.needed ? Math.min(1, node.have / node.needed) : 1} tone={done ? 'good' : 'accent'} className="mt-2" />
+        <Bar value={node.needed ? Math.min(1, node.have / node.needed) : 1} className="mt-2" />
         <div className="mt-1.5 flex items-baseline justify-between gap-2 text-[11px] leading-none">
           <span className="num text-ink-2">
             {num(node.have)} / {num(node.needed)}

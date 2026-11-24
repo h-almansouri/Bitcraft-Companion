@@ -35,7 +35,7 @@ export function BoardPage({ slug }: { slug: string }) {
   // One stock read covers every open push on the page.
   const open = useMemo(() => board.data?.pushes.filter((p) => p.status !== 'done') ?? [], [board.data]);
   const players = useMemo(() => [...new Set(open.flatMap((p) => p.players))].sort(), [open]);
-  // Read once when the page opens, never on a timer.
+  // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
   const stock = useStock(open.length ? `stock:${players.join(',')}` : null, players);
 
   if (board.loading) return <Skeleton className="h-64" />;
@@ -168,7 +168,7 @@ function PushCard({ board, push, ctx, stock, stockLoading }: { board: Board; pus
               ).map(([label, stage]) => (
                 <div key={label} className="flex items-center gap-3">
                   <span className="w-[68px] shrink-0 text-xs text-ink-2">{label}</span>
-                  <Bar value={stage.pct} tone={stage.pct >= 1 ? 'good' : 'accent'} className="flex-1" />
+                  <Bar value={stage.pct} className="flex-1" />
                   <span className="num w-9 text-right text-[13px] font-semibold text-accent-ink">{pct(stage.pct)}</span>
                 </div>
               ))}

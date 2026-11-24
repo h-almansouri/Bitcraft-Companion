@@ -3642,8 +3642,12 @@ var TTL = {
 	houseList: 43200,
 	/** Chest, bag and craft contents. Reused for as long as the snapshot they belong to. */
 	storage: 900,
-	/** The assembled snapshot everyone shares. */
-	snapshot: 900
+	/** How long the assembled snapshot is the answer for everyone. */
+	snapshot: 900,
+	/** How much longer a complete snapshot is kept, to fall back on when a newer read comes back with gaps. */
+	fallback: 3600,
+	/** After a newer read fails, how long everyone gets the older one before Bitjita is tried again. */
+	holdOff: 300
 };
 /** Bump when what a snapshot contains changes, so copies saved in the old shape are not served. */
 var SNAPSHOT_SHAPE = 2;
@@ -3794,12 +3798,13 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 	const members = new Map(detail.members.map((m) => [m.id, m.name]));
 	const playerIds = [...new Set(wantedPlayers)].filter((id) => members.has(id)).sort();
 	const whole = `https://snapshot.internal/v${SNAPSHOT_SHAPE}/${claimId}?players=${playerIds.join(",")}`;
+	const held = await memo.get(whole + "&held=1");
+	if (held) return JSON.parse(held);
 	const ready = await memo.get(whole);
 	let previous = null;
 	if (ready) {
 		const snapshot = JSON.parse(ready);
-		const ageSeconds = (Date.now() - new Date(snapshot.at).getTime()) / 1e3;
-		if (!fresh || ageSeconds < MIN_REFRESH_SECONDS) return snapshot;
+		if ((Date.now() - new Date(snapshot.at).getTime()) / 1e3 < (fresh ? MIN_REFRESH_SECONDS : TTL.snapshot)) return snapshot;
 		previous = snapshot;
 	}
 	const force = fresh;
@@ -3919,16 +3924,19 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 			}
 		} catch {}
 	});
-	try {
-		await Promise.all([claimPart, ...playerParts]);
-	} catch (err) {
-		if (!previous) throw err;
-		problems.push(`Could not read the claim's storage (${err.message}).`);
+	const [claimRead] = await Promise.allSettled([claimPart, ...playerParts]);
+	if (claimRead.status === "rejected") {
+		if (!previous) throw claimRead.reason;
+		problems.push(`Could not read the claim's storage (${claimRead.reason.message}).`);
 	}
-	if (problems.length && previous) return {
-		...previous,
-		problems: [`Could not get a newer read, so this is still the one from earlier. ${problems[0]}`]
-	};
+	if (problems.length && previous) {
+		const older = {
+			...previous,
+			problems: [`Could not get a newer read, so this is still the one from earlier. ${problems[0]}`]
+		};
+		memo.set(whole + "&held=1", JSON.stringify(older), TTL.holdOff);
+		return older;
+	}
 	const snapshot = {
 		at: (/* @__PURE__ */ new Date()).toISOString(),
 		claim: {
@@ -3940,7 +3948,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 		crafts,
 		problems
 	};
-	if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot);
+	if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot + TTL.fallback);
 	return snapshot;
 }
 // src/lib/claim.ts

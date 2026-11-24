@@ -33,18 +33,28 @@
   --info: #afa9ec;
   --info-soft: rgba(127, 119, 221, 0.15);
 
-  /* One hue per tier; chips mix it into the surface so every tier reads on dark. */
-  --tier-0: #8fa3bf;
-  --tier-1: #9aa3ad;
-  --tier-2: #7fb866;
-  --tier-3: #5aa2e0;
-  --tier-4: #a78bea;
-  --tier-5: #f0a04b;
-  --tier-6: #ee7b72;
-  --tier-7: #45c2b8;
-  --tier-8: #e481b8;
-  --tier-9: #e0c24a;
-  --tier-10: #6cc4ee;
+  /*
+   * One colour per tier, the same ones Bitcraft Companion uses: each tier's in-game metal
+   * (T2 Pyrelite copper ... T10 Astralite pale sky). Chips mix it into the surface so every tier reads on dark.
+   */
+  --tier-0: #9aa4b2;
+  --tier-1: #9aa4b2;
+  --tier-2: #d5904f;
+  --tier-3: #6cc84a;
+  --tier-4: #4fa0c4;
+  --tier-5: #6f5cf0;
+  --tier-6: #e0463c;
+  --tier-7: #e0c33f;
+  --tier-8: #57cfa6;
+  --tier-9: #8f8aa6;
+  --tier-10: #a9cdf0;
+
+  /* Colours that tell the branches of a chain apart. They mean nothing about tier, so they are kept away from the tier colours. */
+  --branch-1: #5aa2e0;
+  --branch-2: #f0a04b;
+  --branch-3: #a78bea;
+  --branch-4: #45c2b8;
+  --branch-5: #e481b8;
 
   color-scheme: dark;
 }
