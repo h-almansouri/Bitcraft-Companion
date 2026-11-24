@@ -462,7 +462,8 @@ export function buildChains(ctx: GameCtx, view: PushView): Chain[] {
   };
   const all = [...whole.nodes.values()].filter((node) => node.needed > 0).map(describe);
   const byId = new Map(all.map((d) => [d.node.id, d]));
-  all.sort((a, b) => professionRank(a.profession) - professionRank(b.profession) || a.tag.localeCompare(b.tag) || a.tier - b.tier || a.name.localeCompare(b.name));
+  // Professions together, and within each from the lowest tier up.
+  all.sort((a, b) => professionRank(a.profession) - professionRank(b.profession) || a.tier - b.tier || a.tag.localeCompare(b.tag) || a.name.localeCompare(b.name));
   const nameOf = (id: Ref) => byId.get(id)?.name ?? ctx.book.name(id);
 
   const chains: Chain[] = [];
@@ -493,15 +494,7 @@ export function buildChains(ctx: GameCtx, view: PushView): Chain[] {
         .filter((input) => input.id !== prev?.node.id)
         .map((input) => ({ id: input.id, name: ctx.book.name(input.id), tier: ctx.book.thing(input.id)?.tier ?? 0, perRun: input.qty, short: (view.rows.get(input.id)?.node.toGo ?? 0) > 0 }));
 
-      // How far along it is. Anything the push no longer asks for has already been turned into later steps.
-      if (row) {
-        const left = isRaw(row.node) ? stillToGet(row.node) : row.node.toGo;
-        stage.toGo = Math.min(stage.total, left);
-        const counted = Math.min(row.node.have, row.node.needed);
-        const inHand = Math.max(0, row.node.have - atStation(view.stock, node.id));
-        stage.pending = Math.max(0, Math.min(counted - inHand, stage.total - stage.toGo));
-      }
-      return stage;
+      return Object.assign(stage, standing(view, node.id, stage.total));
     });
 
     const last = line[line.length - 1];
@@ -514,4 +507,199 @@ export function buildChains(ctx: GameCtx, view: PushView): Chain[] {
     });
   }
   return chains;
+}
+
+// ---------------------------------------------------------------------------
+// Products: the push seen from its finished materials.
+//
+// This is how a person writes the list out by hand:
+//
+//   880 ink (880 pigment + 1,760 fish oil)
+//   605 pigment (3,025 flower)
+//
+// Two kinds of thing get a line of their own. An assembly puts finished things
+// together (a building, cloth from strip and filament, ink from pigment and oil,
+// a research from a brick and a journal): its steps are just its ingredients,
+// each of which has its own line. Everything else is a chain: one material
+// worked up step by step from what is gathered (roots, fiber, thread, strip,
+// rope), and it is listed whole under the thing at the end of it.
+// ---------------------------------------------------------------------------
+
+/** Where one step of a product stands right now. */
+export type StepState = 'done' | 'collect' | 'craft' | 'gather' | 'buy' | 'station' | 'waiting';
+
+export interface MakeStep {
+  id: Ref;
+  name: string;
+  tier: number;
+  profession: string;
+  /** Gathered or bought rather than crafted. */
+  raw: boolean;
+  /** How much of it this product takes. Other products may take more of the same thing. */
+  share: number;
+  recipe?: Recipe;
+  /** What that share is made from. */
+  from: { id: Ref; name: string; qty: number }[];
+  /** Across the whole push: everything it takes of this, how much is still to get, and how much is only at a station. */
+  total: number;
+  toGo: number;
+  pending: number;
+  jobs: CraftJob[];
+  /** The most useful thing to do about it right now, when there is one. */
+  todo?: Todo;
+  /** False once whatever this step feeds is covered: no more of it is wanted for this product. */
+  wanted: boolean;
+  state: StepState;
+}
+
+export interface Product {
+  id: Ref;
+  name: string;
+  tier: number;
+  profession: string;
+  /** How many of them this line is about. */
+  qty: number;
+  /** What takes them: the things they are put into, or id null for "it is a goal of the push". */
+  for: { id: Ref | null; name: string; qty: number }[];
+  /** Put together from finished things: its steps are just its ingredients, each of which is a product of its own. */
+  assembly: boolean;
+  /** Gathered or bought and used as it is, so there is nothing to process. */
+  raw: boolean;
+  /** In making order; the last one is the product itself. */
+  steps: MakeStep[];
+  /** True while the product itself is not covered. */
+  open: boolean;
+}
+
+/** Which job to show for a material when it has several: something that can be done now comes first. */
+const TODO_ORDER: TodoKind[] = ['pickup', 'craft', 'stock', 'gather', 'buy', 'progress', 'blocked'];
+const STATE_OF: Record<TodoKind, StepState> = { pickup: 'collect', craft: 'craft', stock: 'craft', gather: 'gather', buy: 'buy', progress: 'station', blocked: 'waiting' };
+
+/** How far along one material is, against everything the push takes of it from empty storage. */
+function standing(view: PushView, id: Ref, total: number): { toGo: number; pending: number } {
+  const row = view.rows.get(id);
+  // Anything the push no longer asks for has already been turned into later steps.
+  if (!row) return { toGo: 0, pending: 0 };
+  const left = isRaw(row.node) ? stillToGet(row.node) : row.node.toGo;
+  const toGo = Math.min(total, left);
+  const counted = Math.min(row.node.have, row.node.needed);
+  const inHand = Math.max(0, row.node.have - atStation(view.stock, id));
+  return { toGo, pending: Math.max(0, Math.min(counted - inHand, total - toGo)) };
+}
+
+export function buildProducts(ctx: GameCtx, view: PushView): Product[] {
+  const whole = view.scratch;
+  const recipeOf = (node: PlanNode | undefined) => node?.steps.find((s) => !s.fromStock)?.recipe;
+  const nameOf = (id: Ref) => ctx.book.name(id);
+  const professionFor = (node: PlanNode) => (view.onOrder.has(node.id) ? 'Trade' : professionOf(node, recipeOf(node), ctx));
+
+  const todoOf = new Map<Ref, Todo>();
+  for (const todo of view.todos) {
+    const held = todoOf.get(todo.row.id);
+    if (!held || TODO_ORDER.indexOf(todo.kind) < TODO_ORDER.indexOf(held.kind)) todoOf.set(todo.row.id, todo);
+  }
+
+  // An assembly is put together from finished things: a building, or anything made from two or more crafted ingredients.
+  const crafted = (id: Ref) => !!recipeOf(whole.nodes.get(id));
+  const isAssembly = (node: PlanNode | undefined) => {
+    const recipe = recipeOf(node);
+    return !!recipe && (recipe.kind === 'build' || recipe.inputs.filter((input) => crafted(input.id)).length >= 2);
+  };
+
+  const products: Product[] = [];
+  for (const node of whole.nodes.values()) {
+    if (node.needed <= 0) continue;
+    const assembly = isAssembly(node);
+    // Who takes it as a finished thing: the push itself, or an assembly.
+    const ends: Product['for'] = [];
+    for (const use of node.uses) {
+      if (!use.into) ends.push({ id: null, name: GOAL, qty: use.qty });
+      else if (assembly || isAssembly(whole.nodes.get(use.into))) ends.push({ id: use.into, name: nameOf(use.into), qty: use.qty });
+    }
+    // Anything else is a step along a chain, and is listed under whatever that chain ends in.
+    if (!ends.length) continue;
+    const qty = ends.reduce((sum, e) => sum + e.qty, 0);
+
+    // Walk back through the recipes, adding up how much of each thing this product takes.
+    const found = new Map<Ref, { share: number; depth: number; feeds: Set<Ref> }>();
+    // The order steps are listed in: everything a thing is made from, then the thing itself.
+    const order: Ref[] = [];
+    const opened = new Set<Ref>();
+    const visit = (id: Ref, amount: number, depth: number, path: Ref[], feeds: Ref | null, open: boolean) => {
+      const entry = found.get(id) ?? { share: 0, depth: 0, feeds: new Set<Ref>() };
+      entry.share += amount;
+      entry.depth = Math.max(entry.depth, depth);
+      if (feeds) entry.feeds.add(feeds);
+      found.set(id, entry);
+      const recipe = recipeOf(whole.nodes.get(id));
+      if (recipe && open && !path.includes(id)) {
+        opened.add(id);
+        const runs = amount / yieldOf(recipe, id);
+        // The ingredients of an assembly, and any assembly met along a chain, have their own line: they are named here, not opened up.
+        for (const input of recipe.inputs) visit(input.id, runs * input.qty, depth + 1, [...path, id], id, !assembly && !isAssembly(whole.nodes.get(input.id)));
+      }
+      if (!order.includes(id)) order.push(id);
+    };
+    visit(node.id, qty, 0, [], null, true);
+
+    const listed = [...found]
+      .map(([id, entry]) => {
+        const at = whole.nodes.get(id);
+        const thing = ctx.book.thing(id);
+        const recipe = opened.has(id) ? recipeOf(at) : undefined;
+        const total = at?.needed ?? entry.share;
+        const runs = recipe ? entry.share / yieldOf(recipe, id) : 0;
+        const step: MakeStep = {
+          id,
+          name: thing?.name ?? id,
+          tier: thing?.tier ?? 0,
+          profession: at ? professionFor(at) : 'Other',
+          raw: !recipeOf(at),
+          share: entry.share,
+          recipe,
+          from: recipe ? recipe.inputs.map((input) => ({ id: input.id, name: nameOf(input.id), qty: runs * input.qty })) : [],
+          total,
+          ...standing(view, id, total),
+          jobs: view.stock.atStations.get(id) ?? [],
+          todo: todoOf.get(id),
+          wanted: false,
+          state: 'done',
+        };
+        return { step, depth: entry.depth, feeds: entry.feeds };
+      })
+      // Whatever something is made from comes before it, each ingredient with its own steps kept together.
+      .sort((a, b) => order.indexOf(a.step.id) - order.indexOf(b.step.id));
+
+    // More of a step is only wanted while something it feeds still has to be made.
+    const stepOf = new Map(listed.map((entry) => [entry.step.id, entry.step]));
+    for (const { step, feeds } of [...listed].sort((a, b) => a.depth - b.depth)) {
+      step.wanted = step.toGo > 0 && (step.id === node.id || [...feeds].some((id) => stepOf.get(id)?.wanted));
+      if (step.wanted) step.state = step.todo ? STATE_OF[step.todo.kind] : 'waiting';
+      else if (step.pending > 0) step.state = step.jobs.length && step.jobs.every((j) => j.done) ? 'collect' : 'station';
+    }
+
+    const steps = listed.map((entry) => entry.step);
+    const thing = ctx.book.thing(node.id);
+    products.push({
+      id: node.id,
+      name: thing?.name ?? node.id,
+      tier: thing?.tier ?? 0,
+      profession: professionFor(node),
+      qty,
+      for: ends,
+      assembly,
+      raw: !recipeOf(node),
+      steps,
+      open: steps[steps.length - 1].toGo > 0,
+    });
+  }
+  // Professions together, and within each from the lowest tier up.
+  return products.sort((a, b) => professionRank(a.profession) - professionRank(b.profession) || a.tier - b.tier || a.name.localeCompare(b.name));
+}
+
+/** The step of a product to look at first: something that can be done now, else what is at a station, else what it is waiting for. */
+export function nextStep(product: Product): MakeStep | undefined {
+  const pick = (...states: StepState[]) => product.steps.find((s) => states.includes(s.state));
+  // Something at a station to pick up or craft comes before going out to gather more.
+  return pick('collect') ?? pick('craft') ?? pick('gather', 'buy') ?? pick('station') ?? pick('waiting');
 }

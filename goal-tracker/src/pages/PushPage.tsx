@@ -13,7 +13,7 @@ import { Bar, Button, Card, Empty, Notice, Pill, Skeleton, Tabs, TierChip, cx, i
 import { StorageRead, useStock } from '../ui/storage.tsx';
 import { LockedPanel, guarded, useAccess } from '../ui/unlock.tsx';
 import { KIND_LABEL } from './BoardPage.tsx';
-import { JobList } from './push/JobsTab.tsx';
+import { GatherTab } from './push/GatherTab.tsx';
 import { ProcessTab } from './push/ProcessTab.tsx';
 import { StorageTab } from './push/StorageTab.tsx';
 import { SetupTab } from './push/SetupTab.tsx';
@@ -221,7 +221,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
         ) : tab === 'storage' ? (
           <StorageTab scope={scope} />
         ) : (
-          <JobList scope={scope} mode="gather" />
+          <GatherTab scope={scope} />
         )}
       </div>
 
