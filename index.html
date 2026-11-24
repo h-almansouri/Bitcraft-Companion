@@ -14894,7 +14894,7 @@ function slotContents(slot) {
 const STAT_IDX = { health:0, stamina:1 };
 const ALERT_DEFAULTS = {
   master: true, volume: 0.6,
-  tts: { on:false, voice:'', rate:0.95 },   // spoken alerts (Web Speech); independent of the sound master
+  tts: { on:false, voice:'', rate:0.95, names:true },   // spoken alerts (Web Speech); independent of the sound master. names: say who ("Vel — stamina full") or only what ("Stamina full")
   players: {},                              // entityId -> per-player on/off + threshold overrides (see palOn)
   // speak: whether this alert is read aloud while spoken alerts (tts.on) are on. All true by default, so
   // turning the voice on still speaks everything, as it did before each alert had its own switch.
@@ -14906,11 +14906,12 @@ const ALERT_DEFAULTS = {
   }
 };
 // sample: the line the row's Test button reads out (n = a tracked player's name)
+// short: the same alert spoken without the name, for when "Say names" is off (tts.names)
 const ALERT_META = {
-  buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff',                sample: n => `${n} lost Food Buffs` },
-  stamina:   { label:'Max stamina',          icon:'ti-bolt',      desc:'A player’s stamina refills to full',           sample: n => `${n} — stamina full` },
-  craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes',                     sample: n => `${n} — passive craft finished` },
-  idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving', sample: n => `${n} has been idle for 60s` },
+  buffLost:  { label:'Buff lost',            icon:'ti-flame-off', desc:'A tracked player loses a buff',                sample: n => `${n} lost Food Buffs`,            short:'Food Buffs lost' },
+  stamina:   { label:'Max stamina',          icon:'ti-bolt',      desc:'A player’s stamina refills to full',           sample: n => `${n} — stamina full`,             short:'Stamina full' },
+  craftDone: { label:'Passive craft done',   icon:'ti-flame',     desc:'A passive craft finishes',                     sample: n => `${n} — passive craft finished`,   short:'Craft finished' },
+  idle:      { label:'Player idle',          icon:'ti-zzz',       desc:'A signed-in player stops gaining XP / moving', sample: n => `${n} has been idle for 60s`,      short:'Idle' },
 };
 let alertSettings = null;
 function loadAlerts(){
@@ -15084,6 +15085,13 @@ function alertSpeaks(typeKey){
   const t = alertSettings.types[typeKey];
   return !!(alertSettings.tts && alertSettings.tts.on && t && t.speak !== false);
 }
+// The line to read aloud for an alert: the full message, or — with "Say names" off — its short form
+// without the player's name ("Idle" rather than "Vel has been idle for 60s"). The toast and the bell
+// always carry the full message, so who it was is still on screen.
+function alertSayLine(typeKey, msg, short){
+  if (!alertSpeaks(typeKey)) return '';
+  return (alertSettings.tts.names === false && short) ? short : msg;
+}
 
 // ── Alert audio queue: one thing at a time ──
 // Every ping and every spoken line goes through here, and the next starts only when the last has finished:
@@ -15107,6 +15115,9 @@ function queueAlertAudio(sound, say, preview){
   if (preview) _aqFlush();
   // a ping with nothing to say, while that same ping is already ringing or waiting: the one covers both
   else if (!say && ((_aqCur && _aqCur.sound === sound) || _aq.some(q => q.sound === sound))) return;
+  // the very same line, already being said or waiting its turn: with names off, three characters' crafts
+  // finishing together are three identical "Craft finished" — said once. (With names on the lines differ.)
+  else if (say && [_aqCur && Date.now() <= _aqCur.until ? _aqCur : null, ..._aq].some(q => q && q.say === say && q.sound === (sound || ''))) return;
   _aq.push({ sound: sound || '', say: say || '', preview: !!preview, ts: Date.now() });
   while (_aq.length > ALERT_AUDIO_MAX) _aq.shift();
   if (!_aqCur || Date.now() > _aqCur.until) _aqNext();   // idle — or the current step's end event is overdue
@@ -15147,12 +15158,13 @@ function _aqFlush(){
 // pairing, dedupe at the point of sound: nothing legitimately fires the same message twice in 5s.
 const ALERT_DEDUPE_MS = 5000;
 let _lastAlert = {};   // "type|msg" -> ts
-function fireAlert(typeKey, msg){
+// short: what to say instead of msg when names are not spoken (see alertSayLine).
+function fireAlert(typeKey, msg, short){
   const t = alertSettings.types[typeKey]; if (!t) return;
   const key = typeKey + '|' + msg, now = Date.now();
   if (_lastAlert[key] && (now - _lastAlert[key]) < ALERT_DEDUPE_MS) return;
   _lastAlert[key] = now;
-  queueAlertAudio(alertSettings.master ? t.sound : '', alertSpeaks(typeKey) ? msg : '');
+  queueAlertAudio(alertSettings.master ? t.sound : '', alertSayLine(typeKey, msg, short));
   alertToast(msg, (ALERT_META[typeKey]||{}).icon);
   recordNotif(typeKey, msg);
 }
@@ -15414,7 +15426,7 @@ async function checkPlayerBuffs(p){
       : b.beneficial;
     const watched = active.filter(wanted);
     const cur = new Set(watched.map(b => b.buffTypeName || b.buffName));
-    if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`); break; } } }
+    if (st.buffs){ for (const nm of st.buffs){ if (!cur.has(nm)){ fireAlert('buffLost', `${playerName(p)} lost ${nm}`, `${nm} lost`); break; } } }
     st.buffs = cur;
     // Record exactly WHEN each watched buff runs out, so we can wake on it instead of waiting for the
     // next poll. `end` is the buff's start + duration (buffClock) — exact, unlike timeRemaining, which is a
@@ -15497,7 +15509,7 @@ async function _alertsTickInner(){
           // Diagnostic suffix: how long the LIVE streams (XP / movement / stamina drain) have been quiet.
           // A false fire would show a small number here — that's the evidence to bring to the code.
           const liveAge = liveTs ? Math.round((Date.now() - liveTs)/1000) + 's' : 'no data';
-          fireAlert('idle', `${playerName(p)} has been idle for ${secs}s (live feed quiet: ${liveAge})`);
+          fireAlert('idle', `${playerName(p)} has been idle for ${secs}s (live feed quiet: ${liveAge})`, ALERT_META.idle.short);
         }
       }
       if (palOn(id,'craftDone')){
@@ -15511,7 +15523,7 @@ async function _alertsTickInner(){
         if (doneCount){
           const nowMs = Date.now();
           if (!(st.craftDoneMuteUntil > nowMs)){   // fire once, then mute so a wave of stations finishing seconds apart doesn't spam
-            fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`);
+            fireAlert('craftDone', `${playerName(p)} — passive craft${doneCount>1?'s':''} finished`, doneCount>1 ? 'Crafts finished' : ALERT_META.craftDone.short);
             st.craftDoneMuteUntil = nowMs + palCraftMute(id) * 1000;   // per-player quiet window (default 60s)
           }
         }
@@ -15596,6 +15608,7 @@ function renderAlerts(){
   const _voices = ttsVoices();
   if (!_voices.length && ('speechSynthesis' in window) && !window.__ttsVoiceBound){ window.__ttsVoiceBound = true; speechSynthesis.onvoiceschanged = () => { if (isAlertSettingsOpen()) renderAlerts(); }; }
   const _tts = alertSettings.tts, _ttsOk = 'speechSynthesis' in window;
+  const _sayWho = alertSampleName();
   const _voiceOpts = _voices.map(v => `<option value="${escHtml(v.voiceURI)}"${_tts.voice===v.voiceURI?' selected':''}>${escHtml(v.name.replace(/\s*[-(].*$/,''))}</option>`).join('');
   const _ttsSection = !_ttsOk ? '' : `
       <div class="al-head al-tts">
@@ -15603,6 +15616,7 @@ function renderAlerts(){
         <div class="al-vol">
           <select class="sj-input al-voice" onchange="setAlertTtsVoice(this.value)"${_voices.length?'':' disabled'}>${_voiceOpts || '<option>Loading voices…</option>'}</select>
           <label class="al-secs" title="Speaking speed">speed <input type="range" min="0.6" max="1.2" step="0.05" value="${_tts.rate}" oninput="setAlertTtsRate(this.value)"></label>
+          <label class="al-pchip${_tts.names !== false ? ' on' : ''}" title="Ticked: the voice says who — “${escHtml(_sayWho)} — stamina full”. Unticked: only what happened — “Stamina full”, “Idle”, “Craft finished”. The pop-up and the bell always show the name."><input type="checkbox" ${_tts.names !== false ? 'checked' : ''} onchange="toggleAlertTtsNames(this.checked)"> <i class="ti ti-user"></i> Say names</label>
           <button class="btn ctrl-btn" onclick="testAlertTts()">Test</button>
         </div>
       </div>`;
@@ -15651,6 +15665,12 @@ function setAlertTtsVoice(uri){ loadAlerts(); alertSettings.tts.voice = uri; sav
 function setAlertTtsRate(v){ loadAlerts(); alertSettings.tts.rate = parseFloat(v) || 0.95; saveAlerts(); }
 function testAlertTts(){ loadAlerts(); queueAlertAudio('', 'Alert test — stamina is full.', true); }
 function toggleAlertSpeak(key, on){ loadAlerts(); alertSettings.types[key].speak = !!on; saveAlerts(); renderAlerts(); }
+// The name the settings' sample lines use: the first tracked player, as the alerts themselves would say it.
+function alertSampleName(){ return trackedPlayers[0] ? playerName(trackedPlayers[0]) : 'Player'; }
+// A row's sample line as the voice will say it now: with the name, or its short form.
+function alertSampleLine(key){ const m = ALERT_META[key]; return alertSettings.tts.names === false ? m.short : m.sample(alertSampleName()); }
+// Say names on/off — then read a sample line out the way it will now be said.
+function toggleAlertTtsNames(on){ loadAlerts(); alertSettings.tts.names = !!on; saveAlerts(); queueAlertAudio('', alertSampleLine('stamina'), true); renderAlerts(); }
 // A change on a "Default alerts" row applies to EVERY tracked player. The per-player chips store explicit
 // overrides, and before this the default only reached players without one — so a player whose chip had
 // ever been ticked by hand stayed pinned, and "turn idle off for everyone" silently skipped them (the
@@ -15666,8 +15686,7 @@ function setAlertCraftMute(v){ loadAlerts(); let n = parseInt(v,10); if (isNaN(n
 // The row's Test: the alert as it will really arrive — its sound, then its line if this alert is read aloud.
 function testAlert(key){
   loadAlerts();
-  const who = trackedPlayers[0] ? playerName(trackedPlayers[0]) : 'Player';
-  queueAlertAudio(alertSettings.types[key].sound, alertSpeaks(key) ? ALERT_META[key].sample(who) : '', true);
+  queueAlertAudio(alertSettings.types[key].sound, alertSpeaks(key) ? alertSampleLine(key) : '', true);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -15734,7 +15753,7 @@ function onLiveStamina(id, data, rebase){
   const dropLine = _dp > 0 ? max * _dp / 100 : max - 1;
   if (rebase){ st.liveStamBelow = cur < dropLine; return; }
   if (cur < dropLine) st.liveStamBelow = true;                 // dipped below the (customizable) threshold — arm the alert
-  else if (cur >= max - 1 && st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`); } // refilled to full
+  else if (cur >= max - 1 && st.liveStamBelow){ st.liveStamBelow = false; const p = trackedPlayers.find(x => String(x.entityId) === id); fireAlert('stamina', `${p ? playerName(p) : 'Player'} — stamina full`, ALERT_META.stamina.short); } // refilled to full
 }
 function onLiveExperience(id, data){
   const store = skillsByPlayer[id]; if (!store || !store.skills) return;
