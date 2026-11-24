@@ -137,6 +137,11 @@
   border: 1px solid color-mix(in oklab, var(--hue) 34%, var(--surface));
 }
 
+/* Counted, but still at a station rather than in hand: the same colour, striped. */
+.at-station {
+  background-image: repeating-linear-gradient(135deg, rgb(13 15 20 / 0.6) 0 3px, transparent 3px 7px);
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(24px);

@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from 'react';
-import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin, Workflow } from 'lucide-react';
 import { yieldOf } from '../../engine/book.ts';
 import type { Recipe, Ref } from '../../engine/types.ts';
-import { flowOf, type PushView, type Row } from '../../lib/derive.ts';
+import { flowOf, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
+import { navigate } from '../../lib/router.tsx';
 import { Button, Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
-import { AssignControl, BranchList, SplitBar, branchText } from './parts.tsx';
+import { AssignControl, BranchList, SplitBar, branchText, jobState, stationOf } from './parts.tsx';
 
 export function ItemDrawer({ scope, id, onClose }: { scope: PushScope; id: Ref | null; onClose: () => void }) {
   const row = id ? scope.view.rows.get(id) : undefined;
@@ -64,13 +65,31 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
   const holdings = view.stock.where.get(id) ?? [];
   const jobs = view.stock.atStations.get(id) ?? [];
   const atStations = jobs.reduce((sum, j) => sum + j.qty, 0);
+  // Several batches in the same loom, becoming the same thing, read as one line.
+  const loaded: Loaded[] = [];
+  for (const l of view.loaded.get(id) ?? []) {
+    const same = loaded.find((o) => o.into.id === l.into.id && stationOf(o.job) === stationOf(l.job) && jobState(o.job) === jobState(l.job));
+    if (same) same.qty += l.qty;
+    else loaded.push({ ...l });
+  }
   const [choosing, setChoosing] = useState(false);
+  // Opens Process on the full picture, with this material's chain brought into view.
+  const showChain = () => {
+    const params = new URLSearchParams(window.location.search);
+    params.set('tab', 'process');
+    params.set('chain', id);
+    params.delete('item');
+    navigate(window.location.pathname + '?' + params.toString());
+  };
 
   return (
     <div>
       <div className="mb-3 flex items-center gap-2">
         <span className="text-xs text-muted">Who's on it</span>
         <AssignControl scope={scope} id={id} />
+        <button type="button" onClick={showChain} className="ml-auto inline-flex items-center gap-1 text-[13px] text-accent-ink hover:underline">
+          <Workflow size={13} /> See the full picture
+        </button>
       </div>
       <div className="grid grid-cols-3 gap-2">
         <Stat label="Needed in total" value={num(node.needed)} />
@@ -130,15 +149,33 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
             {jobs.map((job) => (
               <div key={job.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium">{[job.station, job.claim].filter(Boolean).join(' @ ')}</div>
-                  <div className="truncate text-xs text-ink-2">
-                    {job.owner} · {job.done ? 'finished, waiting to be collected' : job.passive ? 'processing on its own' : job.total ? `being crafted, ${Math.floor((job.progress / job.total) * 100)}% done` : 'being crafted'}
+                  <div className="truncate font-medium">{stationOf(job)}</div>
+                  <div className={cx('truncate text-xs', job.passive && !job.done ? 'text-info' : 'text-ink-2')}>
+                    {job.owner} · {jobState(job)}
                   </div>
                 </div>
                 <span className="num font-semibold">{num(job.qty)}</span>
               </div>
             ))}
           </Card>
+        )}
+        {loaded.length > 0 && (
+          <>
+            <p className="mb-1.5 mt-3 text-xs text-muted">Already inside crafts at stations, so no longer in storage:</p>
+            <Card className="divide-y divide-line">
+              {loaded.map((l, i) => (
+                <button key={l.job.id + i} type="button" onClick={() => openItem(l.into.id)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-surface-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium">{stationOf(l.job)}</div>
+                    <div className={cx('truncate text-xs', l.job.passive ? 'text-info' : 'text-ink-2')}>
+                      becoming {l.into.name} · {jobState(l.job)}
+                    </div>
+                  </div>
+                  <span className="num font-semibold">{num(l.qty)}</span>
+                </button>
+              ))}
+            </Card>
+          </>
         )}
       </Section>
     </div>
@@ -201,11 +238,22 @@ function RecipeCard({ scope, recipe, id, runs, fromStock }: { scope: PushScope; 
           const have = view.stock.totals.get(input.id) ?? 0;
           const thing = ctx.book.thing(input.id);
           const enough = runs > 0 && have >= total;
+          // Which chests and bags it is sitting in, biggest pile first, then anything still at a station.
+          const piles = new Map<string, number>();
+          const pile = (label: string, qty: number) => piles.set(label, (piles.get(label) ?? 0) + qty);
+          for (const h of view.stock.where.get(input.id) ?? []) pile(`${h.loc.kind === 'player' ? h.loc.owner + ': ' : ''}${h.loc.name}`, h.qty);
+          for (const job of view.stock.atStations.get(input.id) ?? []) pile(`${stationOf(job)}, ${job.done ? 'ready to collect' : job.passive ? 'passive craft' : 'being crafted'}`, job.qty);
+          const spots = [...piles].map(([label, qty]) => `${label} (${num(qty)})`);
           return (
             <li key={input.id}>
-              <button type="button" onClick={() => openItem(input.id)} className="flex w-full items-center gap-2 py-2 text-left text-sm hover:underline">
+              <button type="button" onClick={() => openItem(input.id)} className="group flex w-full items-center gap-2 py-2 text-left text-sm">
                 <TierChip tier={thing?.tier ?? 0} />
-                <span className="min-w-0 flex-1 truncate">{thing?.name ?? input.id}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate group-hover:underline">{thing?.name ?? input.id}</span>
+                  <span className="block truncate text-[11px] text-muted" title={spots.join('\n') || undefined}>
+                    {spots.length ? spots.slice(0, 2).join(' · ') + (spots.length > 2 ? ` · +${spots.length - 2} more` : '') : 'None in storage'}
+                  </span>
+                </span>
                 <span className="num text-[13px] text-ink-2">{num(input.qty)} each</span>
                 {runs > 0 && (
                   <span className={cx('num w-28 text-right text-[13px]', enough ? 'text-good' : 'text-warn')}>

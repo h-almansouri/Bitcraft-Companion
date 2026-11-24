@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
-import { ChevronDown, Hand, Hourglass, PartyPopper, Pickaxe, ShoppingBag, Timer, Wrench } from 'lucide-react';
-import { flowOf, type Todo } from '../../lib/derive.ts';
+import { ChevronDown, Hand, Hourglass, PackageOpen, PartyPopper, Pickaxe, ShoppingBag, Timer, Wrench } from 'lucide-react';
+import { flowOf, type Awaiting, type Todo } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
-import { Card, Empty, TierChip } from '../../ui/kit.tsx';
+import { Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { UNASSIGNED, matchPeople, matchRole, matchText, matchTier, stageOf, takenBy, useFilterBar, type StageId } from './filters.tsx';
-import { AssignControl, BranchList, SplitBar } from './parts.tsx';
+import { AssignControl, BranchList, SplitBar, stationOf } from './parts.tsx';
 
 interface Section {
   stage: StageId;
@@ -29,7 +29,7 @@ const SECTIONS: Record<'gather' | 'process', Section[]> = {
     { stage: 'pickup', title: 'Collect', blurb: 'Finished and waiting at a station', icon: <Hand size={15} /> },
     { stage: 'craft', title: 'Craft now', blurb: 'Everything it takes is in storage', icon: <Wrench size={15} /> },
     { stage: 'progress', title: 'Being crafted', blurb: 'Loaded at a station, already counted as made', icon: <Timer size={15} /> },
-    { stage: 'blocked', title: 'Waiting on materials', blurb: 'Can be crafted once what it needs is in', icon: <Hourglass size={15} />, folded: true },
+    { stage: 'blocked', title: 'Waiting on materials', blurb: 'Can be crafted once what it needs is in hand', icon: <PackageOpen size={15} />, folded: true },
   ],
 };
 
@@ -74,6 +74,8 @@ export function JobList({ scope, mode }: { scope: PushScope; mode: 'gather' | 'p
         {sections.map((section) => {
           const list = todos.filter((t) => stageOf(t.kind) === section.stage);
           if (!list.length) return null;
+          // Closest to ready first: jobs that have everything, and are only waiting for a station to finish.
+          if (section.stage === 'blocked') list.sort((a, b) => Number(!!a.missing?.length) - Number(!!b.missing?.length));
           const body = (
             <div className="mt-2.5 grid grid-cols-1 gap-2.5 xl:grid-cols-2">
               {list.map((todo) => (
@@ -120,15 +122,25 @@ function TodoCard({ todo, scope, onOpen }: { todo: Todo; scope: PushScope; onOpe
 
   let verb = 'Craft';
   let detail: ReactNode = null;
-  const at = todo.job ? [todo.job.station, todo.job.claim].filter(Boolean).join(' @ ') : '';
+  /** Set for anything to do with a passive craft, so it can be told apart at a glance. */
+  let passive = false;
+  const at = todo.job ? stationOf(todo.job) : '';
+  // An ingredient that exists but is still at a station: say where, and whether it needs waiting for or collecting.
+  const held = (a: Awaiting) => {
+    const job = a.jobs.find((j) => !j.done) ?? a.jobs[0];
+    const where = job ? stationOf(job) : 'a station';
+    return a.jobs.every((j) => j.done) ? `Collect ${num(a.qty)} ${ctx.book.name(a.id)} from the ${where} first` : `Waiting on ${num(a.qty)} ${ctx.book.name(a.id)} in the ${where}${job?.passive ? ' (passive)' : ''}`;
+  };
   if (todo.kind === 'pickup') {
     verb = 'Collect';
     detail = `${at} · made by ${todo.job!.owner}`;
   } else if (todo.kind === 'progress') {
     const job = todo.job!;
-    verb = job.passive ? 'Processing on its own' : 'Finish crafting';
-    const state = job.passive ? 'collect when it is done' : job.total ? `${Math.floor((job.progress / job.total) * 100)}% done` : 'started';
-    detail = `${at} · ${job.owner} · ${state}`;
+    passive = job.passive;
+    verb = job.passive ? 'Passive craft · running on its own' : 'Being crafted by hand';
+    const from = [...view.loaded].flatMap(([id, list]) => list.filter((l) => l.job === job).map((l) => `${num(l.qty)} ${ctx.book.name(id)}`));
+    const state = job.passive ? '' : job.total ? `${Math.floor((job.progress / job.total) * 100)}% done` : 'started';
+    detail = [at, job.owner, state, from.length ? `from ${from.join(' + ')}` : ''].filter(Boolean).join(' · ');
   } else if (todo.kind === 'stock' && recipe) {
     // A one-step shortcut from something already in storage: open a package, or process a raw material that is sitting there.
     const input = recipe.inputs[0];
@@ -142,14 +154,28 @@ function TodoCard({ todo, scope, onOpen }: { todo: Todo; scope: PushScope; onOpe
     verb = 'Buy';
     detail = view.onOrder.has(row.id) ? 'On a claim buy order' : `Sold by ${ctx.game.sold[row.id] ?? 'a traveler'}`;
   } else if (recipe) {
-    verb = recipe.kind === 'build' ? 'Build' : 'Craft';
+    passive = !!recipe.passive;
+    verb = recipe.kind === 'build' ? 'Build' : recipe.passive ? 'Passive craft · load it and it runs on its own' : 'Craft';
     const where = [recipe.skill && `${recipe.skill}${recipe.level ? ' ' + recipe.level : ''}`, recipe.station && `${recipe.station}${recipe.stationTier ? ' T' + recipe.stationTier : ''}`].filter(Boolean).join(' · ');
+    const waiting = todo.awaiting?.[0];
     if (todo.kind === 'blocked') {
       const first = todo.missing?.[0];
-      detail = first ? `Short ${num(first.short)} ${ctx.book.name(first.id)}${(todo.missing?.length ?? 0) > 1 ? ` and ${todo.missing!.length - 1} more` : ''}` : where;
+      const short = first ? `Short ${num(first.short)} ${ctx.book.name(first.id)}${(todo.missing?.length ?? 0) > 1 ? ` and ${todo.missing!.length - 1} more` : ''}` : '';
+      detail = [short, waiting && held(waiting)].filter(Boolean).join(' · ') || where;
     } else {
       const partial = (todo.doable ?? 0) < step!.runs;
-      detail = partial ? `${where} · enough in storage for ${num(todo.doable ?? 0)} of ${num(step!.runs)} ${plural(step!.runs, 'craft')}` : where;
+      detail = partial ? [where, `enough in storage for ${num(todo.doable ?? 0)} of ${num(step!.runs)} ${plural(step!.runs, 'craft')}`, waiting && held(waiting).replace(/^Waiting on /, 'waiting on ').replace(/^Collect /, 'collect ')].filter(Boolean).join(' · ') : where;
+    }
+  }
+
+  // Material of this kind that is already inside a craft at a station, on its way to becoming something else.
+  const inside = new Map<string, { qty: number; text: string }>();
+  if (todo.kind !== 'pickup' && todo.kind !== 'progress') {
+    for (const l of view.loaded.get(row.id) ?? []) {
+      const text = `in the ${stationOf(l.job)}, becoming ${l.into.name}${l.job.passive ? ' (passive)' : ''}`;
+      const entry = inside.get(text);
+      if (entry) entry.qty += l.qty;
+      else inside.set(text, { qty: l.qty, text });
     }
   }
 
@@ -159,12 +185,27 @@ function TodoCard({ todo, scope, onOpen }: { todo: Todo; scope: PushScope; onOpe
     <Card className="flex min-w-0 flex-col px-3.5 py-3">
       <button type="button" onClick={onOpen} className="flex w-full items-start gap-3 text-left">
         <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">{verb}</div>
+          <div className={cx('flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide', passive ? 'text-info' : 'text-muted')}>
+            {passive && <Hourglass size={11} className="shrink-0" />}
+            <span className="truncate">{verb}</span>
+          </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
             <TierChip tier={row.tier} />
             <span className="truncate hover:underline">{row.name}</span>
           </div>
-          {detail && <div className="mt-0.5 truncate text-xs text-ink-2">{detail}</div>}
+          {detail && (
+            <div className="mt-0.5 line-clamp-2 text-xs text-ink-2" title={typeof detail === 'string' ? detail : undefined}>
+              {detail}
+            </div>
+          )}
+          {[...inside.values()].map((entry) => (
+            <div key={entry.text} className="mt-0.5 flex items-start gap-1 text-xs text-info">
+              <Hourglass size={12} className="mt-0.5 shrink-0" />
+              <span>
+                <span className="num font-semibold">{num(entry.qty)}</span> more already {entry.text}
+              </span>
+            </div>
+          ))}
         </div>
         <div className="shrink-0 text-right">
           <div className="num text-xl font-semibold leading-tight text-ink">{num(todo.qty)}</div>

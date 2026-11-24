@@ -1,9 +1,9 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { ArrowRight, UserPlus } from 'lucide-react';
+import { ArrowRight, Hammer, Hand, Hourglass, UserPlus } from 'lucide-react';
 import { flowOf, type FlowBranch, type PushView, type Row } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
 import type { Ref } from '../../engine/types.ts';
-import { BUY_ORDER, BUY_ORDER_NAME } from '../../lib/shapes.ts';
+import { BUY_ORDER, BUY_ORDER_NAME, type CraftJob } from '../../lib/shapes.ts';
 import { MultiSelect, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 
@@ -82,6 +82,43 @@ export function BranchList({ view, id, limit, onOpen, compact }: { view: PushVie
         );
       })}
       {limit && branches.length > limit && <li className="pl-4 text-muted">and {branches.length - limit} more</li>}
+    </ul>
+  );
+}
+
+/** "Loom @ Tortuga Prime": the station a craft is sitting at, and whose base it is in. */
+export const stationOf = (job: Pick<CraftJob, 'station' | 'claim'>) => [job.station || 'a station', job.claim].filter(Boolean).join(' @ ');
+
+/** What a craft at a station is doing, in a few words. */
+export function jobState(job: CraftJob): string {
+  if (job.done) return 'finished, waiting to be collected';
+  if (job.passive) return 'passive craft, running on its own';
+  return job.total ? `being crafted by hand, ${Math.floor((job.progress / job.total) * 100)}% done` : 'being crafted by hand';
+}
+
+/**
+ * One line per kind of craft a material has at stations: passive ones running by
+ * themselves, ones someone is working by hand, and finished ones waiting to be collected.
+ */
+export function StationLines({ jobs, className }: { jobs: CraftJob[]; className?: string }) {
+  const groups = new Map<string, { qty: number; job: CraftJob }>();
+  for (const job of jobs) {
+    const key = `${job.done ? 'done' : job.passive ? 'passive' : 'hand'}|${stationOf(job)}`;
+    const group = groups.get(key);
+    if (group) group.qty += job.qty;
+    else groups.set(key, { qty: job.qty, job });
+  }
+  if (!groups.size) return null;
+  return (
+    <ul className={cx('space-y-0.5 text-[11px] leading-snug', className)}>
+      {[...groups.values()].map(({ qty, job }, i) => (
+        <li key={i} className={cx('flex items-start gap-1', job.done ? 'text-accent-ink' : 'text-info')}>
+          {job.done ? <Hand size={12} className="mt-px shrink-0" /> : job.passive ? <Hourglass size={12} className="mt-px shrink-0" /> : <Hammer size={12} className="mt-px shrink-0" />}
+          <span>
+            <span className="num font-semibold">{num(qty)}</span> {job.done ? `ready to collect at the ${stationOf(job)}` : job.passive ? `in the ${stationOf(job)}, passive` : `being crafted at the ${stationOf(job)}`}
+          </span>
+        </li>
+      ))}
     </ul>
   );
 }

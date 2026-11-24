@@ -71,12 +71,18 @@ export function Pill({ tone = 'neutral', children, className }: { tone?: Tone; c
   );
 }
 
-/** A progress bar. `value` is 0..1, and its colour follows it: red when barely started, through orange and yellow, to deep green when done. */
-export function Bar({ value, className }: { value: number; className?: string }) {
-  const width = Math.max(0, Math.min(1, value)) * 100;
+/**
+ * A progress bar. `value` is 0..1, and its colour follows it: red when barely started, through orange and yellow, to deep green when done.
+ * `pending` is the part of `value` that is counted but not in hand yet (still at a station); it is drawn striped.
+ */
+export function Bar({ value, pending = 0, className }: { value: number; pending?: number; className?: string }) {
+  const filled = Math.max(0, Math.min(1, value));
+  const striped = Math.max(0, Math.min(filled, pending));
+  const color = progressColor(value);
   return (
-    <div className={cx('h-1.5 overflow-hidden rounded-full bg-surface-3', className)} role="progressbar" aria-valuenow={Math.round(width)} aria-valuemin={0} aria-valuemax={100}>
-      <div className="h-full rounded-full transition-[width,background-color] duration-500" style={{ width: `${width}%`, background: progressColor(value) }} />
+    <div className={cx('flex h-1.5 overflow-hidden rounded-full bg-surface-3', className)} role="progressbar" aria-valuenow={Math.round(filled * 100)} aria-valuemin={0} aria-valuemax={100}>
+      <div className={cx('h-full transition-[width,background-color] duration-500', striped > 0 ? 'rounded-l-full' : 'rounded-full')} style={{ width: `${(filled - striped) * 100}%`, background: color }} />
+      {striped > 0 && <div className="at-station h-full rounded-r-full transition-[width,background-color] duration-500" style={{ width: `${striped * 100}%`, backgroundColor: color }} />}
     </div>
   );
 }

@@ -89,7 +89,25 @@ export interface Todo {
   doable?: number;
   /** For blocked crafts: the ingredients still short, worst first. */
   missing?: { id: Ref; short: number }[];
+  /** Ingredients this craft is counting on that are still at a station (in a loom, or finished and not collected). */
+  awaiting?: Awaiting[];
   job?: CraftJob;
+}
+
+/** An ingredient that exists but is not in hand yet: it is being made, or waiting at a station to be collected. */
+export interface Awaiting {
+  id: Ref;
+  qty: number;
+  jobs: CraftJob[];
+}
+
+/** Material that has already gone into a craft still sitting at a station. */
+export interface Loaded {
+  /** How much of the material that craft took, going by its recipe. */
+  qty: number;
+  /** What it is becoming. */
+  into: Row;
+  job: CraftJob;
 }
 
 export interface PushView {
@@ -103,6 +121,10 @@ export interface PushView {
   progress: { gather: StageProgress; process: StageProgress };
   /** Things handed to "Claim Buy Order": planned as bought, so nothing is asked for to make them. */
   onOrder: Set<Ref>;
+  /** The same push planned from empty storage: the whole of every chain, whatever has been done so far. */
+  scratch: Plan;
+  /** Per material, what has already been loaded into crafts that are still at a station. */
+  loaded: Map<Ref, Loaded[]>;
 }
 
 /** How far along one stage of a push is. */
@@ -235,16 +257,24 @@ export function buildView(ctx: GameCtx, push: Push, snapshot: StockSnapshot | nu
         todos.push({ key: `stock:${row.id}:${step.recipe.id}`, kind: 'stock', row, qty: made, step, doable: step.runs });
         continue;
       }
+      // "Craft now" means now: an ingredient still in a loom, or finished and not collected, is counted
+      // as made for the plan but cannot be crafted with until it is in hand.
       let doable = step.runs;
       const missing: { id: Ref; short: number }[] = [];
+      const awaiting: Awaiting[] = [];
       for (const input of step.recipe.inputs) {
         const have = stock.totals.get(input.id) ?? 0;
-        doable = Math.min(doable, Math.floor(have / input.qty));
-        const short = step.runs * input.qty - have;
-        if (short > 0) missing.push({ id: input.id, short });
+        const jobs = stock.atStations.get(input.id) ?? [];
+        const inHand = have - atStation(stock, input.id);
+        const want = step.runs * input.qty;
+        doable = Math.min(doable, Math.floor(inHand / input.qty));
+        if (want > have) missing.push({ id: input.id, short: want - have });
+        const held = Math.min(have, want) - Math.max(0, inHand);
+        if (held > 0) awaiting.push({ id: input.id, qty: held, jobs });
       }
+      doable = Math.max(0, doable);
       missing.sort((a, b) => b.short - a.short);
-      todos.push({ key: `craft:${row.id}`, kind: doable > 0 ? 'craft' : 'blocked', row, qty: Math.min(made, node.toGo), step, doable, missing });
+      todos.push({ key: `craft:${row.id}`, kind: doable > 0 ? 'craft' : 'blocked', row, qty: Math.min(made, node.toGo), step, doable, missing, awaiting });
     }
     if (!node.steps.some((s) => !s.fromStock)) {
       const left = node.toGo - node.steps.reduce((sum, s) => sum + s.runs * yieldOf(s.recipe, row.id), 0);
@@ -257,7 +287,40 @@ export function buildView(ctx: GameCtx, push: Push, snapshot: StockSnapshot | nu
   const empty = runPlan(ctx.book, ctx.router, push.goals, new Map(), { routes, useStockAlternates: false });
   const progress = stageProgress(empty, result);
 
-  return { plan: result, stock, rows, ordered, todos, professions, progress, onOrder };
+  // ---- what is already inside crafts at stations ----
+  // "50 thread are in the loom becoming cloth strip": worked back from each craft's recipe.
+  const loaded = new Map<Ref, Loaded[]>();
+  for (const [item, jobs] of stock.atStations) {
+    const into = rows.get(item);
+    if (!into) continue;
+    for (const job of jobs) {
+      if (job.done) continue;
+      const recipe = recipeBehind(ctx, into, job);
+      if (!recipe) continue;
+      const runs = job.qty / yieldOf(recipe, item);
+      for (const input of recipe.inputs) {
+        const entry = { qty: Math.round(runs * input.qty), into, job };
+        const list = loaded.get(input.id);
+        if (list) list.push(entry);
+        else loaded.set(input.id, [entry]);
+      }
+    }
+  }
+
+  return { plan: result, stock, rows, ordered, todos, professions, progress, onOrder, scratch: empty, loaded };
+}
+
+/** How much of a thing is at stations (being made, or made and not collected) rather than in storage. */
+export function atStation(stock: StockView, id: Ref): number {
+  return (stock.atStations.get(id) ?? []).reduce((sum, job) => sum + job.qty, 0);
+}
+
+/** The recipe a craft at a station is most likely running: one made at that station, else the push's own pick. */
+function recipeBehind(ctx: GameCtx, into: Row, job: CraftJob): Recipe | undefined {
+  const made = ctx.book.producers(into.id).filter((r) => r.kind === 'craft');
+  // The job names the building ("Exquisite Loom"); the recipe names the kind of station ("Loom").
+  const here = (r: Recipe) => !!r.station && job.station.toLowerCase().includes(r.station.toLowerCase());
+  return made.find((r) => here(r) && !!r.passive === job.passive) ?? made.find(here) ?? into.recipe;
 }
 
 function routeFor(ctx: GameCtx, routes: Record<Ref, string | null>, id: Ref): Recipe | undefined {
@@ -293,7 +356,12 @@ export function flowOf(view: PushView, id: Ref): FlowBranch[] {
 }
 
 // ---------------------------------------------------------------------------
-// Supply chains: the same plan, laid out as raw material -> finished good.
+// Supply chains: the push laid out as raw material -> finished good.
+//
+// The shape of every chain comes from the push planned from empty storage, so
+// a chain is always shown whole. (Planned against what is in storage, "thread
+// becomes cloth strip" disappears the moment enough strips exist, and the chain
+// falls into pieces.) What has been done so far is then marked on each step.
 // ---------------------------------------------------------------------------
 
 export interface ChainExtra {
@@ -306,7 +374,22 @@ export interface ChainExtra {
 }
 
 export interface ChainStage {
-  row: Row;
+  id: Ref;
+  name: string;
+  tier: number;
+  profession: string;
+  /** The push's row for it as things stand, when the push still asks for any of it. */
+  row?: Row;
+  /** Everything the push takes of it, starting from empty storage. */
+  total: number;
+  /** How much of that is still to gather, buy or craft. */
+  toGo: number;
+  /** Of what counts as done, how much is at a station rather than in hand. */
+  pending: number;
+  /** Crafts of it that are at stations right now. */
+  jobs: CraftJob[];
+  /** The recipe that makes it in this push; undefined for gathered and bought things. */
+  recipe?: Recipe;
   /** How the previous stage turns into this one: `from` of it give `to` of this. */
   ratio?: { from: number; to: number };
   /** Everything else this stage's recipe needs besides the previous stage. */
@@ -315,12 +398,12 @@ export interface ChainStage {
   onward: number;
   /**
    * Amount to set aside and NOT process, because something uses it exactly as it
-   * is (a station that takes raw roots, or the push goal itself). `for` lists what
-   * it is being saved for; null stands for "it is a goal of the push".
+   * is (a station that takes raw roots, or the push goal itself). `for` names what
+   * it is being kept for.
    */
-  save: { qty: number; for: (Row | null)[] };
+  save: { qty: number; for: string[] };
   /** Amounts that are turned into something outside this chain. */
-  branches: { row: Row; qty: number }[];
+  branches: { id: Ref; name: string; qty: number }[];
 }
 
 export interface Chain {
@@ -330,87 +413,104 @@ export interface Chain {
   profession: string;
   /** True while any stage still has a gap. */
   open: boolean;
-  /** Where the last stage ends up: other materials, or null for "it is a goal". */
-  ends: (Row | null)[];
+  /** What the last stage is used for: the things it goes into, or id null for "it is a goal of the push". */
+  ends: { id: Ref | null; name: string; qty: number }[];
 }
 
+const GOAL = 'the push goal';
+
 /**
- * Splits the plan into chains. Two materials sit next to each other in a chain
+ * Splits the push into chains. Two materials sit next to each other in a chain
  * when each is the other's main partner: A is the costliest ingredient of B, and
  * B is where most of A goes. Everything else shows up as a side ingredient.
  */
-/** How a stage's quantity divides between the next stage, being saved as-is, and other chains. */
-function splitOf(view: PushView, row: Row, next: Row | undefined): Pick<ChainStage, 'onward' | 'save' | 'branches'> {
-  const split: Pick<ChainStage, 'onward' | 'save' | 'branches'> = { onward: 0, save: { qty: 0, for: [] }, branches: [] };
-  // The last stage's destinations are shown at the end of the line instead.
-  if (!next) return split;
-  for (const branch of flowOf(view, row.id)) {
-    if (branch.into?.id === next.id) split.onward += branch.qty;
-    else if (branch.final || !branch.into) {
-      split.save.qty += branch.qty;
-      split.save.for.push(branch.into);
-    } else split.branches.push({ row: branch.into, qty: branch.qty });
-  }
-  return split;
-}
-
 export function buildChains(ctx: GameCtx, view: PushView): Chain[] {
-  const recipeOf = (row: Row) => row.node.steps.find((s) => !s.fromStock)?.recipe ?? row.recipe;
+  const whole = view.scratch;
+  const recipeOf = (node: PlanNode) => node.steps.find((s) => !s.fromStock)?.recipe;
   const up = new Map<Ref, Ref>();
   const down = new Map<Ref, Ref>();
 
-  for (const row of view.rows.values()) {
-    const recipe = recipeOf(row);
+  for (const node of whole.nodes.values()) {
+    const recipe = recipeOf(node);
     if (!recipe) continue;
     let main: Ref | undefined;
     let weight = -1;
     for (const input of recipe.inputs) {
-      if (!view.rows.has(input.id)) continue;
+      if (!whole.nodes.has(input.id)) continue;
       const w = ctx.router.costOf(input.id) * input.qty;
       if (w > weight) (weight = w), (main = input.id);
     }
     if (!main || up.has(main)) continue;
-    const biggestUse = view.rows.get(main)!.node.uses.find((u) => u.into);
-    if (biggestUse?.into === row.id) {
-      up.set(main, row.id);
-      down.set(row.id, main);
+    const biggestUse = whole.nodes.get(main)!.uses.find((u) => u.into);
+    if (biggestUse?.into === node.id) {
+      up.set(main, node.id);
+      down.set(node.id, main);
     }
   }
 
-  const chains: Chain[] = [];
-  for (const start of view.ordered) {
-    if (down.has(start.id)) continue;
-    const rows: Row[] = [];
-    for (let cur: Row | undefined = start; cur; cur = view.rows.get(up.get(cur.id) ?? '')) rows.push(cur);
+  const describe = (node: PlanNode) => {
+    const thing = ctx.book.thing(node.id);
+    const recipe = recipeOf(node);
+    return {
+      node,
+      recipe,
+      name: thing?.name ?? node.id,
+      tier: thing?.tier ?? 0,
+      tag: thing?.kind === 'building' ? 'Buildings' : (thing?.tag ?? 'Other'),
+      profession: view.onOrder.has(node.id) ? 'Trade' : professionOf(node, recipe, ctx),
+    };
+  };
+  const all = [...whole.nodes.values()].filter((node) => node.needed > 0).map(describe);
+  const byId = new Map(all.map((d) => [d.node.id, d]));
+  all.sort((a, b) => professionRank(a.profession) - professionRank(b.profession) || a.tag.localeCompare(b.tag) || a.tier - b.tier || a.name.localeCompare(b.name));
+  const nameOf = (id: Ref) => byId.get(id)?.name ?? ctx.book.name(id);
 
-    const stages = rows.map((row, i): ChainStage => {
-      const prev = rows[i - 1];
-      const next = rows[i + 1];
-      const recipe = recipeOf(row);
-      const fed = prev && recipe ? recipe.inputs.find((input) => input.id === prev.id) : undefined;
-      return {
-        row,
-        ratio: fed && recipe ? { from: fed.qty, to: yieldOf(recipe, row.id) } : undefined,
-        extras: (recipe?.inputs ?? [])
-          .filter((input) => input.id !== prev?.id)
-          .map((input) => ({
-            id: input.id,
-            name: ctx.book.name(input.id),
-            tier: ctx.book.thing(input.id)?.tier ?? 0,
-            perRun: input.qty,
-            short: (view.rows.get(input.id)?.node.toGo ?? 0) > 0,
-          })),
-        ...splitOf(view, row, next),
-      };
+  const chains: Chain[] = [];
+  for (const start of all) {
+    if (down.has(start.node.id)) continue;
+    const line: typeof all = [];
+    for (let cur: (typeof all)[number] | undefined = start; cur; cur = byId.get(up.get(cur.node.id) ?? '')) line.push(cur);
+
+    const stages = line.map(({ node, recipe, name, tier, profession }, i): ChainStage => {
+      const prev = line[i - 1];
+      const next = line[i + 1];
+      const row = view.rows.get(node.id);
+      const fed = prev && recipe ? recipe.inputs.find((input) => input.id === prev.node.id) : undefined;
+
+      // How the whole amount divides: on to the next stage, kept as it is, or off into another chain.
+      const stage: ChainStage = { id: node.id, name, tier, profession, row, total: node.needed, toGo: 0, pending: 0, jobs: view.stock.atStations.get(node.id) ?? [], recipe, extras: [], onward: 0, save: { qty: 0, for: [] }, branches: [] };
+      if (fed && recipe) stage.ratio = { from: fed.qty, to: yieldOf(recipe, node.id) };
+      for (const use of next ? node.uses : []) {
+        const target = use.into ? whole.nodes.get(use.into) : undefined;
+        const built = target?.steps.find((s) => s.recipe.id === use.recipeId)?.recipe.kind === 'build';
+        if (use.into === next!.node.id) stage.onward += use.qty;
+        else if (!use.into || !target || target.goal > 0 || built) {
+          stage.save.qty += use.qty;
+          stage.save.for.push(use.into ? nameOf(use.into) : GOAL);
+        } else stage.branches.push({ id: use.into, name: nameOf(use.into), qty: use.qty });
+      }
+      stage.extras = (recipe?.inputs ?? [])
+        .filter((input) => input.id !== prev?.node.id)
+        .map((input) => ({ id: input.id, name: ctx.book.name(input.id), tier: ctx.book.thing(input.id)?.tier ?? 0, perRun: input.qty, short: (view.rows.get(input.id)?.node.toGo ?? 0) > 0 }));
+
+      // How far along it is. Anything the push no longer asks for has already been turned into later steps.
+      if (row) {
+        const left = isRaw(row.node) ? stillToGet(row.node) : row.node.toGo;
+        stage.toGo = Math.min(stage.total, left);
+        const counted = Math.min(row.node.have, row.node.needed);
+        const inHand = Math.max(0, row.node.have - atStation(view.stock, node.id));
+        stage.pending = Math.max(0, Math.min(counted - inHand, stage.total - stage.toGo));
+      }
+      return stage;
     });
 
-    const last = rows[rows.length - 1];
+    const last = line[line.length - 1];
     chains.push({
-      key: start.id,
+      key: start.node.id,
       stages,
       profession: start.profession,
-      open: rows.some((r) => r.node.toGo > 0),
-      ends: last.node.uses.map((u) => (u.into ? (view.rows.get(u.into) ?? null) : null)),
+      open: stages.some((s) => s.toGo > 0),
+      ends: last.node.uses.map((u) => ({ id: u.into, name: u.into ? nameOf(u.into) : GOAL, qty: u.qty })),
     });
   }
   return chains;

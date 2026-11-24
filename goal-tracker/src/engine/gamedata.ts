@@ -123,6 +123,7 @@ export function inflate(raw: RawGameData): Game {
       station: r.b != null ? raw.stations[r.b] : undefined,
       stationTier: r.bt,
       effort: r.a,
+      passive: r.p === 1 ? true : undefined,
     });
   }
   for (const g of raw.gather) {

@@ -48,6 +48,8 @@ export interface Recipe {
   stationTier?: number;
   /** Effort (swings/actions) one run takes; the game calls this "actions required". */
   effort?: number;
+  /** True for a passive craft: load the station and it finishes by itself (loom, smelter, kiln, tanning tub...). */
+  passive?: boolean;
   /** For gather recipes: the node or creature it comes from. */
   source?: string;
   /**
