@@ -1,0 +1,162 @@
+@import 'tailwindcss';
+/* dist/ is committed here, so it is not skipped as an ignored folder would be. Without this the styles are
+   gathered from the last build's output as well as from src, and each build comes out a little different. */
+@source not "../dist";
+
+/*
+ * One look: near-black navy, teal accent, hairline borders, compact type.
+ * Components only use the names below (bg-surface, text-ink, border-line...),
+ * so the whole palette can be changed from this one block.
+ */
+:root {
+  --bg: #0d0f14;
+  --surface: #13171f;
+  --surface-2: #1a1f2b;
+  --surface-3: #222836;
+  --line: #2a3040;
+  --line-2: #3a4257;
+  --ink: #e2e8f0;
+  --ink-2: #8fa3bf;
+  --muted: #5a6a82;
+
+  --accent: #1d9e75;
+  --accent-dim: #0f6e56;
+  --accent-ink: #9fe1cb;
+  --accent-soft: rgba(29, 158, 117, 0.14);
+
+  --good: #97c459;
+  --good-soft: rgba(99, 153, 34, 0.16);
+  --warn: #fac775;
+  --warn-soft: rgba(186, 117, 23, 0.18);
+  --bad: #f08a84;
+  --bad-soft: rgba(226, 75, 74, 0.15);
+  --info: #afa9ec;
+  --info-soft: rgba(127, 119, 221, 0.15);
+
+  /* One hue per tier; chips mix it into the surface so every tier reads on dark. */
+  --tier-0: #8fa3bf;
+  --tier-1: #9aa3ad;
+  --tier-2: #7fb866;
+  --tier-3: #5aa2e0;
+  --tier-4: #a78bea;
+  --tier-5: #f0a04b;
+  --tier-6: #ee7b72;
+  --tier-7: #45c2b8;
+  --tier-8: #e481b8;
+  --tier-9: #e0c24a;
+  --tier-10: #6cc4ee;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --radius-card: 10px;
+}
+
+/*
+ * Element defaults go in the base layer. Anything outside a layer would outrank
+ * every utility class (a bare `button { color: inherit }` silently beats `text-accent-ink`).
+ */
+@layer base {
+  html {
+    background: var(--bg);
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--accent-dim);
+    color: #fff;
+  }
+
+  /* Slim scrollbars that sit quietly on the dark background. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
+  }
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.tier-chip {
+  --hue: var(--tier-0);
+  background: color-mix(in oklab, var(--hue) 16%, var(--surface));
+  color: color-mix(in oklab, var(--hue) 82%, var(--ink));
+  border: 1px solid color-mix(in oklab, var(--hue) 34%, var(--surface));
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.drawer-panel {
+  animation: drawer-in 0.18s ease-out;
+}
+
+@keyframes pulse-soft {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.skeleton {
+  background: var(--surface-2);
+  border-radius: 8px;
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-panel,
+  .skeleton {
+    animation: none;
+  }
+}

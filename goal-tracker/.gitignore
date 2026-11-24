@@ -1,0 +1,4 @@
+# dist/ is committed on purpose: the Companion's host runs proxy.js with no build step.
+node_modules
+data/raw
+*.log

@@ -520,8 +520,30 @@ function serveFileCached(req, res, filePath, contentType) {
   res.end(fs.readFileSync(filePath));
 }
 
+// ── /nowhere: the Goal Tracker ──────────────────────────────────────────────
+// A separate small site for one claim, kept in goal-tracker/ (its own React project) and reachable only by
+// address: index.html has no tab or link for it. Everything under /nowhere is its own — pages, files and its API
+// at /nowhere/api/… — and is answered by goal-tracker/dist/server.mjs, a committed build with its packages
+// bundled in, so this file still needs nothing installed. After changing anything in goal-tracker/, run
+// `npm run build` there and commit dist/. It is loaded on the first visit rather than at startup: a build that
+// fails to load costs /nowhere a 500 and leaves the rest of the app alone. Its board goes in data/goal-tracker
+// unless DATABASE_URL or DATA_DIR says otherwise (goal-tracker/server/embed.ts) — and data/ is wiped on a free host.
+const GOAL_TRACKER = path.join(__dirname, 'goal-tracker');
+let goalTracker = null;
+function serveGoalTracker(req, res) {
+  goalTracker = goalTracker || import(require('url').pathToFileURL(path.join(GOAL_TRACKER, 'dist', 'server.mjs')).href)
+    .then(m => m.start({ root: GOAL_TRACKER, dataDir: path.join(DATA_DIR, 'goal-tracker') }));
+  goalTracker.then(handle => handle(req, res), err => {
+    goalTracker = null;   // try again on the next visit (a database that was briefly unreachable, say)
+    console.error('[goal-tracker] could not start:', (err && err.stack) || err);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'The Goal Tracker could not start. Try again in a minute.' }));
+  });
+}
+
 http.createServer((req, res) => {
   res.on('error', () => {}); // client aborted mid-response (common under bursty load) — ignore, don't crash
+  if (/^\/nowhere(?:[/?]|$)/.test(req.url)) return serveGoalTracker(req, res);   // before the CORS headers: its API is for its own pages only
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
