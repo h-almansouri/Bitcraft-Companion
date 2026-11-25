@@ -121,7 +121,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const scope: PushScope = { ctx, board: board.data, push, claim: claim.data, snapshot: stock.data, view, save, assign, openItem };
   const waitingOnStock = stock.loading && !stock.data;
   // The numbers on the tabs: what still has to be brought in, and what can be collected or crafted right now.
-  const toBringIn = view.todos.filter((t) => t.kind === 'gather' || t.kind === 'buy').length;
+  const toBringIn = view.todos.filter((t) => t.kind === 'gather').length;
   const readyToProcess = view.todos.filter((t) => t.kind === 'pickup' || t.kind === 'craft' || t.kind === 'stock').length;
   const hasGoals = push.goals.length > 0;
   /** The board has a password and this device has not given it. */

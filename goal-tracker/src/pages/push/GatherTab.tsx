@@ -1,40 +1,24 @@
 import { useMemo } from 'react';
 import { ChevronDown, PartyPopper } from 'lucide-react';
-import { buildProducts, professionRank, type MakeStep, type Product } from '../../lib/derive.ts';
+import { BOUGHT, buildProducts, rawMaterials, type RawMaterial } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
-import type { Ref } from '../../engine/types.ts';
 import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { UNASSIGNED, matchPeople, matchRole, matchText, matchTier, takenBy, useFilterBar } from './filters.tsx';
 import { whole } from './MakeTab.tsx';
 import { AssignControl } from './parts.tsx';
 
-/** A raw material, and every finished thing some of it ends up in. */
-interface Raw {
-  step: MakeStep;
-  ends: { product: Product; share: number }[];
-}
+type Raw = RawMaterial;
 
 /**
- * Everything that has to be brought in from outside storage, one card per raw
- * material: how much is in hand, how much is left to get, where to get it, and
- * what it ends up as. Grouped by the profession that gathers it, lowest tier first.
+ * Everything that has to be gathered out in the world, one card per raw material:
+ * how much is in hand, how much is left to get, where to get it, and what it ends
+ * up as. Grouped by the profession that gathers it, lowest tier first. Things that
+ * are bought from a traveler are not here: buying is listed on the Process tab.
  */
 export function GatherTab({ scope }: { scope: PushScope }) {
   const { ctx, view } = scope;
-  const raws = useMemo(() => {
-    const found = new Map<Ref, Raw>();
-    for (const product of buildProducts(ctx, view)) {
-      for (const step of product.steps) {
-        if (!step.raw || (product.assembly && step.id !== product.id)) continue;
-        const raw = found.get(step.id) ?? { step, ends: [] };
-        raw.ends.push({ product, share: step.share });
-        found.set(step.id, raw);
-      }
-    }
-    for (const raw of found.values()) raw.ends.sort((a, b) => b.share - a.share);
-    return [...found.values()].sort((a, b) => professionRank(a.step.profession) - professionRank(b.step.profession) || a.step.tier - b.step.tier || a.step.name.localeCompare(b.step.name));
-  }, [ctx, view]);
+  const raws = useMemo(() => rawMaterials(buildProducts(ctx, view)).filter((r) => r.step.profession !== BOUGHT), [ctx, view]);
 
   const open = raws.filter((r) => r.step.toGo > 0);
   const count = (test: (r: Raw) => boolean) => open.filter(test).length;
@@ -51,20 +35,20 @@ export function GatherTab({ scope }: { scope: PushScope }) {
 
   if (!raws.length) {
     return (
-      <Empty title="Nothing to gather or buy" icon={<PartyPopper size={30} />}>
-        <p>This push needs no raw materials.</p>
+      <Empty title="Nothing to gather" icon={<PartyPopper size={30} />}>
+        <p>This push needs nothing gathered.</p>
       </Empty>
     );
   }
 
   return (
     <div>
-      {bar(todo.length, open.length, 'materials to bring in')}
+      {bar(todo.length, open.length, 'materials to gather')}
 
       {open.length === 0 && (
         <div className="mt-4">
-          <Empty title="Nothing left to gather or buy" icon={<PartyPopper size={30} />}>
-            <p>Every raw material this push needs is already in hand.</p>
+          <Empty title="Nothing left to gather" icon={<PartyPopper size={30} />}>
+            <p>Everything this push needs gathered is already in hand.</p>
           </Empty>
         </div>
       )}
@@ -79,7 +63,7 @@ export function GatherTab({ scope }: { scope: PushScope }) {
           <section key={profession}>
             <div className="mb-2.5 flex items-baseline gap-2">
               <h2 className="text-[15px] font-semibold">{profession}</h2>
-              <span className="num text-xs text-muted">{list.length} to bring in</span>
+              <span className="num text-xs text-muted">{list.length} to gather</span>
             </div>
             <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
               {list.map((raw) => (

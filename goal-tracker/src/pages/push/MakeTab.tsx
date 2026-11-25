@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Check, ChevronDown, Flag, Hourglass, PartyPopper } from 'lucide-react';
-import { buildProducts, nextStep, professionRank, type MakeStep, type Product, type StepState } from '../../lib/derive.ts';
+import { Check, ChevronDown, Flag, Hourglass, PartyPopper, ShoppingBag } from 'lucide-react';
+import { BOUGHT, buildProducts, nextStep, professionRank, rawMaterials, type MakeStep, type Product, type RawMaterial, type StepState } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
 import type { Ref } from '../../engine/types.ts';
 import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
@@ -11,8 +11,15 @@ import { AssignControl, StationLines, stationOf } from './parts.tsx';
 /** Shares are worked out through recipe ratios, so they are rounded up to whole things for showing. */
 export const whole = (n: number) => Math.ceil(n - 1e-6);
 
+/**
+ * The steps that are this group's own work. Something put together from finished things only
+ * names its ingredients (each has a group of its own), so its work is the last step, plus
+ * anything it takes that is simply bought or gathered.
+ */
+const ownSteps = (product: Product) => (product.assembly ? product.steps.filter((s) => s.id === product.id || s.raw) : product.steps);
+
 /** The stage filter talks about jobs; a step's state says the same thing in its own words. */
-const STAGE_OF: Partial<Record<StepState, StageId>> = { collect: 'pickup', craft: 'craft', station: 'progress', waiting: 'blocked' };
+const STAGE_OF: Partial<Record<StepState, StageId>> = { collect: 'pickup', craft: 'craft', buy: 'buy', station: 'progress', waiting: 'blocked' };
 
 /**
  * Everything the push has to end up with, one group per finished material, under
@@ -22,12 +29,15 @@ const STAGE_OF: Partial<Record<StepState, StageId>> = { collect: 'pickup', craft
  */
 export function MakeTab({ scope }: { scope: PushScope }) {
   const { ctx, view, openItem } = scope;
+  const everything = useMemo(() => buildProducts(ctx, view), [ctx, view]);
   // Things that are only gathered and used as they are have no steps; they live on the Gather tab.
-  const products = useMemo(() => buildProducts(ctx, view).filter((p) => !p.raw), [ctx, view]);
-  const steps = useMemo(() => products.flatMap((p) => p.steps), [products]);
+  const products = useMemo(() => everything.filter((p) => !p.raw), [everything]);
+  // What is bought from a traveler rather than gathered: a shopping list of its own, on top.
+  const buys = useMemo(() => rawMaterials(everything).filter((r) => r.step.profession === BOUGHT), [everything]);
+  const steps = useMemo(() => products.flatMap(ownSteps), [products]);
   const [flipped, setFlipped] = useState<Set<Ref>>(new Set());
 
-  const having = (test: (s: MakeStep) => boolean) => products.filter((p) => p.steps.some(test)).length;
+  const having = (test: (s: MakeStep) => boolean) => products.filter((p) => ownSteps(p).some(test)).length;
   const { f, query, bar } = useFilterBar(scope, {
     actions: STAGES.filter((a) => a.side === 'process')
       .map((a) => ({ id: a.id, label: a.label, count: having((s) => STAGE_OF[s.state] === a.id) }))
@@ -42,7 +52,12 @@ export function MakeTab({ scope }: { scope: PushScope }) {
   const picky = f.actions.length + f.tiers.length + f.roles.length + f.people.length > 0 || query.trim() !== '';
   const fits = (s: MakeStep) =>
     (!f.actions.length || f.actions.includes(STAGE_OF[s.state] ?? '')) && matchTier(f, s.tier) && matchRole(f, s.profession) && matchPeople(scope, f, s.id) && matchText(query, s.name);
-  const shown = products.filter((p) => !picky || p.steps.some(fits));
+  const shown = products.filter((p) => !picky || ownSteps(p).some(fits));
+  // With filters on, the shopping list keeps to what the groups in view are waiting for.
+  const wantedBy = new Set(shown.flatMap((p) => p.steps.filter((s) => s.raw).map((s) => s.id)));
+  const listed = buys.filter((r) => !picky || wantedBy.has(r.step.id) || fits(r.step));
+  const toBuy = listed.filter((r) => r.step.toGo > 0);
+  const bought = listed.filter((r) => r.step.toGo <= 0);
   const groups = [...new Set(shown.map((p) => p.profession))].sort((a, b) => professionRank(a) - professionRank(b)).map((p) => [p, shown.filter((x) => x.profession === p)] as const);
 
   // With filters on, groups start open so the matching steps are in view; otherwise they start folded.
@@ -65,6 +80,37 @@ export function MakeTab({ scope }: { scope: PushScope }) {
   return (
     <div>
       {bar(shown.length, products.length, 'things to make')}
+
+      {listed.length > 0 && (
+        <section className="mt-4">
+          <div className="mb-2.5 flex items-center gap-2">
+            <ShoppingBag size={15} className="text-accent-ink" />
+            <h2 className="text-[15px] font-semibold">Buy</h2>
+            <span className="num text-xs text-muted">{toBuy.length} to buy</span>
+          </div>
+          {toBuy.length > 0 && (
+            <Card className="divide-y divide-line">
+              {toBuy.map((raw) => (
+                <BuyRow key={raw.step.id} scope={scope} raw={raw} />
+              ))}
+            </Card>
+          )}
+          {bought.length > 0 && (
+            <details className="group mt-2">
+              <summary className="flex cursor-pointer list-none items-center gap-1.5 text-xs text-ink-2 hover:text-ink [&::-webkit-details-marker]:hidden">
+                <ChevronDown size={13} className="-rotate-90 transition-transform group-open:rotate-0" />
+                {bought.length} already bought
+              </summary>
+              <Card className="mt-2 divide-y divide-line opacity-80">
+                {bought.map((raw) => (
+                  <BuyRow key={raw.step.id} scope={scope} raw={raw} />
+                ))}
+              </Card>
+            </details>
+          )}
+        </section>
+      )}
+
       {groups.length === 0 ? (
         <div className="mt-4">
           <Empty title="Nothing matches those filters">Loosen or clear the filters above.</Empty>
@@ -81,7 +127,7 @@ export function MakeTab({ scope }: { scope: PushScope }) {
                 {list
                   .filter((p) => p.open)
                   .map((product) => (
-                    <ProductCard key={product.id} scope={scope} product={product} open={isOpen(product.id)} onToggle={() => toggle(product.id)} onOpen={openItem} hit={picky ? fits : undefined} />
+                    <ProductCard key={product.id} scope={scope} product={product} open={isOpen(product.id)} onToggle={() => toggle(product.id)} onOpen={openItem} hit={picky ? (s) => ownSteps(product).includes(s) && fits(s) : undefined} />
                   ))}
               </div>
               {list.some((p) => !p.open) && (
@@ -103,6 +149,54 @@ export function MakeTab({ scope }: { scope: PushScope }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** One thing to buy: how many, who sells it, how much is already in hand, and which finished things are waiting for it. */
+function BuyRow({ scope, raw }: { scope: PushScope; raw: RawMaterial }) {
+  const { ctx, view, openItem } = scope;
+  const { step, ends } = raw;
+  const left = step.toGo;
+  const seller = view.onOrder.has(step.id) ? 'On a claim buy order' : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}`;
+  const spot = (view.stock.where.get(step.id) ?? [])[0];
+  // What it is for: the things it goes straight into, and the chains it is a part of.
+  const uses = [...new Map(ends.flatMap(({ product }) => (product.id === step.id ? product.for.filter((e) => e.id).map((e) => [e.id!, e.name] as const) : [[product.id, product.name] as const]))).entries()];
+  return (
+    <div className="grid grid-cols-1 items-center gap-x-3 gap-y-1.5 px-3.5 py-2.5 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="min-w-0">
+        <button type="button" onClick={() => openItem(step.id)} className="flex max-w-full items-center gap-1.5 text-left">
+          <TierChip tier={step.tier} />
+          <span className="truncate text-[13px] font-medium text-ink hover:underline">
+            {left > 0 && <span className="num">{num(left)} </span>}
+            {step.name}
+          </span>
+        </button>
+        <p className="mt-0.5 text-[11px] leading-snug text-muted">
+          {[seller, `${num(step.total - step.toGo)} of ${num(step.total)} in hand`, spot && `${num(spot.qty)} in ${spot.loc.kind === 'player' ? spot.loc.owner + ': ' : ''}${spot.loc.name}`].filter(Boolean).join(' · ')}
+        </p>
+        {uses.length > 0 && (
+          <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted">
+            for
+            {uses.slice(0, 4).map(([id, name]) => (
+              <button key={id} type="button" onClick={() => openItem(id)} className="max-w-full truncate rounded border border-line-2 bg-surface-2 px-1.5 py-0.5 text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink">
+                {name}
+              </button>
+            ))}
+            {uses.length > 4 && <span>and {uses.length - 4} more</span>}
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        {left > 0 ? (
+          <span className="inline-flex h-6 shrink-0 items-center rounded bg-warn-soft px-2 text-[11px] font-semibold text-warn">Buy {num(left)}</span>
+        ) : (
+          <span className="inline-flex h-6 shrink-0 items-center gap-1 px-2 text-[11px] font-semibold text-good">
+            <Check size={12} /> Bought
+          </span>
+        )}
+        {left > 0 && <AssignControl scope={scope} id={step.id} />}
+      </div>
     </div>
   );
 }
@@ -140,7 +234,7 @@ function ProductCard({ scope, product, open, onToggle, onOpen, hit }: { scope: P
         <span className="ml-auto flex min-w-0 items-center gap-2.5">
           {product.open && next && next.id !== last.id && (
             <span className="hidden min-w-0 truncate text-xs text-ink-2 md:inline">
-              {next.state === 'station' || next.state === 'waiting' ? '' : 'Next: '}
+              {next.state === 'buy' ? 'To buy: ' : next.state === 'gather' ? 'To gather: ' : next.state === 'station' || next.state === 'waiting' ? '' : 'Next: '}
               {next.name}
             </span>
           )}

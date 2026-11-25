@@ -703,3 +703,28 @@ export function nextStep(product: Product): MakeStep | undefined {
   // Something at a station to pick up or craft comes before going out to gather more.
   return pick('collect') ?? pick('craft') ?? pick('gather', 'buy') ?? pick('station') ?? pick('waiting');
 }
+
+/** The profession bought things are filed under: sold by a traveler, or on a claim buy order. */
+export const BOUGHT = 'Trade';
+
+/** A gathered or bought material, and every finished thing some of it ends up in. */
+export interface RawMaterial {
+  step: MakeStep;
+  ends: { product: Product; share: number }[];
+}
+
+/** Every raw material in the push with what it ends up as, professions together and lowest tier first. */
+export function rawMaterials(products: Product[]): RawMaterial[] {
+  const found = new Map<Ref, RawMaterial>();
+  for (const product of products) {
+    for (const step of product.steps) {
+      // A raw material an assembly takes directly is a product of its own ("used as it is"), so it is not counted twice.
+      if (!step.raw || (product.assembly && step.id !== product.id)) continue;
+      const raw = found.get(step.id) ?? { step, ends: [] };
+      raw.ends.push({ product, share: step.share });
+      found.set(step.id, raw);
+    }
+  }
+  for (const raw of found.values()) raw.ends.sort((a, b) => b.share - a.share);
+  return [...found.values()].sort((a, b) => professionRank(a.step.profession) - professionRank(b.step.profession) || a.step.tier - b.step.tier || a.step.name.localeCompare(b.step.name));
+}

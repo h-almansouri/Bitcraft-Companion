@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { RecipeBook } from '../src/engine/book.ts';
 import { inflate } from '../src/engine/gamedata.ts';
 import { Router } from '../src/engine/routes.ts';
-import { buildChains, buildProducts, buildView, nextStep, professionRank } from '../src/lib/derive.ts';
+import { BOUGHT, buildChains, buildProducts, buildView, nextStep, professionRank, rawMaterials } from '../src/lib/derive.ts';
 import type { GameCtx } from '../src/lib/game.ts';
 import type { CraftJob, Push, StockSnapshot } from '../src/lib/shapes.ts';
 
@@ -200,5 +200,45 @@ describe('what to make: finished materials and their steps', () => {
     const shared = roots.reduce((sum, s) => sum + s.share, 0);
     expect(shared).toBeGreaterThan(total - 2);
     expect(shared).toBeLessThanOrEqual(total + 0.001);
+  });
+});
+
+describe('buying', () => {
+  // Fine Cloth takes cloth strip and filament, which are made, and a mordant that a traveler sells.
+  const CLOTH = id('Fine Cloth');
+  const MORDANT = id("Clothmaker's Mordant");
+  const cloth: Push = { ...push, goals: [{ id: CLOTH, qty: 430 }] };
+
+  it('lists the cloth as the thing to make, waiting on a purchase', () => {
+    const products = buildProducts(ctx, buildView(ctx, cloth, snapshot([[id('Fine Cloth Strip'), 430], [id('Fine Wispweave Filament'), 4300]], [])));
+    const made = products.find((p) => p.id === CLOTH)!;
+    expect(made).toMatchObject({ assembly: true, profession: 'Tailoring', qty: 430, open: true });
+    // Written the way the list is written by hand: 430 cloth from strip, filament and mordant.
+    const last = made.steps[made.steps.length - 1];
+    expect(last.from.map((x) => [x.name, Math.ceil(x.qty - 1e-6)])).toEqual([
+      ['Fine Cloth Strip', 430],
+      ['Fine Wispweave Filament', 4300],
+      ["Clothmaker's Mordant", 860],
+    ]);
+    expect(made.steps.find((s) => s.id === MORDANT)).toMatchObject({ raw: true, profession: BOUGHT, state: 'buy', toGo: 860 });
+    expect(last.state).toBe('waiting');
+    // The first thing to do about the cloth is the purchase.
+    expect(nextStep(made)?.id).toBe(MORDANT);
+  });
+
+  it('keeps bought things apart from gathered ones', () => {
+    const raws = rawMaterials(buildProducts(ctx, buildView(ctx, cloth, snapshot([], []))));
+    const mordant = raws.find((r) => r.step.id === MORDANT)!;
+    expect(mordant.step.profession).toBe(BOUGHT);
+    // It goes straight into the cloth, so that is what it is "for".
+    expect(mordant.ends.map((e) => e.product.id)).toEqual([MORDANT]);
+    expect(mordant.ends[0].product.for.map((e) => e.name)).toEqual(['Fine Cloth']);
+    // Everything else the cloth starts from is gathered, under the profession that gathers it.
+    const gathered = raws.filter((r) => r.step.profession !== BOUGHT);
+    expect(gathered.length).toBeGreaterThan(0);
+    for (const r of gathered) expect(r.step.raw).toBe(true);
+    // A thing put on a claim buy order is bought too, whatever it normally takes to get.
+    const ordered = rawMaterials(buildProducts(ctx, buildView(ctx, { ...cloth, assignments: { [gathered[0].step.id]: ['buy-order'] } }, snapshot([], []))));
+    expect(ordered.find((r) => r.step.id === gathered[0].step.id)!.step.profession).toBe(BOUGHT);
   });
 });

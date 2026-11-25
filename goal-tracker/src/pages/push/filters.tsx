@@ -34,9 +34,9 @@ export const UNASSIGNED = 'nobody';
 export type StageId = 'gather' | 'buy' | 'pickup' | 'craft' | 'progress' | 'blocked';
 export const STAGES: { id: StageId; label: string; side: 'gather' | 'process' }[] = [
   { id: 'gather', label: 'Gather', side: 'gather' },
-  { id: 'buy', label: 'Buy', side: 'gather' },
   { id: 'pickup', label: 'Collect', side: 'process' },
   { id: 'craft', label: 'Craft now', side: 'process' },
+  { id: 'buy', label: 'Buy', side: 'process' },
   { id: 'progress', label: 'Being crafted', side: 'process' },
   { id: 'blocked', label: 'Waiting on materials', side: 'process' },
 ];
