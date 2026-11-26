@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, Hammer, Lock, Pickaxe, Search, Settings2, Target as TargetIcon } from 'lucide-react';
+import { Boxes, Hammer, Lock, Pickaxe, RotateCcw, Search, Settings2, Target as TargetIcon, Trophy } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { putBoard } from '../lib/boards.ts';
 import { buildView, type PushView, type StageProgress } from '../lib/derive.ts';
-import { num, pct } from '../lib/format.ts';
+import { day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
 import { useLoad } from '../lib/hooks.ts';
 import { Link, setQuery, useQuery } from '../lib/router.tsx';
@@ -13,6 +13,7 @@ import { Bar, Button, Card, Empty, Notice, Pill, Skeleton, Tabs, TierChip, cx, i
 import { StorageRead, useStock } from '../ui/storage.tsx';
 import { LockedPanel, guarded, useAccess } from '../ui/unlock.tsx';
 import { KIND_LABEL } from './BoardPage.tsx';
+import { CompletedTab } from './push/CompletedTab.tsx';
 import { GatherTab } from './push/GatherTab.tsx';
 import { ProcessTab } from './push/ProcessTab.tsx';
 import { StorageTab } from './push/StorageTab.tsx';
@@ -47,9 +48,12 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const claim = useLoad<ClaimDetail>('claim', () => api.claim());
   const { ctx, error: gameError } = useGame();
   const players = useMemo(() => [...(push?.players ?? [])].sort().join(','), [push?.players]);
-  // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
-  const stock = useStock(push ? `stock:${players}` : null, players ? players.split(',') : []);
+  /** Marked complete: what it took has been spent, so there is nothing left to check storage for. */
+  const finished = push?.status === 'done';
+  // Read when the page opens, then every 15 minutes while it is on screen (see useStock). A finished push reads nothing.
+  const stock = useStock(push && !finished ? `stock:${players}` : null, players ? players.split(',') : []);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [marking, setMarking] = useState(false);
   const access = useAccess(board.data);
 
   useEffect(() => {
@@ -104,6 +108,18 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
     [change],
   );
   const openItem = useCallback((id: Ref) => setQuery('item', id, { push: true }), []);
+  /** Mark the push complete, or put a finished one back to work. */
+  const mark = useCallback(
+    (status: Push['status']) => {
+      setMarking(true);
+      save({ status })
+        .catch(() => {
+          /* the page shows the error */
+        })
+        .finally(() => setMarking(false));
+    },
+    [save],
+  );
 
   if (board.loading || (!ctx && !gameError)) return <Skeleton className="h-72" />;
   if (!board.data || !push) {
@@ -119,7 +135,9 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   if (!ctx || !view) return <Notice tone="bad">{gameError ?? 'Could not load the game data.'}</Notice>;
 
   const scope: PushScope = { ctx, board: board.data, push, claim: claim.data, snapshot: stock.data, view, save, assign, openItem };
-  const waitingOnStock = stock.loading && !stock.data;
+  const waitingOnStock = !finished && stock.loading && !stock.data;
+  // A finished push has two tabs: what it made, and Setup.
+  const shownTab: TabId = finished && tab !== 'setup' ? 'gather' : tab;
   // The numbers on the tabs: what still has to be brought in, and what can be collected or crafted right now.
   const toBringIn = view.todos.filter((t) => t.kind === 'gather').length;
   const readyToProcess = view.todos.filter((t) => t.kind === 'pickup' || t.kind === 'craft' || t.kind === 'stock').length;
@@ -134,17 +152,42 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold">{push.name}</h1>
             <Pill>{KIND_LABEL[push.kind]}</Pill>
-            <Pill tone={push.status === 'active' ? 'accent' : push.status === 'done' ? 'good' : 'warn'}>{push.status === 'active' ? 'Active' : push.status === 'done' ? 'Done' : 'Planned'}</Pill>
+            <Pill tone={push.status === 'active' ? 'accent' : finished ? 'good' : 'warn'}>{push.status === 'active' ? 'Active' : finished ? 'Completed' : 'Planned'}</Pill>
           </div>
           {push.note && <p className="mt-1 max-w-2xl text-[13px] text-ink-2">{push.note}</p>}
         </div>
-        <div className="flex items-center gap-2">
-          {hasGoals && !waitingOnStock && <FindMaterial view={view} onPick={openItem} />}
-          <StorageRead stock={stock} />
+        <div className="flex flex-wrap items-center gap-2">
+          {!finished && hasGoals && !waitingOnStock && <FindMaterial view={view} onPick={openItem} />}
+          {!finished && <StorageRead stock={stock} />}
+          {!shut &&
+            (finished ? (
+              <Button variant="ghost" disabled={marking} onClick={() => mark('active')} title="Put this push back to work">
+                <RotateCcw size={14} />
+                Reopen
+              </Button>
+            ) : (
+              <Button disabled={marking} onClick={() => mark('done')} title="We did it: file this push under Completed">
+                <Trophy size={15} />
+                Mark complete
+              </Button>
+            ))}
         </div>
       </div>
 
-      {hasGoals && (
+      {finished ? (
+        <Card className="mt-4 flex items-center gap-3.5 bg-good-soft px-4 py-3.5 ring-1 ring-good/40">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-good/15 text-good">
+            <Trophy size={20} />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[15px] font-semibold text-ink">Completed {day(push.completedAt ?? push.updatedAt)}</div>
+            <div className="mt-0.5 text-[13px] text-ink-2">
+              {num(push.goals.length)} {plural(push.goals.length, 'goal')} · started {day(push.createdAt)}
+            </div>
+          </div>
+        </Card>
+      ) : (
+        hasGoals && (
         <Card className="mt-4 px-4 py-3">
           {waitingOnStock ? (
             <Skeleton className="h-8" />
@@ -165,44 +208,56 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
             </div>
           )}
         </Card>
+        )
       )}
 
       <div className="mt-3 space-y-2 empty:hidden">
-        {stock.error && <Notice tone="warn">Could not read live storage ({stock.error}) The numbers below treat storage as empty until it loads.</Notice>}
-        {stock.data?.problems.map((p) => (
-          <Notice tone="warn" key={p}>
-            {p}
-          </Notice>
-        ))}
-        {view.plan.warnings.map((w) => (
-          <Notice tone="warn" key={w}>
-            {w}
-          </Notice>
-        ))}
+        {!finished && stock.error && <Notice tone="warn">Could not read live storage ({stock.error}) The numbers below treat storage as empty until it loads.</Notice>}
+        {!finished &&
+          stock.data?.problems.map((p) => (
+            <Notice tone="warn" key={p}>
+              {p}
+            </Notice>
+          ))}
+        {!finished &&
+          view.plan.warnings.map((w) => (
+            <Notice tone="warn" key={w}>
+              {w}
+            </Notice>
+          ))}
         {board.data.temporary && <Notice tone="warn">This server has nowhere permanent to keep pushes, so anything saved here is lost when it restarts. Whoever hosts it needs to give it a database or a disk.</Notice>}
         {saveError && <Notice tone="bad">Not saved: {saveError}</Notice>}
       </div>
 
       <div className="mt-4">
         <Tabs<TabId>
-          value={tab}
+          value={shownTab}
           onChange={(next) => setQuery('tab', next === 'gather' ? null : next, { push: true })}
-          tabs={[
-            { id: 'gather', label: 'Gather', icon: <Pickaxe size={15} />, count: waitingOnStock ? undefined : toBringIn },
-            { id: 'process', label: 'Process', icon: <Hammer size={15} />, count: waitingOnStock ? undefined : readyToProcess },
-            { id: 'storage', label: 'Storage', icon: shut ? <Lock size={14} /> : <Boxes size={15} /> },
-            { id: 'setup', label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
-          ]}
+          tabs={
+            finished
+              ? [
+                  { id: 'gather', label: 'What we made', icon: <Trophy size={15} /> },
+                  { id: 'setup', label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
+                ]
+              : [
+                  { id: 'gather', label: 'Gather', icon: <Pickaxe size={15} />, count: waitingOnStock ? undefined : toBringIn },
+                  { id: 'process', label: 'Process', icon: <Hammer size={15} />, count: waitingOnStock ? undefined : readyToProcess },
+                  { id: 'storage', label: 'Storage', icon: shut ? <Lock size={14} /> : <Boxes size={15} /> },
+                  { id: 'setup', label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
+                ]
+          }
         />
       </div>
 
       <div className="mt-4">
-        {MANAGE_TABS[tab] && access.checking ? (
+        {MANAGE_TABS[shownTab] && access.checking ? (
           <Skeleton className="h-40" />
-        ) : MANAGE_TABS[tab] && shut ? (
-          <LockedPanel slug={slug} what={MANAGE_TABS[tab]!} />
-        ) : tab === 'setup' ? (
+        ) : MANAGE_TABS[shownTab] && shut ? (
+          <LockedPanel slug={slug} what={MANAGE_TABS[shownTab]!} />
+        ) : shownTab === 'setup' ? (
           <SetupTab scope={scope} />
+        ) : finished ? (
+          <CompletedTab scope={scope} />
         ) : !hasGoals ? (
           <Empty title="This push has no goals yet" icon={<TargetIcon size={30} />}>
             <p>Add what you want to make and the full list of materials appears here.</p>
@@ -225,7 +280,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
         )}
       </div>
 
-      <ItemDrawer scope={scope} id={item} onClose={() => setQuery('item', null, { push: true })} />
+      {!finished && <ItemDrawer scope={scope} id={item} onClose={() => setQuery('item', null, { push: true })} />}
     </div>
   );
 }

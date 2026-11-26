@@ -99,11 +99,12 @@ function cleanPush(input: any, slug: string, previous?: Push): Push | string {
     if (members.length) assignments[id] = members;
   }
   const now = new Date().toISOString();
+  const status: PushStatus = statuses.includes(input.status) ? input.status : 'active';
   return {
     slug,
     name,
     kind: kinds.includes(input.kind) ? input.kind : 'custom',
-    status: statuses.includes(input.status) ? input.status : 'active',
+    status,
     note: String(input.note ?? '').slice(0, 600) || undefined,
     goals,
     players: (Array.isArray(input.players) ? input.players : []).map(String).filter((p: string) => ID.test(p)).slice(0, 60),
@@ -111,6 +112,9 @@ function cleanPush(input: any, slug: string, previous?: Push): Push | string {
     routes,
     countCrafts: input.countCrafts !== false,
     assignments,
+    // The day it was marked complete is set here, never taken from the page. It stays put however
+    // often a finished push is saved again, and goes when the push is reopened.
+    completedAt: status === 'done' ? (previous?.status === 'done' ? (previous.completedAt ?? previous.updatedAt) : now) : undefined,
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
   };

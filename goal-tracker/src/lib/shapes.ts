@@ -89,6 +89,8 @@ export interface Push {
   countCrafts: boolean;
   /** Who has taken on each material: thing -> member ids, or BUY_ORDER. Missing or empty means nobody yet. */
   assignments?: Record<Ref, string[]>;
+  /** When the push was marked complete. Only there while its status is 'done'; reopening it clears it. */
+  completedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

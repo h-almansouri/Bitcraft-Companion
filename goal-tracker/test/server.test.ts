@@ -123,6 +123,30 @@ describe('the API on a plain Node host', () => {
     expect(JSON.stringify(seen.data)).not.toMatch(/keyHash|test-only-value/);
   });
 
+  it('stamps the day a push is marked complete, keeps it, and clears it when the push is reopened', async () => {
+    const key = 'test-only-value';
+    const save = async (body: object) => (await call('PUT', '/boards/nowhere/pushes/claim-t5-push', { ...push, ...body }, key)).data.push;
+    expect((await save({})).completedAt).toBeUndefined();
+
+    // The page cannot pick the date: whatever it sends is ignored.
+    const done = await save({ status: 'done', completedAt: '2001-01-01T00:00:00.000Z' });
+    expect(done.status).toBe('done');
+    expect(Math.abs(Date.now() - new Date(done.completedAt).getTime())).toBeLessThan(60_000);
+
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 86_400_000 });
+    try {
+      const edited = await save({ status: 'done', note: 'Thanks, everyone.' });
+      expect(edited.completedAt).toBe(done.completedAt);
+      expect(edited.updatedAt).not.toBe(done.updatedAt);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const reopened = await save({ status: 'active' });
+    expect(reopened.status).toBe('active');
+    expect('completedAt' in reopened).toBe(false);
+  });
+
   it('answers wrong addresses as errors, not as the page', async () => {
     expect((await call('GET', '/boards/somewhere-else')).status).toBe(404);
     expect(await call('GET', '/no-such-thing')).toEqual({ status: 404, data: { error: 'Not found.' } });

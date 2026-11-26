@@ -4049,11 +4049,12 @@ function cleanPush(input, slug, previous) {
 		if (members.length) assignments[id] = members;
 	}
 	const now = (/* @__PURE__ */ new Date()).toISOString();
+	const status = statuses.includes(input.status) ? input.status : "active";
 	return {
 		slug,
 		name,
 		kind: kinds.includes(input.kind) ? input.kind : "custom",
-		status: statuses.includes(input.status) ? input.status : "active",
+		status,
 		note: String(input.note ?? "").slice(0, 600) || void 0,
 		goals,
 		players: (Array.isArray(input.players) ? input.players : []).map(String).filter((p) => ID.test(p)).slice(0, 60),
@@ -4061,6 +4062,7 @@ function cleanPush(input, slug, previous) {
 		routes,
 		countCrafts: input.countCrafts !== false,
 		assignments,
+		completedAt: status === "done" ? previous?.status === "done" ? previous.completedAt ?? previous.updatedAt : now : void 0,
 		createdAt: previous?.createdAt ?? now,
 		updatedAt: now
 	};

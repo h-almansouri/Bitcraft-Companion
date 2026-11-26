@@ -81,7 +81,7 @@ export function SetupTab({ scope }: { scope: PushScope }) {
             <select className={inputClass} value={draft.status} onChange={(e) => set({ status: e.target.value as PushStatus })}>
               <option value="active">Active</option>
               <option value="planned">Planned</option>
-              <option value="done">Done</option>
+              <option value="done">Completed</option>
             </select>
           </Field>
         </div>

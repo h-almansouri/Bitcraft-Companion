@@ -15,6 +15,9 @@ export function ago(iso: string | null | undefined): string {
   return days === 1 ? 'yesterday' : `${days} days ago`;
 }
 
-export const plural = (n: number, one: string, many = one + 's') => (Math.ceil(n - 1e-9) === 1 ? one : many);
+/** A calendar day, written the way the reader's own device writes dates ("26 Nov 2026"). */
+export const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+
+export const plural =(n: number, one: string, many = one + 's') => (Math.ceil(n - 1e-9) === 1 ? one : many);
 
 export const TIER_NAMES = ['', 'Rough', 'Simple', 'Sturdy', 'Fine', 'Exquisite', 'Peerless', 'Ornate', 'Pristine', 'Magnificent', 'Flawless'];

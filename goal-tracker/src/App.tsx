@@ -15,7 +15,7 @@ import { UnlockHost } from './ui/unlock.tsx';
 export const APP_NAME = 'Goal Tracker';
 const TRAVELERS = HOME + '/travelers';
 
-const STATUS_DOT: Record<PushStatus, string> = { active: 'bg-accent', planned: 'bg-warn', done: 'bg-muted' };
+const STATUS_DOT: Record<PushStatus, string> = { active: 'bg-accent', planned: 'bg-warn', done: 'bg-good' };
 
 /** Which screen an address points at. Anything unrecognised falls back to the list of pushes. */
 type Route = { page: 'pushes' } | { page: 'push'; slug: string } | { page: 'travelers' };
@@ -90,7 +90,7 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
         )}
         {done.length > 0 && (
           <>
-            <SectionLabel className="px-5 pb-2 pt-6">Finished</SectionLabel>
+            <SectionLabel className="px-5 pb-2 pt-6">Completed</SectionLabel>
             {done.map(pushLink)}
           </>
         )}

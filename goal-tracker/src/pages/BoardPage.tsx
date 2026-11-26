@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, Lock, LockOpen, Plus } from 'lucide-react';
+import { ChevronDown, Lock, LockOpen, Plus, Trophy } from 'lucide-react';
 import { api, rememberKey } from '../lib/api.ts';
 import { putBoard } from '../lib/boards.ts';
 import { buildView } from '../lib/derive.ts';
-import { ago, num, pct, plural } from '../lib/format.ts';
+import { day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
 import { useLoad } from '../lib/hooks.ts';
 import { Link } from '../lib/router.tsx';
@@ -17,7 +17,7 @@ export const KIND_LABEL: Record<PushKind, string> = { 'claim-tier': 'Claim tier'
 const SECTIONS: { status: PushStatus; title: string; empty: string }[] = [
   { status: 'active', title: 'Active', empty: 'Nothing running right now.' },
   { status: 'planned', title: 'Planned', empty: 'Nothing lined up yet.' },
-  { status: 'done', title: 'Done', empty: 'No finished pushes yet.' },
+  { status: 'done', title: 'Completed', empty: 'No finished pushes yet.' },
 ];
 
 export function BoardPage({ slug }: { slug: string }) {
@@ -118,7 +118,7 @@ export function BoardPage({ slug }: { slug: string }) {
               const list = shown.filter((p) => p.status === section.status);
               if (!list.length && section.status !== 'active') return null;
               return (
-                <details key={section.status} open={section.status !== 'done'} className="group">
+                <details key={section.status} open className="group">
                   <summary className="flex cursor-pointer list-none items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted [&::-webkit-details-marker]:hidden">
                     <ChevronDown size={15} className="transition-transform group-open:rotate-0 -rotate-90" />
                     {section.title}
@@ -156,7 +156,13 @@ function PushCard({ board, push, ctx, stock, stockLoading }: { board: Board; pus
         </div>
         {push.note && <p className="mt-1 line-clamp-2 text-sm text-ink-2">{push.note}</p>}
         {push.status === 'done' ? (
-          <p className="mt-3 text-sm text-ink-2">Finished · last updated {ago(push.updatedAt)}</p>
+          <p className="mt-3 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-2">
+            <Trophy size={15} className="text-good" />
+            <span className="font-medium text-good">Completed {day(push.completedAt ?? push.updatedAt)}</span>
+            <span>
+              · {num(push.goals.length)} {plural(push.goals.length, 'goal')}
+            </span>
+          </p>
         ) : view ? (
           <>
             <div className="mt-3 space-y-1.5">
