@@ -17,6 +17,9 @@ const TRAVELERS = HOME + '/travelers';
 
 const STATUS_DOT: Record<PushStatus, string> = { active: 'bg-accent', planned: 'bg-warn', done: 'bg-good' };
 
+/** On every page: bottom of the sidebar on wide screens, bottom of the page on narrow ones. */
+const DISCLAIMER = 'Not affiliated with Clockwork Labs.';
+
 /** Which screen an address points at. Anything unrecognised falls back to the list of pushes. */
 type Route = { page: 'pushes' } | { page: 'push'; slug: string } | { page: 'travelers' };
 function routeOf(path: string): Route {
@@ -95,6 +98,7 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
           </>
         )}
       </nav>
+      <p className="shrink-0 border-t border-line px-5 py-3 text-[11px] leading-snug text-muted">{DISCLAIMER}</p>
     </div>
   );
 }
@@ -151,6 +155,7 @@ function Shell({ route, children }: { route: Route; children: ReactNode }) {
           </div>
         </header>
         <main className="mx-auto max-w-[1180px] px-3 pb-24 pt-5 sm:px-5">{children}</main>
+        <footer className="px-3 pb-5 text-[11px] text-muted sm:px-5 lg:hidden">{DISCLAIMER}</footer>
       </div>
     </div>
   );
