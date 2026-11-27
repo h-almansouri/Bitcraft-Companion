@@ -74,7 +74,7 @@ export function SetupTab({ scope }: { scope: PushScope }) {
     setProblem(null);
     try {
       await guarded(board.slug, () => api.deletePush(board.slug, push.slug));
-      navigate('/' + board.slug);
+      navigate('/' + board.slug + '/pushes');
     } catch (err) {
       setProblem((err as Error).message);
       setBusy(false);

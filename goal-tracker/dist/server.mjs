@@ -3973,6 +3973,7 @@ var API = HOME + "/api";
 /** Pages of the site that sit where a push's address would, so no push may take these names. */
 var RESERVED_SLUGS = [
 	"travelers",
+	"pushes",
 	"api",
 	"assets"
 ];

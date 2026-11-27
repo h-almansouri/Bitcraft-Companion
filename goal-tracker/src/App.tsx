@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { ChevronRight, Compass, Hexagon, LayoutList, Menu } from 'lucide-react';
+import { ChevronRight, Compass, Hexagon, House, LayoutList, Menu } from 'lucide-react';
 import { api } from './lib/api.ts';
 import { putBoard, useCachedBoard } from './lib/boards.ts';
 import { CLAIM, HOME } from './lib/claim.ts';
@@ -7,6 +7,7 @@ import { useLoad } from './lib/hooks.ts';
 import { Link, usePath } from './lib/router.tsx';
 import type { Board, PushStatus } from './lib/shapes.ts';
 import { IconButton, SectionLabel, cx } from './ui/kit.tsx';
+import { AboutPage } from './pages/AboutPage.tsx';
 import { BoardPage } from './pages/BoardPage.tsx';
 import { PushPage } from './pages/PushPage.tsx';
 import { Travelers } from './pages/Travelers.tsx';
@@ -14,18 +15,20 @@ import { UnlockHost } from './ui/unlock.tsx';
 
 export const APP_NAME = 'Goal Tracker';
 const TRAVELERS = HOME + '/travelers';
+const PUSHES = HOME + '/pushes';
 
 const STATUS_DOT: Record<PushStatus, string> = { active: 'bg-accent', planned: 'bg-warn', done: 'bg-good' };
 
 /** On every page: bottom of the sidebar on wide screens, bottom of the page on narrow ones. */
 const DISCLAIMER = 'Not affiliated with Clockwork Labs.';
 
-/** Which screen an address points at. Anything unrecognised falls back to the list of pushes. */
-type Route = { page: 'pushes' } | { page: 'push'; slug: string } | { page: 'travelers' };
+/** Which screen an address points at. Anything unrecognised falls back to the claim's front page. */
+type Route = { page: 'about' } | { page: 'pushes' } | { page: 'push'; slug: string } | { page: 'travelers' };
 function routeOf(path: string): Route {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-  if (parts[0] !== CLAIM.slug || !parts[1]) return { page: 'pushes' };
-  // "travelers" is kept from pushes as a name (RESERVED_SLUGS), so this is never someone's push.
+  if (parts[0] !== CLAIM.slug || !parts[1]) return { page: 'about' };
+  // These names are kept from pushes (RESERVED_SLUGS), so they are never someone's push.
+  if (parts[1] === 'pushes') return { page: 'pushes' };
   if (parts[1] === 'travelers') return { page: 'travelers' };
   return { page: 'push', slug: parts[1] };
 }
@@ -78,7 +81,10 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
 
       <nav className="flex-1 overflow-y-auto pb-6" aria-label="Main">
         <SectionLabel className="px-5 pb-2 pt-5">Claim</SectionLabel>
-        <NavItem to={HOME} active={route.page === 'pushes'} icon={<LayoutList size={15} />} onNavigate={onNavigate}>
+        <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
+          About {CLAIM.name}
+        </NavItem>
+        <NavItem to={PUSHES} active={route.page === 'pushes'} icon={<LayoutList size={15} />} onNavigate={onNavigate}>
           All pushes
         </NavItem>
         <NavItem to={TRAVELERS} active={route.page === 'travelers'} icon={<Compass size={15} />} onNavigate={onNavigate}>
@@ -115,7 +121,7 @@ function Shell({ route, children }: { route: Route; children: ReactNode }) {
     return () => window.removeEventListener('keydown', esc);
   }, [open]);
 
-  const title = route.page === 'travelers' ? 'Traveler restock' : 'Pushes';
+  const title = route.page === 'travelers' ? 'Traveler restock' : route.page === 'about' ? `About ${CLAIM.name}` : 'Pushes';
   useEffect(() => {
     document.title = [push?.name ?? title, CLAIM.name, APP_NAME].join(' · ');
   }, [title, push?.name]);
@@ -143,7 +149,7 @@ function Shell({ route, children }: { route: Route; children: ReactNode }) {
           <div className="flex min-w-0 items-center gap-1.5 text-[15px] font-semibold">
             {route.page === 'push' ? (
               <>
-                <Link to={HOME} className="shrink-0 font-normal text-ink-2 no-underline hover:text-ink">
+                <Link to={PUSHES} className="shrink-0 font-normal text-ink-2 no-underline hover:text-ink">
                   Pushes
                 </Link>
                 <ChevronRight size={15} className="shrink-0 text-muted" />
@@ -170,7 +176,15 @@ export function App() {
   }, [board.data]);
   return (
     <Shell route={route}>
-      {route.page === 'travelers' ? <Travelers /> : route.page === 'push' ? <PushPage slug={CLAIM.slug} pushSlug={route.slug} /> : <BoardPage slug={CLAIM.slug} />}
+      {route.page === 'about' ? (
+        <AboutPage />
+      ) : route.page === 'travelers' ? (
+        <Travelers />
+      ) : route.page === 'push' ? (
+        <PushPage slug={CLAIM.slug} pushSlug={route.slug} />
+      ) : (
+        <BoardPage slug={CLAIM.slug} />
+      )}
       <UnlockHost />
     </Shell>
   );

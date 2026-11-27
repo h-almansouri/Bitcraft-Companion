@@ -18,4 +18,13 @@ export const HOME = '/' + CLAIM.slug;
 /** The site's own API. The Companion's /api/… is its pass-through to Bitjita, a different thing. */
 export const API = HOME + '/api';
 /** Pages of the site that sit where a push's address would, so no push may take these names. */
-export const RESERVED_SLUGS = ['travelers', 'api', 'assets'];
+export const RESERVED_SLUGS = ['travelers', 'pushes', 'api', 'assets'];
+
+/**
+ * Chests whose contents members may take for free, listed live on the front page.
+ * When the Storehouse's barter stand exists, it replaces the Food chest here.
+ */
+export const FREE_FOOD_CHESTS = ['Food'];
+
+/** The market Mythic tool push hand-ins are priced against: the claim's own region. */
+export const MARKET_REGION = { id: 8, name: 'Ossura' } as const;
