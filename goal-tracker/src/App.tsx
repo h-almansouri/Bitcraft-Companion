@@ -72,7 +72,7 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
       <Link to={HOME} onClick={onNavigate} className="flex h-14 shrink-0 items-center gap-2.5 border-b border-line px-5 no-underline">
         <img src={HOME + '/logo.png'} alt="" aria-hidden="true" width={36} height={36} className="h-9 w-9 shrink-0 rounded-full" />
         <span className="min-w-0">
-          <span className="block truncate text-[15px] font-semibold leading-tight text-ink">{CLAIM.name}</span>
+          <span className="block truncate font-display text-[17px] font-semibold leading-tight text-ink">{CLAIM.name}</span>
           <span className="block text-[11px] leading-tight text-muted">{APP_NAME}</span>
         </span>
       </Link>

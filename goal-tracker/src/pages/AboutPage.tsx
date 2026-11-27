@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Trophy, TriangleAlert, Utensils, Warehouse, X } from 'lucide-react';
+import { ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Minus, Sparkles, Trophy, Utensils, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useCachedBoard } from '../lib/boards.ts';
 import { CLAIM, DISCORD_URL, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
@@ -34,7 +34,7 @@ const GROUP = {
 const SECTIONS = [
   { id: 'perks', label: 'Perks' },
   { id: 'us', label: 'Who we are' },
-  { id: 'transparency', label: 'Transparency' },
+  { id: 'roadmap', label: 'Roadmap' },
   { id: 'food', label: 'Food' },
   { id: 'tool-pushes', label: 'Tool pushes' },
 ] as const;
@@ -74,7 +74,6 @@ export function AboutPage() {
   const pushes = board?.pushes ?? null;
   const { ctx } = useGame();
   const stock = useClaimStock(pushes, claim);
-  const region = claim.data?.region || board?.region || MARKET_REGION.name;
 
   // Opening the page at /nowhere#food lands on Food once it has rendered.
   useEffect(() => {
@@ -84,12 +83,12 @@ export function AboutPage() {
 
   return (
     <div className="pb-10">
-      <Hero claim={claim.data} region={region} />
+      <Hero claim={claim.data} />
       <JumpBar />
       <div className="mt-10 space-y-16">
-        <ClaimPerks />
+        <Perks />
         <WhoWeAre claim={claim.data} pushes={pushes ?? []} />
-        <Transparency pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
+        <Roadmap pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
         <FreeFood ctx={ctx} stock={stock} />
         <ToolPushes />
       </div>
@@ -98,7 +97,7 @@ export function AboutPage() {
   );
 }
 
-function Hero({ claim, region }: { claim: ClaimDetail | null; region: string }) {
+function Hero({ claim }: { claim: ClaimDetail | null }) {
   const heads = claim ? playersAndAlts(claim.members) : null;
   const stats: [string, ReactNode][] = [
     ['Claim tier', claim ? <span style={{ color: `color-mix(in oklab, var(--tier-${claim.tier}) 70%, var(--ink))` }}>Tier {claim.tier}</span> : null],
@@ -124,13 +123,8 @@ function Hero({ claim, region }: { claim: ClaimDetail | null; region: string }) 
       <img src={LOGO} alt="" aria-hidden="true" width={176} height={176} className="pointer-events-none absolute right-9 top-9 hidden h-44 w-44 rounded-full md:block" />
 
       <div className="relative px-5 pb-6 pt-8 sm:px-9 sm:pb-8 sm:pt-11">
-        <div className="flex items-center gap-3">
-          <img src={LOGO} alt="" aria-hidden="true" width={44} height={44} className="h-11 w-11 rounded-full md:hidden" />
-          <SectionLabel className="text-accent-ink">
-            BitCraft claim · {GROUP.home}, {region} (R{MARKET_REGION.id})
-          </SectionLabel>
-        </div>
-        <h1 className="mt-2 text-[34px] font-semibold leading-tight tracking-tight sm:text-[44px]">{CLAIM.name}</h1>
+        <img src={LOGO} alt="" aria-hidden="true" width={56} height={56} className="mb-3 h-14 w-14 rounded-full md:hidden" />
+        <h1 className="text-[38px] font-semibold leading-tight sm:text-[50px]">{CLAIM.name}</h1>
         <p className="mt-3 max-w-[54ch] text-[15px] leading-relaxed text-ink-2 sm:text-base">
           A small, active crew building a claim together. Free food and tool upgrades are always around, so you can just play.
         </p>
@@ -248,7 +242,7 @@ function SectionHead({ id, eyebrow, title, children, extra }: { id?: SectionId; 
         <SectionLabel>{eyebrow}</SectionLabel>
         {extra}
       </div>
-      <h2 id={id ? `${id}-title` : undefined} className="mt-1.5 text-xl font-semibold tracking-tight text-ink sm:text-[22px]">
+      <h2 id={id ? `${id}-title` : undefined} className="mt-1.5 text-[24px] font-semibold text-ink sm:text-[28px]">
         {title}
       </h2>
       {children && <div className="mt-2 max-w-[68ch] space-y-2 text-[14px] leading-relaxed text-ink-2">{children}</div>}
@@ -265,20 +259,19 @@ function Section({ id, children, className }: { id: SectionId; children: ReactNo
   );
 }
 
+/** Card and sub-section titles share the headings' serif. */
+const titleFont = 'font-display font-semibold text-ink';
+
 /** Short "if this is you" stories: everyone's playstyle has a place. */
 const PLAYSTYLES: { who: string; story: string }[] = [
   { who: 'Love gathering?', story: "Head out and gather to your heart's content. We've got alts at base processing full-time, so drop off your haul and get back out there." },
   { who: 'Rather stay home?', story: "If you'd rather hang at base and craft, most community crafts are open. Jump in on whatever's going." },
-  { who: 'Chasing a goal?', story: "Let the group know. If you're pushing for something specific, people are usually happy to pitch in." },
+  { who: 'Chasing a goal?', story: "Let the group know. If you're pushing for something specific, like tiering up a specific profession, people are usually happy to help." },
 ];
 
 const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
   { icon: <Utensils size={18} />, title: 'Free food', body: 'Take what you need, no restocking required. As with all shared claim resources, just be respectful and mindful.', jump: 'food' },
-  {
-    icon: <Hammer size={18} />,
-    title: 'Free basic tool upgrades',
-    body: "We're setting up a small chest of upgrade materials so you can upgrade your own tools. Not at the smithing level yet? Ask someone in the claim to do it for you.",
-  },
+  { icon: <Hammer size={18} />, title: 'Free basic tool upgrades', body: "There's a chest of upgrade materials at base, so you can upgrade your own tools whenever you need to." },
   {
     icon: <Gem size={18} />,
     title: 'Optional tool pushes',
@@ -287,7 +280,7 @@ const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[
   },
 ];
 
-function ClaimPerks() {
+function Perks() {
   return (
     <Section id="perks">
       <SectionHead id="perks" eyebrow="Perks" title="Play however you like" />
@@ -306,7 +299,7 @@ function ClaimPerks() {
           const card = (
             <Card className={cx('h-full px-5 py-4', o.jump && 'transition-colors group-hover:border-accent')}>
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">{o.icon}</span>
-              <h3 className="mt-3 text-[15px] font-semibold text-ink">{o.title}</h3>
+              <h3 className={cx('mt-3 text-[17px]', titleFont)}>{o.title}</h3>
               <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{o.body}</p>
             </Card>
           );
@@ -331,8 +324,8 @@ const MILESTONES: Milestone[] = [
   { title: 'A road from the ocean to the swamp', done: true },
   { title: 'A tool push', note: 'Rolling tools for everyone right now', now: true },
   { title: `Tier ${GROUP.mythicTier}`, note: 'Unlocks Mythic tool pushes', reachedAt: GROUP.mythicTier },
-  { title: 'The Storehouse and trader stands', note: 'Free food and mats in one spot, plus stands that make traveler tasks quick' },
-  { title: `Tier ${GROUP.hubTier}`, note: 'A pitstop for our trading hub: region bank and market, right on the ocean', reachedAt: GROUP.hubTier },
+  { title: 'Trader stands', note: 'So anyone can knock out traveler tasks quickly' },
+  { title: `Tier ${GROUP.hubTier}`, note: 'A pitstop for our trading hub: a regional bank and market, right alongside the ocean', reachedAt: GROUP.hubTier },
   { title: `Tier ${GROUP.goalTier}`, note: 'The end goal', reachedAt: GROUP.goalTier, goal: true },
 ];
 const STAGE_PILL: Partial<Record<Stage, [string, 'accent' | 'info' | 'neutral']>> = { now: ['Now', 'accent'], next: ['Next', 'info'], goal: ['Long-term goal', 'neutral'] };
@@ -359,8 +352,8 @@ function WhoWeAre({ claim, pushes }: { claim: ClaimDetail | null; pushes: Push[]
             crew once we hit tier {GROUP.mythicTier}.
           </p>
           <p>
-            The end goal is a tier {GROUP.goalTier} claim. Along the way we'll stop at tier {GROUP.hubTier} to set up a trading hub, with a region bank and market right by the
-            ocean for players from other regions.
+            The end goal is a tier {GROUP.goalTier} claim. Along the way, we'll stop at tier {GROUP.hubTier} to build a trading hub with a regional bank and market, right alongside
+            the ocean and open to traders from across the map.
           </p>
         </SectionHead>
         <p className="mt-5 max-w-[68ch] rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
@@ -418,22 +411,16 @@ function usePushView(push: Push, members: Members, ctx: GameCtx | null, stock: S
   );
 }
 
-function Transparency({ pushes, members, ctx, stock, loading }: { pushes: Push[]; members: Members; ctx: GameCtx | null; stock: StockSnapshot | null; loading: boolean }) {
+function Roadmap({ pushes, members, ctx, stock, loading }: { pushes: Push[]; members: Members; ctx: GameCtx | null; stock: StockSnapshot | null; loading: boolean }) {
   const open = pushes.filter((p) => p.status === 'active' || p.status === 'planned');
   const done = pushes.filter((p) => p.status === 'done');
   return (
-    <Section id="transparency">
-      <SectionHead id="transparency" eyebrow="Transparency" title="What we're working on">
+    <Section id="roadmap">
+      <SectionHead id="roadmap" eyebrow="Roadmap" title="What we're working on">
         <p>
           We're big on transparency. Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
-          chipping in for. If something catches your eye, put your name on it in the "Who's on it" dropdown, or drop materials in the Dropbox. No pressure, and nobody's checking.
-        </p>
-        <p>
-          We care about feedback too. It's why we built this site, the push trackers and Bitcraft Companion. Got an idea, or something bugging you?{' '}
-          <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className="font-medium text-accent-ink underline-offset-2 hover:underline">
-            Tell us on Discord
-          </a>
-          .
+          chipping in for. Want to help with a claim push? Just drop the materials in the Dropbox. No pressure to contribute, as contributions outside of tool pushes are not
+          tracked.
         </p>
       </SectionHead>
 
@@ -516,7 +503,44 @@ function LivePush({ push, members, ctx, stock, loading }: { push: Push; members:
   );
 }
 
+/** What each food does beyond health and stamina, from public/food-buffs.json (`npm run food-buffs`). */
+type FoodBuffs = Record<string, { name: string; minutes: number; stats: [string, number, number][] }[]>;
+
+/** Plain names for the game's stat ids. Anything not listed is spelled out from its id. */
+const STAT_LABEL: Record<string, string> = {
+  ExperienceRate: 'EXP',
+  BuildingSpeed: 'construction speed',
+  CooldownMultiplier: 'ability cooldowns',
+  MovementMultiplier: 'movement speed',
+  ActiveStaminaRegenRate: 'active stamina regen',
+  ActiveHealthRegenRate: 'active health regen',
+};
+const statLabel = (id: string) => STAT_LABEL[id] ?? id.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+
+/** "+5% EXP, −10% gathering and crafting speed": gains first, gathering and crafting merged when they match. */
+function describeBuff(stats: [string, number, number][]): string {
+  const parts: { label: string; value: number; pct: boolean }[] = [];
+  const craft = stats.find(([s]) => s === 'CraftingSpeed');
+  const gather = stats.find(([s]) => s === 'GatheringSpeed');
+  const merged = craft && gather && craft[1] === gather[1] && craft[2] === gather[2];
+  for (const [id, value, isPct] of stats) {
+    if (merged && id === 'CraftingSpeed') continue;
+    parts.push({ label: merged && id === 'GatheringSpeed' ? 'gathering and crafting speed' : statLabel(id), value, pct: !!isPct });
+  }
+  const amount = (p: (typeof parts)[number]) => {
+    const n = p.pct ? Math.round(Math.abs(p.value) * 1000) / 10 : Math.abs(p.value);
+    return `${p.value < 0 ? '−' : '+'}${n}${p.pct ? '%' : ''}`;
+  };
+  return parts
+    .sort((a, b) => Number(b.value > 0) - Number(a.value > 0))
+    .map((p) => `${amount(p)} ${p.label}`)
+    .join(', ');
+}
+const duration = (minutes: number) => (minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} hr` : `${minutes} min`);
+
 function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnapshot> & { refresh: () => void } }) {
+  const buffs = useLoad<FoodBuffs>('food-buffs', () => fetch(HOME + '/food-buffs.json').then((r) => (r.ok ? r.json() : {})));
+
   const tiers = useMemo(() => {
     if (!stock.data || !ctx) return null;
     const totals = new Map<string, number>();
@@ -535,6 +559,14 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
       .sort(([a], [b]) => b - a)
       .map(([tier, items]) => ({ tier, items: items.sort((a, b) => b.qty - a.qty), total: items.reduce((sum, i) => sum + i.qty, 0) }));
   }, [stock.data, ctx]);
+
+  // The foods in the chest that do something extra, best tier first.
+  const buffed = useMemo(() => {
+    if (!tiers || !buffs.data) return null;
+    return tiers.flatMap(({ tier, items }) =>
+      items.flatMap((item) => (buffs.data![item.id] ?? []).map((b, i) => ({ key: `${item.id}:${i}`, tier, name: item.name, effect: describeBuff(b.stats), minutes: b.minutes }))),
+    );
+  }, [tiers, buffs.data]);
 
   const servings = tiers?.reduce((sum, t) => sum + t.total, 0) ?? 0;
   const found = stock.data?.locations.some((l) => l.kind === 'claim' && FREE_FOOD_CHESTS.includes(l.name));
@@ -583,7 +615,10 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
                 <ul className="mt-2.5 space-y-1">
                   {items.map((item) => (
                     <li key={item.id} className="flex items-baseline gap-2 text-[13px]">
-                      <span className="min-w-0 flex-1 text-ink">{item.name}</span>
+                      <span className="min-w-0 flex-1 text-ink">
+                        {item.name}
+                        {buffs.data?.[item.id] && <Sparkles size={11} className="ml-1 inline align-[-1px] text-accent-ink" aria-label="has a buff" />}
+                      </span>
                       <span className="num shrink-0 text-ink-2">{num(item.qty)}</span>
                     </li>
                   ))}
@@ -594,20 +629,27 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
         )}
       </Card>
 
-      <div className="mt-3 flex gap-3.5 rounded-lg border border-dashed border-line-2 px-4.5 py-4">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-ink-2">
-          <Warehouse size={16} />
-        </span>
-        <div className="text-[13px] leading-relaxed text-ink-2">
-          <p className="flex flex-wrap items-center gap-2 font-semibold text-ink">
-            The Storehouse <Pill tone="warn">Coming soon</Pill>
-          </p>
-          <p className="mt-1">
-            We're building a Storehouse: a barter stand with free food and materials, plus a drop box for anything you want to give back. Most chests around the claim aren't
-            open to everyone, so this'll be the spot to grab and drop. Trader stands are on the list too, to make traveler tasks quick.
-          </p>
-        </div>
-      </div>
+      {buffed && buffed.length > 0 && (
+        <Card className="mt-3 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <Sparkles size={15} className="text-accent-ink" />
+            <h3 className={cx('text-[17px]', titleFont)}>Food buffs</h3>
+          </div>
+          <ul className="mt-3 divide-y divide-line">
+            {buffed.map((b) => (
+              <li key={b.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 py-2 text-[13px] first:pt-0 last:pb-0">
+                <span className="flex min-w-0 items-center gap-2 font-medium text-ink sm:w-[260px]">
+                  {b.tier ? <TierChip tier={b.tier} /> : null}
+                  <span className="truncate">{b.name}</span>
+                </span>
+                <span className="min-w-0 flex-1 text-ink-2">{b.effect}</span>
+                <span className="num shrink-0 text-xs text-muted">{duration(b.minutes)}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 border-t border-line pt-2.5 text-xs text-muted">Every food also restores health and stamina over time.</p>
+        </Card>
+      )}
     </Section>
   );
 }
@@ -619,21 +661,23 @@ const TOOL_CARDS = [
 ] as const;
 
 const STEPS: { title: string; body: string }[] = [
-  { title: 'We call a push', body: "The goal and the materials list go up here, so you can see what's needed and how far along it is." },
-  {
-    title: 'You hand stuff in',
-    body: `Drop materials in the push's drop box. Each hand-in gets logged at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price, and that price sticks.`,
-  },
-  { title: 'Your share adds up', body: "Everyone's gold value gets totalled. Put in 15% of it, own 15% of what comes out." },
-  { title: 'We roll', body: 'Materials become tools, and every tool rolled goes in the pot: Mythic, Legendary, Epic and everything below.' },
+  { title: 'The claim calls a push', body: "When the claim decides it wants a push, the goal and the materials list go up here, so you can see what's needed and how far along it is." },
+  { title: 'You hand stuff in', body: `Drop materials in the push's drop box. Each hand-in gets logged at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price.` },
+  { title: 'Contributions are tallied', body: "Everyone's gold value gets totalled. Put in 15% of it, own 15% of what comes out." },
+  { title: 'We roll', body: 'Materials become tools, and every tool rolled goes in the pot: Mythic, Legendary and Epic.' },
   { title: 'We split it', body: 'You take your share as tools, gold at market value, or a mix.' },
 ];
 
-/** The worked example. Everyone hands in the same; only the luck of the rolls changes. */
-const EXAMPLE = { yours: 60_000, total: 400_000 };
-const OUTCOMES = [
-  { title: 'A lucky push', haul: 520_000, tone: 'good' as const },
-  { title: 'An unlucky push', haul: 340_000, tone: 'bad' as const },
+type Point = [kind: 'pro' | 'con' | 'neutral', text: string];
+const MARKET_VALUE: Point[] = [
+  ['neutral', 'You get exactly what your materials were worth'],
+  ['pro', "You never come out behind, so bad rolls can't hurt you"],
+  ['con', 'Lucky rolls go to the claim, not you'],
+];
+const PERCENTAGE: Point[] = [
+  ['neutral', 'You get a percentage of everything rolled'],
+  ['pro', 'A lucky push pays off for everyone who chipped in'],
+  ['con', 'An unlucky push is shared too, so you can get back less'],
 ];
 
 const FAQ: { q: string; a: string }[] = [
@@ -648,11 +692,15 @@ const FAQ: { q: string; a: string }[] = [
 
 /** How a tool push works, at the bottom of the page for anyone weighing whether to join one. */
 function ToolPushes() {
-  const share = EXAMPLE.yours / EXAMPLE.total;
   return (
     <Section id="tool-pushes" className="space-y-10">
       <div>
-        <SectionHead id="tool-pushes" eyebrow="Tool pushes" title="Pool materials, split the haul" extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}>
+        <SectionHead
+          id="tool-pushes"
+          eyebrow="Tool pushes"
+          title="Percentage-based contribution tracking"
+          extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}
+        >
           <p>
             For anyone who wants to min-max, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. They're completely optional, and they're the only place
             we track who put in what, so everyone gets a fair cut. Wins and losses get shared.
@@ -662,7 +710,7 @@ function ToolPushes() {
           {TOOL_CARDS.map(([title, body, tone]) => (
             <Card key={title} className="px-5 py-4">
               <span className={cx('block h-1 w-8 rounded-full', tone === 'accent' ? 'bg-accent' : tone === 'good' ? 'bg-good' : 'bg-warn')} />
-              <h3 className="mt-3 text-[14px] font-semibold text-ink">{title}</h3>
+              <h3 className={cx('mt-3 text-[17px]', titleFont)}>{title}</h3>
               <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{body}</p>
             </Card>
           ))}
@@ -670,13 +718,13 @@ function ToolPushes() {
       </div>
 
       <div>
-        <SubHead title="Step by step" />
+        <SubHead title="How it works" />
         <ol className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           {STEPS.map((step, i) => (
             <li key={step.title}>
               <Card className="h-full px-4 py-4">
                 <span className="num flex h-7 w-7 items-center justify-center rounded-full border border-accent text-[13px] font-semibold text-accent-ink">{i + 1}</span>
-                <h4 className="mt-3 text-[14px] font-semibold text-ink">{step.title}</h4>
+                <h4 className={cx('mt-3 text-[16px]', titleFont)}>{step.title}</h4>
                 <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{step.body}</p>
               </Card>
             </li>
@@ -686,46 +734,23 @@ function ToolPushes() {
       </div>
 
       <div>
-        <SubHead title="Why a share and not a buy-back?">
-          We could just pay you market price for your materials. But in EA2, the tools we rolled (Mythic, Legendary, Epic and down) were usually worth more than the raw materials
-          that went in, so a share lets everyone in on that. It also keeps pushes feeling like a group thing.
+        <SubHead title="Why percentage-based contributions?">
+          We could just pay you market price for your materials. But in EA2, the tools we rolled (Mythic, Legendary and Epic) were usually worth more than the raw materials that
+          went in, so a percentage lets everyone in on that. It also keeps pushes feeling like a group effort.
         </SubHead>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Compare title="A buy-back" tag="Not how we do it" good={false} lines={['You get exactly what your materials were worth', 'Lucky rolls go to the claim, not you', 'No way to come out ahead']} />
-          <Compare
-            title="A share of the haul"
-            tag="How we do it"
-            good
-            lines={['You get your cut of everything rolled', 'A lucky push pays off for everyone who chipped in', 'An unlucky one is shared too, so you can get back less']}
-          />
+          <Compare title="Market value contributions" tag="Not how we do it" chosen={false} points={MARKET_VALUE} />
+          <Compare title="Percentage-based contributions" tag="How we do it" chosen points={PERCENTAGE} />
         </div>
+        <p className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+          <PointMark kind="pro" /> Pro
+          <PointMark kind="con" /> Con
+          <PointMark kind="neutral" /> Neutral
+        </p>
       </div>
 
       <div>
-        <SubHead title="Same hand-in, two different pushes">
-          Say you hand in {num(EXAMPLE.yours)} gold worth of materials out of {num(EXAMPLE.total)} total. That's a {Math.round(share * 100)}% share, and what it's worth depends on the
-          rolls.
-        </SubHead>
-        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-          {OUTCOMES.map((o) => (
-            <Outcome key={o.title} title={o.title} haul={o.haul} tone={o.tone} share={share} />
-          ))}
-        </div>
-      </div>
-
-      <div className="flex gap-3.5 rounded-card border border-warn/40 bg-warn-soft px-5 py-4">
-        <TriangleAlert size={20} className="mt-0.5 shrink-0 text-warn" />
-        <div className="text-[14px] leading-relaxed text-ink-2">
-          <p className="font-semibold text-warn">Heads up: you can get back less than you put in.</p>
-          <p className="mt-1">
-            Rolls are random, and a push can roll tools worth less than the materials that went in. Our EA2 pushes usually came out ahead, but that's a track record, not a
-            promise. Only put in what you're cool sharing the risk on.
-          </p>
-        </div>
-      </div>
-
-      <div>
-        <SubHead title="Good to know" />
+        <SubHead title="FAQ" />
         <dl className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           {FAQ.map((item) => (
             <Card key={item.q} className="px-5 py-4">
@@ -743,78 +768,49 @@ function ToolPushes() {
 function SubHead({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div>
-      <h3 className="text-[16px] font-semibold text-ink">{title}</h3>
+      <h3 className={cx('text-[20px]', titleFont)}>{title}</h3>
       {children && <p className="mt-1.5 max-w-[68ch] text-[14px] leading-relaxed text-ink-2">{children}</p>}
     </div>
   );
 }
 
-function Compare({ title, tag, good, lines }: { title: string; tag: string; good: boolean; lines: string[] }) {
+const POINT_LABEL = { pro: 'Pro', con: 'Con', neutral: 'Neutral' } as const;
+
+/** The little round marker before a pro, a con or a neutral point. */
+function PointMark({ kind }: { kind: Point[0] }) {
   return (
-    <Card className={cx('px-5 py-4', good && 'border-accent/60')}>
-      <div className="flex items-center gap-2">
-        <h4 className="text-[15px] font-semibold text-ink">{title}</h4>
-        <Pill tone={good ? 'accent' : 'neutral'}>{tag}</Pill>
-      </div>
-      <ul className="mt-3 space-y-2">
-        {lines.map((line) => (
-          <li key={line} className="flex items-start gap-2.5 text-[13px] text-ink-2">
-            <span className={cx('mt-0.5 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full', good ? 'bg-accent-soft text-accent-ink' : 'bg-surface-3 text-muted')}>
-              {good ? <Check size={11} strokeWidth={3} /> : <X size={11} strokeWidth={3} />}
-            </span>
-            {line}
-          </li>
-        ))}
-      </ul>
-    </Card>
+    <span
+      aria-hidden="true"
+      className={cx(
+        'inline-flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full',
+        kind === 'pro' ? 'bg-good-soft text-good' : kind === 'con' ? 'bg-bad-soft text-bad' : 'bg-surface-3 text-muted',
+      )}
+    >
+      {kind === 'pro' ? <Check size={11} strokeWidth={3} /> : kind === 'con' ? <X size={11} strokeWidth={3} /> : <Minus size={11} strokeWidth={3} />}
+    </span>
   );
 }
 
-function Outcome({ title, haul, tone, share }: { title: string; haul: number; tone: 'good' | 'bad'; share: number }) {
-  const cut = Math.round(haul * share);
-  const diff = cut - EXAMPLE.yours;
-  const widest = Math.max(haul, EXAMPLE.total);
-  const bars: [string, number, string][] = [
-    ['Materials in', EXAMPLE.total, 'var(--line-2)'],
-    ['Tools rolled', haul, tone === 'good' ? 'var(--good)' : 'var(--bad)'],
-  ];
+function Compare({ title, tag, chosen, points }: { title: string; tag: string; chosen: boolean; points: Point[] }) {
   return (
-    <Card className="px-5 py-4">
-      <div className="flex items-center justify-between gap-2">
-        <h4 className="text-[15px] font-semibold text-ink">{title}</h4>
-        <span className={cx('num text-[13px] font-semibold', tone === 'good' ? 'text-good' : 'text-bad')}>
-          {haul > EXAMPLE.total ? '+' : '−'}
-          {Math.round((Math.abs(haul - EXAMPLE.total) / EXAMPLE.total) * 100)}% vs. materials
-        </span>
+    <Card className={cx('px-5 py-4', chosen && 'border-accent/60')}>
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className={cx('text-[17px]', titleFont)}>{title}</h4>
+        <Pill tone={chosen ? 'accent' : 'neutral'}>{tag}</Pill>
       </div>
-      <div className="mt-4 space-y-2">
-        {bars.map(([label, value, color]) => (
-          <div key={label} className="flex items-center gap-3">
-            <span className="w-[84px] shrink-0 text-xs text-ink-2">{label}</span>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-3">
-              <div className="h-full rounded-full" style={{ width: `${(value / widest) * 100}%`, background: color }} />
-            </div>
-            <span className="num w-[64px] shrink-0 text-right text-[13px] text-ink">{num(value)}</span>
-          </div>
+      <ul className="mt-3 space-y-2">
+        {points.map(([kind, text]) => (
+          <li key={text} className="flex items-start gap-2.5 text-[13px] text-ink-2">
+            <span className="mt-0.5">
+              <PointMark kind={kind} />
+            </span>
+            <span>
+              <span className="sr-only">{POINT_LABEL[kind]}: </span>
+              {text}
+            </span>
+          </li>
         ))}
-      </div>
-      <dl className="mt-4 grid grid-cols-3 gap-3 border-t border-line pt-3">
-        <div>
-          <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">You put in</dt>
-          <dd className="num mt-0.5 text-[15px] font-semibold text-ink">{num(EXAMPLE.yours)}</dd>
-        </div>
-        <div>
-          <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">You get</dt>
-          <dd className="num mt-0.5 text-[15px] font-semibold text-ink">{num(cut)}</dd>
-        </div>
-        <div>
-          <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Difference</dt>
-          <dd className={cx('num mt-0.5 text-[15px] font-semibold', diff >= 0 ? 'text-good' : 'text-bad')}>
-            {diff >= 0 ? '+' : '−'}
-            {num(Math.abs(diff))}
-          </dd>
-        </div>
-      </dl>
+      </ul>
     </Card>
   );
 }

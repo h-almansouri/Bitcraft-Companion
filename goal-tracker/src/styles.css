@@ -84,7 +84,8 @@
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Headings: a serif to go with the logo's lettering. Body text and numbers stay in the system sans. */
+  --font-display: 'Playfair Display Variable', 'Playfair Display', Georgia, 'Times New Roman', serif;
   --radius-card: 10px;
 }
 
@@ -109,6 +110,11 @@
 
   button {
     cursor: pointer;
+  }
+
+  h1,
+  h2 {
+    font-family: var(--font-display);
   }
 
   :focus-visible {
