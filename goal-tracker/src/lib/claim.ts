@@ -40,3 +40,6 @@ export const isAlt = (name: string) => Object.prototype.hasOwnProperty.call(ALTS
 export function playersAndAlts<T extends { name: string }>(members: readonly T[]) {
   return { players: members.filter((m) => !isAlt(m.name)), alts: members.filter((m) => isAlt(m.name)) };
 }
+
+/** Where to find Nowhere on Discord. Shown in the About page header and the sidebar. */
+export const DISCORD_URL = 'https://discord.gg/BFtdkDPmSy';

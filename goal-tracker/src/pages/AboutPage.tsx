@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowRight, ArrowUp, Check, Gem, Hammer, Trophy, TriangleAlert, Utensils, Warehouse, X } from 'lucide-react';
+import { ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Trophy, TriangleAlert, Utensils, Warehouse, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useCachedBoard } from '../lib/boards.ts';
-import { CLAIM, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
+import { CLAIM, DISCORD_URL, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
 import { buildView, countedPlayers } from '../lib/derive.ts';
 import { TIER_NAMES, day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
@@ -32,7 +32,7 @@ const GROUP = {
 
 /** The page's sections, in order. The bar under the header jumps between them. */
 const SECTIONS = [
-  { id: 'perks', label: 'Claim perks' },
+  { id: 'perks', label: 'Perks' },
   { id: 'us', label: 'Who we are' },
   { id: 'transparency', label: 'Transparency' },
   { id: 'food', label: 'Food' },
@@ -132,10 +132,19 @@ function Hero({ claim, region }: { claim: ClaimDetail | null; region: string }) 
         </div>
         <h1 className="mt-2 text-[34px] font-semibold leading-tight tracking-tight sm:text-[44px]">{CLAIM.name}</h1>
         <p className="mt-3 max-w-[54ch] text-[15px] leading-relaxed text-ink-2 sm:text-base">
-          A small group of active players building a claim together. We keep free food and basic tool upgrades around so everyone can play however they like.
+          A small, active crew building a claim together. Free food and tool upgrades are always around, so you can just play.
         </p>
         <div className="mt-6 flex flex-wrap gap-2.5">
-          <Link to={PUSHES} className="inline-flex h-10 items-center gap-1.5 rounded-md border border-accent bg-accent-dim px-4 text-[13px] font-medium text-accent-ink no-underline transition-colors hover:bg-accent hover:text-bg">
+          <a
+            href={DISCORD_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-10 items-center gap-2 rounded-md border border-accent bg-accent-dim px-4 text-[13px] font-medium text-accent-ink no-underline transition-colors hover:bg-accent hover:text-bg"
+          >
+            <MessageCircle size={15} />
+            Join Nowhere on Discord
+          </a>
+          <Link to={PUSHES} className="inline-flex h-10 items-center gap-1.5 rounded-md border border-line-2 bg-surface-2 px-4 text-[13px] font-medium text-ink no-underline transition-colors hover:bg-surface-3">
             See what we're working on
             <ArrowRight size={15} />
           </Link>
@@ -264,7 +273,7 @@ const PLAYSTYLES: { who: string; story: string }[] = [
 ];
 
 const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
-  { icon: <Utensils size={18} />, title: 'Free food', body: "Take what you need. You don't have to restock it, just keep in mind everyone shares it.", jump: 'food' },
+  { icon: <Utensils size={18} />, title: 'Free food', body: 'Take what you need, no restocking required. As with all shared claim resources, just be respectful and mindful.', jump: 'food' },
   {
     icon: <Hammer size={18} />,
     title: 'Free basic tool upgrades',
@@ -281,7 +290,7 @@ const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[
 function ClaimPerks() {
   return (
     <Section id="perks">
-      <SectionHead id="perks" eyebrow="Claim perks" title="No set roles. Play however you like." />
+      <SectionHead id="perks" eyebrow="Perks" title="Play however you like" />
 
       <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-4 border-y border-line py-4 md:grid-cols-3">
         {PLAYSTYLES.map((p) => (
@@ -340,7 +349,7 @@ function WhoWeAre({ claim, pushes }: { claim: ClaimDetail | null; pushes: Push[]
   return (
     <Section id="us" className="grid grid-cols-1 items-start gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_400px]">
       <div>
-        <SectionHead id="us" eyebrow="Who we are" title="Small crew, big plans.">
+        <SectionHead id="us" eyebrow="Who we are" title="Small crew, big plans">
           <p>
             Five of us started Nowhere. A few of us played EA2 for a few months, and the rest are brand new to BitCraft. We hit tier 5 in our first two weeks, settled in the{' '}
             {GROUP.home} in {MARKET_REGION.name} (R{MARKET_REGION.id}), and built a road from the ocean to the swamp.
@@ -414,12 +423,18 @@ function Transparency({ pushes, members, ctx, stock, loading }: { pushes: Push[]
   const done = pushes.filter((p) => p.status === 'done');
   return (
     <Section id="transparency">
-      <SectionHead id="transparency" eyebrow="Transparency" title="All our goals are out in the open.">
+      <SectionHead id="transparency" eyebrow="Transparency" title="What we're working on">
         <p>
           We're big on transparency. Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
           chipping in for. If something catches your eye, put your name on it in the "Who's on it" dropdown, or drop materials in the Dropbox. No pressure, and nobody's checking.
         </p>
-        <p>We care about feedback too. It's why we built this site, the push trackers and Bitcraft Companion. Got an idea, or something bugging you? Tell us.</p>
+        <p>
+          We care about feedback too. It's why we built this site, the push trackers and Bitcraft Companion. Got an idea, or something bugging you?{' '}
+          <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className="font-medium text-accent-ink underline-offset-2 hover:underline">
+            Tell us on Discord
+          </a>
+          .
+        </p>
       </SectionHead>
 
       {pushes.length > 0 && (
@@ -526,7 +541,7 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
 
   return (
     <Section id="food">
-      <SectionHead id="food" eyebrow="Food" title="What's in the food chest.">
+      <SectionHead id="food" eyebrow="Food" title="Food chest">
         <p>Everything in the {FREE_FOOD_CHESTS.join(' and ')} chest is free for claim members. No need to restock it, just remember it's shared. Here's what's in there right now.</p>
       </SectionHead>
 
@@ -637,7 +652,7 @@ function ToolPushes() {
   return (
     <Section id="tool-pushes" className="space-y-10">
       <div>
-        <SectionHead id="tool-pushes" eyebrow="Tool pushes" title="Pool materials, split the haul." extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}>
+        <SectionHead id="tool-pushes" eyebrow="Tool pushes" title="Pool materials, split the haul" extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}>
           <p>
             For anyone who wants to min-max, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. They're completely optional, and they're the only place
             we track who put in what, so everyone gets a fair cut. Wins and losses get shared.

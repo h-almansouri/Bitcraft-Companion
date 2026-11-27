@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { ArrowLeft, ChevronRight, Compass, House, LayoutList, Menu } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Compass, House, LayoutList, Menu, MessageCircle } from 'lucide-react';
 import { api } from './lib/api.ts';
 import { putBoard, useCachedBoard } from './lib/boards.ts';
-import { CLAIM, HOME } from './lib/claim.ts';
+import { CLAIM, DISCORD_URL, HOME } from './lib/claim.ts';
 import { useLoad } from './lib/hooks.ts';
 import { Link, usePath } from './lib/router.tsx';
 import type { Board, PushStatus } from './lib/shapes.ts';
@@ -87,6 +87,17 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
             <ArrowLeft size={15} />
           </span>
           <span className="min-w-0 flex-1 truncate">Bitcraft Companion</span>
+        </a>
+        <a
+          href={DISCORD_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex h-9 items-center gap-2.5 border-l-2 border-transparent pl-[18px] pr-3 text-[13px] text-ink-2 no-underline transition-colors hover:bg-surface-2 hover:text-ink"
+        >
+          <span className="flex w-4 shrink-0 justify-center">
+            <MessageCircle size={15} />
+          </span>
+          <span className="min-w-0 flex-1 truncate">Join us on Discord</span>
         </a>
         <SectionLabel className="px-5 pb-2 pt-4">Claim</SectionLabel>
         <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
