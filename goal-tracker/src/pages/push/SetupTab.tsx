@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api.ts';
+import { pickRoute } from '../../lib/derive.ts';
 import { navigate } from '../../lib/router.tsx';
 import type { Push, PushKind, PushStatus } from '../../lib/shapes.ts';
 import { claimTierGoals, stationGoals, townshipTiers } from '../../lib/templates.ts';
@@ -161,9 +162,7 @@ export function SetupTab({ scope }: { scope: PushScope }) {
                     size="sm"
                     variant="ghost"
                     onClick={() => {
-                      const routes = { ...push.routes };
-                      delete routes[id];
-                      save({ routes }).catch(() => {});
+                      save({ routes: pickRoute(ctx, push.routes, id, undefined) }).catch(() => {});
                     }}
                   >
                     Use default

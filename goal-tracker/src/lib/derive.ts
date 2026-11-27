@@ -730,6 +730,33 @@ export function rawMaterials(products: Product[]): RawMaterial[] {
 }
 
 /**
+ * Hand-picks how `id` is made (a recipe id, null for "don't craft it", undefined for the
+ * default) and keeps that recipe's other outputs on the same choice. Butchering a Plains Ox
+ * or a Dromai each gives pelt, meat and hair: picking Ox for the pelt alone would leave the
+ * hair on Dromai and plan two hunts where one does both. An output only follows along when
+ * it was coming from a twin recipe (one that also makes `id`); a pick made for its own
+ * reasons is left alone.
+ */
+export function pickRoute(ctx: GameCtx, routes: Record<Ref, string | null>, id: Ref, value: string | null | undefined): Record<Ref, string | null> {
+  const next = { ...routes };
+  if (value === undefined) delete next[id];
+  else next[id] = value;
+  if (value === null) return next;
+  const chosen = value ? ctx.book.recipe(value) : ctx.router.choose(id);
+  if (!chosen) return next;
+  for (const { id: other } of chosen.outputs) {
+    if (other === id) continue;
+    const current = other in next ? next[other] : ctx.router.choose(other)?.id;
+    if (!current || current === chosen.id) continue;
+    const twin = ctx.book.recipe(current);
+    if (!twin || yieldOf(twin, id) <= 0) continue;
+    if (ctx.router.choose(other)?.id === chosen.id) delete next[other];
+    else next[other] = chosen.id;
+  }
+  return next;
+}
+
+/**
  * Other gathered things that would do the same job as `id`: the T5 pelt comes from
  * butchering a Plains Ox or a Dromai, three pelts either way, so whichever the plan
  * picked, the other is a stand-in. Only recipes that take that one thing and are about

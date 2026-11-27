@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin, Workflow } from 'lucide-react';
 import { yieldOf } from '../../engine/book.ts';
 import type { Recipe, Ref } from '../../engine/types.ts';
-import { flowOf, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
+import { flowOf, pickRoute, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
 import { navigate } from '../../lib/router.tsx';
 import { Button, Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
@@ -346,9 +346,7 @@ function RouteChooser({ scope, row, onDone }: { scope: PushScope; row: Row; onDo
 
   const pick = async (value: string | null | undefined) => {
     setBusy(true);
-    const routes = { ...push.routes };
-    if (value === undefined) delete routes[id];
-    else routes[id] = value;
+    const routes = pickRoute(ctx, push.routes, id, value);
     try {
       await save({ routes });
       onDone();
