@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Minus, Sparkles, Trophy, Utensils, X } from 'lucide-react';
+import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react';
+import { ArrowDown, ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Minus, Sparkles, Trophy, Utensils, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useCachedBoard } from '../lib/boards.ts';
 import { CLAIM, DISCORD_URL, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
@@ -32,7 +32,7 @@ const GROUP = {
 
 /** The page's sections, in order. The bar under the header jumps between them. */
 const SECTIONS = [
-  { id: 'perks', label: 'Perks' },
+  { id: 'overview', label: 'Overview' },
   { id: 'us', label: 'Who we are' },
   { id: 'roadmap', label: 'Roadmap' },
   { id: 'food', label: 'Food' },
@@ -54,11 +54,34 @@ function useClaimStock(pushes: Push[] | null, claim: Loaded<ClaimDetail>) {
   return useStock(pushes && !membersPending ? `stock:${players.join(',')}` : null, players);
 }
 
-/** Smooth-scrolls to a section without stacking up history entries. */
+/**
+ * Where you were before the last jump, so the floating button can take you back.
+ * A tiny store rather than state, because jumps start from several places on the page.
+ */
+let returnTo: number | null = null;
+const returnWatchers = new Set<() => void>();
+function setReturnTo(y: number | null) {
+  returnTo = y;
+  returnWatchers.forEach((notify) => notify());
+}
+function useReturnTo() {
+  return useSyncExternalStore(
+    (notify) => {
+      returnWatchers.add(notify);
+      return () => {
+        returnWatchers.delete(notify);
+      };
+    },
+    () => returnTo,
+  );
+}
+
+/** Smooth-scrolls to a section without stacking up history entries, remembering where you jumped from. */
 function jumpTo(id: string, event?: MouseEvent) {
   const target = document.getElementById(id);
   if (!target) return;
   event?.preventDefault();
+  setReturnTo(window.scrollY);
   target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   window.history.replaceState(null, '', '#' + id);
 }
@@ -86,7 +109,7 @@ export function AboutPage() {
       <Hero claim={claim.data} />
       <JumpBar />
       <div className="mt-10 space-y-16">
-        <Perks />
+        <Overview />
         <WhoWeAre claim={claim.data} pushes={pushes ?? []} />
         <Roadmap pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
         <FreeFood ctx={ctx} stock={stock} />
@@ -206,30 +229,48 @@ function JumpBar() {
   );
 }
 
-/** A round button that floats in the corner once you've scrolled a way down. */
+/**
+ * A round button floating in the corner. After a jump (the bar, a card, a header button) it takes
+ * you back to where you were. Otherwise, once you've scrolled a way down, it goes to the top, and
+ * then offers the way back to where you were reading.
+ */
 function BackToTop() {
-  const [shown, setShown] = useState(false);
+  const [y, setY] = useState(0);
+  const back = useReturnTo();
   useEffect(() => {
-    const check = () => setShown(window.scrollY > 600);
+    const check = () => setY(window.scrollY);
     check();
     window.addEventListener('scroll', check, { passive: true });
     return () => window.removeEventListener('scroll', check);
   }, []);
+  // A saved spot right where you already are is no use, so the button falls back to "top".
+  const returning = back !== null && Math.abs(back - y) > 200;
+  const shown = returning || y > 600;
+  const label = returning ? 'Back to where you were' : 'Back to top';
+  const go = () => {
+    if (returning && back !== null) {
+      window.scrollTo({ top: back, behavior: 'smooth' });
+      setReturnTo(null);
+    } else {
+      setReturnTo(window.scrollY);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    window.history.replaceState(null, '', window.location.pathname);
+  };
   return (
     <button
       type="button"
-      aria-label="Back to top"
-      title="Back to top"
-      onClick={() => {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        window.history.replaceState(null, '', window.location.pathname);
-      }}
+      aria-label={label}
+      title={label}
+      onClick={go}
       className={cx(
-        'fixed bottom-5 right-5 z-30 flex h-11 w-11 items-center justify-center rounded-full border border-accent bg-accent-dim text-accent-ink shadow-lg shadow-black/30 transition-all hover:bg-accent hover:text-bg',
+        'fixed bottom-5 right-5 z-30 flex h-11 items-center justify-center gap-2 rounded-full border border-accent bg-accent-dim text-accent-ink shadow-lg shadow-black/30 transition-all hover:bg-accent hover:text-bg',
+        returning ? 'px-4' : 'w-11',
         shown ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
       )}
     >
-      <ArrowUp size={18} />
+      {returning && back !== null && back > y ? <ArrowDown size={18} /> : <ArrowUp size={18} />}
+      {returning && <span className="text-[13px] font-medium">Back to where you were</span>}
     </button>
   );
 }
@@ -269,21 +310,21 @@ const PLAYSTYLES: { who: string; story: string }[] = [
   { who: 'Chasing a goal?', story: "Let the group know. If you're pushing for something specific, like tiering up a specific profession, people are usually happy to help." },
 ];
 
-const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
+const OVERVIEW: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
   { icon: <Utensils size={18} />, title: 'Free food', body: 'Take what you need, no restocking required. As with all shared claim resources, just be respectful and mindful.', jump: 'food' },
   { icon: <Hammer size={18} />, title: 'Free basic tool upgrades', body: "There's a chest of upgrade materials at base, so you can upgrade your own tools whenever you need to." },
   {
     icon: <Gem size={18} />,
     title: 'Optional tool pushes',
-    body: 'For the min-maxers, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. Totally optional, and the only contribution-based thing we track.',
+    body: 'For the min-maxers, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. Totally optional, and the only contribution-based goal we track.',
     jump: 'tool-pushes',
   },
 ];
 
-function Perks() {
+function Overview() {
   return (
-    <Section id="perks">
-      <SectionHead id="perks" eyebrow="Perks" title="Play however you like" />
+    <Section id="overview">
+      <SectionHead id="overview" eyebrow="Overview" title="Play however you like" />
 
       <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-4 border-y border-line py-4 md:grid-cols-3">
         {PLAYSTYLES.map((p) => (
@@ -295,7 +336,7 @@ function Perks() {
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
-        {PERKS.map((o) => {
+        {OVERVIEW.map((o) => {
           const card = (
             <Card className={cx('h-full px-5 py-4', o.jump && 'transition-colors group-hover:border-accent')}>
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">{o.icon}</span>
@@ -320,13 +361,13 @@ function Perks() {
 type Stage = 'done' | 'now' | 'next' | 'later' | 'goal';
 type Milestone = { title: string; note?: string; reachedAt?: number; done?: boolean; now?: boolean; goal?: boolean };
 const MILESTONES: Milestone[] = [
-  { title: 'Tier 5 claim', note: 'In our first two weeks', reachedAt: 5 },
+  { title: 'T5 claim', note: 'In our first two weeks', reachedAt: 5 },
   { title: 'A road from the ocean to the swamp', done: true },
   { title: 'A tool push', note: 'Rolling tools for everyone right now', now: true },
-  { title: `Tier ${GROUP.mythicTier}`, note: 'Unlocks Mythic tool pushes', reachedAt: GROUP.mythicTier },
+  { title: `T${GROUP.mythicTier} claim`, note: 'Unlocks Mythic tool pushes', reachedAt: GROUP.mythicTier },
   { title: 'Trader stands', note: 'So anyone can knock out traveler tasks quickly' },
-  { title: `Tier ${GROUP.hubTier}`, note: 'A pitstop for our trading hub: a regional bank and market, right alongside the ocean', reachedAt: GROUP.hubTier },
-  { title: `Tier ${GROUP.goalTier}`, note: 'The end goal', reachedAt: GROUP.goalTier, goal: true },
+  { title: `T${GROUP.hubTier} claim`, note: 'A pitstop for our trading hub: a regional bank and market, right alongside the ocean', reachedAt: GROUP.hubTier },
+  { title: `T${GROUP.goalTier} claim`, note: 'The end goal, with port cities and outposts', reachedAt: GROUP.goalTier, goal: true },
 ];
 const STAGE_PILL: Partial<Record<Stage, [string, 'accent' | 'info' | 'neutral']>> = { now: ['Now', 'accent'], next: ['Next', 'info'], goal: ['Long-term goal', 'neutral'] };
 
@@ -344,16 +385,16 @@ function WhoWeAre({ claim, pushes }: { claim: ClaimDetail | null; pushes: Push[]
       <div>
         <SectionHead id="us" eyebrow="Who we are" title="Small crew, big plans">
           <p>
-            Five of us started Nowhere. A few of us played EA2 for a few months, and the rest are brand new to BitCraft. We hit tier 5 in our first two weeks, settled in the{' '}
+            Five of us started Nowhere. Three of us played EA2, and the rest are brand new to BitCraft. We hit a T5 claim in our first two weeks, settled in the{' '}
             {GROUP.home} in {MARKET_REGION.name} (R{MARKET_REGION.id}), and built a road from the ocean to the swamp.
           </p>
           <p>
             Back in EA2, just {GROUP.ea2.people} of us ran {GROUP.ea2.pushes} Mythic tool pushes and rolled {GROUP.ea2.mythics} Mythic tools. We'd love to do it again with the whole
-            crew once we hit tier {GROUP.mythicTier}.
+            crew once we hit a T{GROUP.mythicTier} claim.
           </p>
           <p>
-            The end goal is a tier {GROUP.goalTier} claim. Along the way, we'll stop at tier {GROUP.hubTier} to build a trading hub with a regional bank and market, right alongside
-            the ocean and open to traders from across the map.
+            The end goal is a T{GROUP.goalTier} claim with port cities and outposts. Along the way, we'll stop at T{GROUP.hubTier} to build a trading hub with a regional bank and
+            market, right alongside the ocean and open to traders from across the map.
           </p>
         </SectionHead>
         <p className="mt-5 max-w-[68ch] rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
@@ -418,7 +459,7 @@ function Roadmap({ pushes, members, ctx, stock, loading }: { pushes: Push[]; mem
     <Section id="roadmap">
       <SectionHead id="roadmap" eyebrow="Roadmap" title="What we're working on">
         <p>
-          We're big on transparency. Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
+          Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
           chipping in for. Want to help with a claim push? Just drop the materials in the Dropbox. No pressure to contribute, as contributions outside of tool pushes are not
           tracked.
         </p>
@@ -655,17 +696,17 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
 }
 
 const TOOL_CARDS = [
-  ['A share, not a buy-back', 'You get your percentage of everything the push rolls, as tools or gold.', 'accent'],
-  ['Usually comes out ahead', 'In EA2, what we rolled was usually worth more than the raw materials we put in.', 'good'],
-  ['You can get back less', 'Rolls are random. An unlucky push can be worth less than what you put in.', 'warn'],
+  ['Percentage-based contributions', 'You get your percentage of everything the push rolls, as tools or gold.', 'accent'],
+  ['Usually net positive', 'In EA2, what we rolled was usually worth more than the raw materials we put in.', 'good'],
+  ['But bad rolls exist too', 'But also, rolls are random. An unlucky push can be worth less than what you put in.', 'warn'],
 ] as const;
 
 const STEPS: { title: string; body: string }[] = [
-  { title: 'The claim calls a push', body: "When the claim decides it wants a push, the goal and the materials list go up here, so you can see what's needed and how far along it is." },
+  { title: 'The claim calls a push', body: "When the claim decides it wants to work on a tool push, the goal and the materials list go up here, so you can see what's needed and how far along it is." },
   { title: 'You hand stuff in', body: `Drop materials in the push's drop box. Each hand-in gets logged at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price.` },
-  { title: 'Contributions are tallied', body: "Everyone's gold value gets totalled. Put in 15% of it, own 15% of what comes out." },
+  { title: 'Contributions are tallied', body: "The fair market value of everyone's contribution gets totaled. Put in 15% of it, own 15% of what comes out." },
   { title: 'We roll', body: 'Materials become tools, and every tool rolled goes in the pot: Mythic, Legendary and Epic.' },
-  { title: 'We split it', body: 'You take your share as tools, gold at market value, or a mix.' },
+  { title: 'Tools are split', body: 'You take your share as tools, gold at market value, or a mix.' },
 ];
 
 type Point = [kind: 'pro' | 'con' | 'neutral', text: string];
