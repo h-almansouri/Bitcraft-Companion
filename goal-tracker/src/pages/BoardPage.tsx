@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, Lock, LockOpen, Plus, Trophy } from 'lucide-react';
 import { api, rememberKey } from '../lib/api.ts';
 import { putBoard } from '../lib/boards.ts';
-import { buildView } from '../lib/derive.ts';
+import { buildView, countedPlayers } from '../lib/derive.ts';
 import { day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
 import { useLoad } from '../lib/hooks.ts';
@@ -34,9 +34,11 @@ export function BoardPage({ slug }: { slug: string }) {
 
   // One stock read covers every open push on the page.
   const open = useMemo(() => board.data?.pushes.filter((p) => p.status !== 'done') ?? [], [board.data]);
-  const players = useMemo(() => [...new Set(open.flatMap((p) => p.players))].sort(), [open]);
+  const players = useMemo(() => [...new Set(open.flatMap((p) => countedPlayers(p, claim.data?.members)))].sort(), [open, claim.data]);
+  /** Some push counts whoever is in the claim, and the member list is still on its way. */
+  const membersPending = claim.loading && open.some((p) => p.leftOut);
   // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
-  const stock = useStock(open.length ? `stock:${players.join(',')}` : null, players);
+  const stock = useStock(open.length && !membersPending ? `stock:${players.join(',')}` : null, players);
 
   if (board.loading) return <Skeleton className="h-64" />;
   if (!board.data) {
@@ -127,7 +129,7 @@ export function BoardPage({ slug }: { slug: string }) {
                   <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                     {list.length === 0 && <p className="text-sm text-ink-2">{section.empty}</p>}
                     {list.map((push) => (
-                      <PushCard key={push.slug} board={b} push={push} ctx={ctx} stock={stock.data} stockLoading={stock.loading} />
+                      <PushCard key={push.slug} board={b} push={push} members={claim.data?.members} ctx={ctx} stock={stock.data} stockLoading={stock.loading || membersPending} />
                     ))}
                   </div>
                 </details>
@@ -143,8 +145,11 @@ export function BoardPage({ slug }: { slug: string }) {
   );
 }
 
-function PushCard({ board, push, ctx, stock, stockLoading }: { board: Board; push: Push; ctx: GameCtx | null; stock: StockSnapshot | null; stockLoading: boolean }) {
-  const view = useMemo(() => (ctx && stock && push.status !== 'done' ? buildView(ctx, push, stock) : null), [ctx, stock, push]);
+function PushCard({ board, push, members, ctx, stock, stockLoading }: { board: Board; push: Push; members?: ClaimDetail['members']; ctx: GameCtx | null; stock: StockSnapshot | null; stockLoading: boolean }) {
+  const view = useMemo(
+    () => (ctx && stock && push.status !== 'done' ? buildView(ctx, { ...push, players: countedPlayers(push, members) }, stock) : null),
+    [ctx, stock, push, members],
+  );
   const gather = view?.todos.filter((t) => t.kind === 'gather').sort((a, b) => b.row.tier - a.row.tier) ?? [];
   const ready = view?.todos.filter((t) => t.kind === 'craft' || t.kind === 'stock' || t.kind === 'pickup').length ?? 0;
   return (

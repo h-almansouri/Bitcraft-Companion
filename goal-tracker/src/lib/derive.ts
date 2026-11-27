@@ -30,16 +30,37 @@ export interface StockView {
   atStations: Map<Ref, CraftJob[]>;
 }
 
-export function buildStock(snapshot: StockSnapshot | null, push: Pick<Push, 'excluded' | 'players' | 'countCrafts'>): StockView {
+/**
+ * Whose personal storage a push counts right now. A push with a left-out list counts
+ * every current member of the claim except those, so someone who joins later is counted
+ * without anyone touching the push. Older pushes, and any push while the member list
+ * has not loaded, count the people saved on it.
+ */
+export function countedPlayers(push: Pick<Push, 'players' | 'leftOut'>, members: readonly { id: string }[] | null | undefined): string[] {
+  if (!push.leftOut || !members?.length) return push.players;
+  const out = new Set(push.leftOut);
+  return members.map((m) => m.id).filter((id) => !out.has(id));
+}
+
+/** Whether a chest's nickname can identify it again after it is rebuilt: only claim chests someone has named. */
+export const chestNickname = (loc: Pick<StockLocation, 'kind' | 'name' | 'detail'>) => (loc.kind === 'claim' && loc.detail ? loc.name.trim().toLowerCase() : null);
+
+/** Whether a push leaves this storage out: switched off by id, or a claim chest carrying a nickname that was switched off. */
+export function isLeftOut(loc: Pick<StockLocation, 'id' | 'kind' | 'name' | 'detail'>, push: Pick<Push, 'excluded' | 'excludedNames'>): boolean {
+  if (push.excluded.includes(loc.id)) return true;
+  const nickname = chestNickname(loc);
+  return !!nickname && !!push.excludedNames?.some((n) => n.trim().toLowerCase() === nickname);
+}
+
+export function buildStock(snapshot: StockSnapshot | null, push: Pick<Push, 'excluded' | 'excludedNames' | 'players' | 'countCrafts'>): StockView {
   const totals = new Map<Ref, number>();
   const where = new Map<Ref, Holding[]>();
   const atStations = new Map<Ref, CraftJob[]>();
   if (!snapshot) return { totals, where, atStations };
 
-  const excluded = new Set(push.excluded);
   const players = new Set(push.players);
   for (const loc of snapshot.locations) {
-    if (excluded.has(loc.id)) continue;
+    if (isLeftOut(loc, push)) continue;
     if (loc.kind === 'player' && loc.ownerId && !players.has(loc.ownerId)) continue;
     for (const [id, qty] of loc.items) {
       totals.set(id, (totals.get(id) ?? 0) + qty);

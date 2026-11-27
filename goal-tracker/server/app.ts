@@ -108,7 +108,12 @@ function cleanPush(input: any, slug: string, previous?: Push): Push | string {
     note: String(input.note ?? '').slice(0, 600) || undefined,
     goals,
     players: (Array.isArray(input.players) ? input.players : []).map(String).filter((p: string) => ID.test(p)).slice(0, 60),
+    // Only pushes that already keep these lists get them; older pushes go on exactly as they were.
+    leftOut: Array.isArray(input.leftOut) ? [...new Set(input.leftOut.map(String).filter((p: string) => ID.test(p)))].slice(0, 60) as string[] : undefined,
     excluded: (Array.isArray(input.excluded) ? input.excluded : []).map(String).filter((x: string) => /^[bph][\d:]{1,60}$/.test(x)).slice(0, 400),
+    excludedNames: Array.isArray(input.excludedNames)
+      ? [...new Set(input.excludedNames.map((n: unknown) => String(n).trim().slice(0, 60)).filter(Boolean))].slice(0, 100) as string[]
+      : undefined,
     routes,
     countCrafts: input.countCrafts !== false,
     assignments,

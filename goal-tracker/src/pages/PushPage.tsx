@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Boxes, Hammer, Lock, Pickaxe, RotateCcw, Search, Settings2, Target as TargetIcon, Trophy } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { putBoard } from '../lib/boards.ts';
-import { buildView, type PushView, type StageProgress } from '../lib/derive.ts';
+import { buildView, countedPlayers, type PushView, type StageProgress } from '../lib/derive.ts';
 import { day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
 import { useLoad } from '../lib/hooks.ts';
@@ -39,7 +39,11 @@ type TabId = 'gather' | 'process' | 'storage' | 'setup';
 const TAB_IDS: TabId[] = ['gather', 'process', 'storage', 'setup'];
 /** Addresses saved before the tabs were renamed still open the right place. */
 const OLD_TABS: Record<string, TabId> = { todo: 'gather', chains: 'process' };
-/** Tabs that change the push for everyone. Once the board has a password they open only for people who have typed it. */
+/**
+ * Tabs that change the push for everyone. They are not on the tab bar: they open only from
+ * the address (?tab=storage, ?tab=setup), and once the board has a password, only for people
+ * who have typed it.
+ */
 const MANAGE_TABS: Partial<Record<TabId, string>> = { storage: 'Storage', setup: 'Setup' };
 
 export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string }) {
@@ -47,11 +51,15 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const push = board.data?.pushes.find((p) => p.slug === pushSlug) ?? null;
   const claim = useLoad<ClaimDetail>('claim', () => api.claim());
   const { ctx, error: gameError } = useGame();
-  const players = useMemo(() => [...(push?.players ?? [])].sort().join(','), [push?.players]);
+  // Who counts follows the claim's member list, so people who join later are counted (see countedPlayers).
+  const counted = useMemo(() => (push ? countedPlayers(push, claim.data?.members) : []), [push, claim.data]);
+  const players = useMemo(() => [...counted].sort().join(','), [counted]);
+  /** The push counts whoever is in the claim, and the member list is still on its way. */
+  const membersPending = !!push?.leftOut && claim.loading;
   /** Marked complete: what it took has been spent, so there is nothing left to check storage for. */
   const finished = push?.status === 'done';
   // Read when the page opens, then every 15 minutes while it is on screen (see useStock). A finished push reads nothing.
-  const stock = useStock(push && !finished ? `stock:${players}` : null, players ? players.split(',') : []);
+  const stock = useStock(push && !finished && !membersPending ? `stock:${players}` : null, players ? players.split(',') : []);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);
   const access = useAccess(board.data);
@@ -66,7 +74,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const tab: TabId = TAB_IDS.includes(wantedTab) ? wantedTab : 'gather';
   const item = query.get('item');
 
-  const view = useMemo(() => (ctx && push ? buildView(ctx, push, stock.data) : null), [ctx, push, stock.data]);
+  const view = useMemo(() => (ctx && push ? buildView(ctx, { ...push, players: counted }, stock.data) : null), [ctx, push, counted, stock.data]);
 
   const setBoard = board.set;
   // Changes are sent one after another, each built on the copy the last one saved,
@@ -135,9 +143,11 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   if (!ctx || !view) return <Notice tone="bad">{gameError ?? 'Could not load the game data.'}</Notice>;
 
   const scope: PushScope = { ctx, board: board.data, push, claim: claim.data, snapshot: stock.data, view, save, assign, openItem };
-  const waitingOnStock = !finished && stock.loading && !stock.data;
-  // A finished push has two tabs: what it made, and Setup.
+  const waitingOnStock = !finished && (membersPending || (stock.loading && !stock.data));
+  // A finished push shows what it made (and Setup, from the address).
   const shownTab: TabId = finished && tab !== 'setup' ? 'gather' : tab;
+  /** Storage or Setup was opened from the address, so both join the tab bar until the page is left. */
+  const managing = !!MANAGE_TABS[shownTab];
   // The numbers on the tabs: what still has to be brought in, and what can be collected or crafted right now.
   const toBringIn = view.todos.filter((t) => t.kind === 'gather').length;
   const readyToProcess = view.todos.filter((t) => t.kind === 'pickup' || t.kind === 'craft' || t.kind === 'stock').length;
@@ -237,13 +247,17 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
             finished
               ? [
                   { id: 'gather', label: 'What we made', icon: <Trophy size={15} /> },
-                  { id: 'setup', label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
+                  ...(managing ? [{ id: 'setup' as const, label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> }] : []),
                 ]
               : [
                   { id: 'gather', label: 'Gather', icon: <Pickaxe size={15} />, count: waitingOnStock ? undefined : toBringIn },
                   { id: 'process', label: 'Process', icon: <Hammer size={15} />, count: waitingOnStock ? undefined : readyToProcess },
-                  { id: 'storage', label: 'Storage', icon: shut ? <Lock size={14} /> : <Boxes size={15} /> },
-                  { id: 'setup', label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
+                  ...(managing
+                    ? [
+                        { id: 'storage' as const, label: 'Storage', icon: shut ? <Lock size={14} /> : <Boxes size={15} /> },
+                        { id: 'setup' as const, label: 'Setup', icon: shut ? <Lock size={14} /> : <Settings2 size={15} /> },
+                      ]
+                    : []),
                 ]
           }
         />
@@ -259,12 +273,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
         ) : finished ? (
           <CompletedTab scope={scope} />
         ) : !hasGoals ? (
-          <Empty title="This push has no goals yet" icon={<TargetIcon size={30} />}>
-            <p>Add what you want to make and the full list of materials appears here.</p>
-            <Button variant="primary" className="mt-4" onClick={() => setQuery('tab', 'setup', { push: true })}>
-              Add goals
-            </Button>
-          </Empty>
+          <Empty title="This push has no goals yet" icon={<TargetIcon size={30} />} />
         ) : waitingOnStock ? (
           <div className="space-y-2">
             {[0, 1, 2, 3].map((i) => (

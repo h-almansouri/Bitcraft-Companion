@@ -297,7 +297,7 @@ function RestockList({ traveler, rows, target, waiting, players, tiers }: { trav
     const scope = tiers.length ? ` T${[...tiers].sort((a, b) => a - b).join(', T')}` : '';
     try {
       const saved = await guarded(CLAIM.slug, () =>
-        api.savePush(CLAIM.slug, { name: `${traveler.name} restock${scope}`, kind: 'traveler', status: 'active', goals, players, excluded: [], routes: {}, countCrafts: true }),
+        api.savePush(CLAIM.slug, { name: `${traveler.name} restock${scope}`, kind: 'traveler', status: 'active', goals, players, ...(players.length ? { leftOut: [] } : {}), excluded: [], excludedNames: [], routes: {}, countCrafts: true }),
       );
       navigate(`/${CLAIM.slug}/${saved.push.slug}`);
     } catch (err) {

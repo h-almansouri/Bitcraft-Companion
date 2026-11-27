@@ -49,9 +49,11 @@ export function NewPush({ open, onClose, board, claim, ctx }: { open: boolean; o
           kind,
           status,
           goals,
-          // Everyone in the claim counts until someone narrows it down in Setup.
+          // Everyone in the claim counts, including people who join later, until someone narrows it down in Setup.
           players: claim?.members.map((m) => m.id) ?? [],
+          leftOut: [],
           excluded: [],
+          excludedNames: [],
           routes: {},
           countCrafts: true,
         }),

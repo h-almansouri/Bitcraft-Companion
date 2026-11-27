@@ -110,6 +110,16 @@ describe('the API on a plain Node host', () => {
     expect((await call('DELETE', '/boards/nowhere/pushes/travelers-2')).data.pushes).toHaveLength(1);
   });
 
+  it('keeps who is left out and chest nicknames only on pushes that have them', async () => {
+    const plain = await call('PUT', '/boards/nowhere/pushes/new', { ...push, name: 'Old style' });
+    expect(plain.data.push.leftOut).toBeUndefined();
+    expect(plain.data.push.excludedNames).toBeUndefined();
+    const following = await call('PUT', '/boards/nowhere/pushes/new', { ...push, name: 'New style', leftOut: ['222', '222', 'nope'], excludedNames: [' Tool mats ', ''] });
+    expect(following.data.push).toMatchObject({ leftOut: ['222'], excludedNames: ['Tool mats'] });
+    await call('DELETE', '/boards/nowhere/pushes/old-style');
+    await call('DELETE', '/boards/nowhere/pushes/new-style');
+  });
+
   it('refuses changes without the password once one is set, and never hands the password back', async () => {
     expect((await call('POST', '/boards/nowhere/lock', { key: 'test-only-value' })).data.locked).toBe(true);
     expect((await call('PUT', '/boards/nowhere/pushes/claim-t5-push', { ...push, name: 'Renamed' })).status).toBe(403);

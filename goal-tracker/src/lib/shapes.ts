@@ -79,10 +79,25 @@ export interface Push {
   status: PushStatus;
   note?: string;
   goals: Goal[];
-  /** Players whose personal storage counts (the claim's own chests always can). */
+  /**
+   * Players whose personal storage counts (the claim's own chests always can). For a push
+   * with `leftOut` this is only who counted when it was last saved, used if the member list
+   * cannot be read; see `countedPlayers`.
+   */
   players: string[];
+  /**
+   * Members deliberately not counted. When set, everyone else in the claim counts,
+   * including people who join after the push was made. Pushes saved before this existed
+   * have no list and keep counting exactly `players`.
+   */
+  leftOut?: string[];
   /** Storage locations left out of the count (other people's chests, the dropbox...). */
   excluded: string[];
+  /**
+   * Nicknames of claim chests left out. A chest that is rebuilt or upgraded gets a new id,
+   * so it stays out as long as it is given the same nickname again.
+   */
+  excludedNames?: string[];
   /** Per-thing recipe choices; null means "we gather or buy this, don't craft it". */
   routes: Record<Ref, string | null>;
   /** Crafts at stations count as already made. */

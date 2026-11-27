@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api.ts';
-import { pickRoute } from '../../lib/derive.ts';
+import { countedPlayers, pickRoute } from '../../lib/derive.ts';
 import { navigate } from '../../lib/router.tsx';
-import type { Push, PushKind, PushStatus } from '../../lib/shapes.ts';
+import type { ClaimMember, Push, PushKind, PushStatus } from '../../lib/shapes.ts';
 import { claimTierGoals, stationGoals, townshipTiers } from '../../lib/templates.ts';
 import { Button, Card, Field, Notice, inputBase, inputClass } from '../../ui/kit.tsx';
 import { guarded } from '../../ui/unlock.tsx';
@@ -10,23 +10,45 @@ import { KIND_LABEL } from '../BoardPage.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { GoalEditor } from './GoalEditor.tsx';
 
-type Draft = Pick<Push, 'name' | 'kind' | 'status' | 'note' | 'goals' | 'players' | 'countCrafts'>;
-const pick = (p: Push): Draft => ({ name: p.name, kind: p.kind, status: p.status, note: p.note ?? '', goals: p.goals, players: p.players, countCrafts: p.countCrafts });
+type Draft = Pick<Push, 'name' | 'kind' | 'status' | 'note' | 'goals' | 'players' | 'leftOut' | 'countCrafts'>;
+/**
+ * The push as this form edits it. Who counts is kept as who is left out, so anyone who joins
+ * the claim later counts too; a push saved before that existed is converted the first time it is saved here.
+ */
+const pick = (p: Push, members: ClaimMember[]): Draft => {
+  const leftOut = p.leftOut ?? (members.length ? members.filter((m) => !p.players.includes(m.id)).map((m) => m.id) : undefined);
+  return {
+    name: p.name,
+    kind: p.kind,
+    status: p.status,
+    note: p.note ?? '',
+    goals: p.goals,
+    players: countedPlayers({ players: p.players, leftOut }, members),
+    leftOut: leftOut && [...leftOut].sort(),
+    countCrafts: p.countCrafts,
+  };
+};
 
 export function SetupTab({ scope }: { scope: PushScope }) {
   const { push, claim, ctx, board, save } = scope;
-  const [draft, setDraft] = useState<Draft>(() => pick(push));
+  const members = useMemo(() => claim?.members ?? [], [claim]);
+  const [draft, setDraft] = useState<Draft>(() => pick(push, members));
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
-  const saved = useMemo(() => JSON.stringify(pick(push)), [push]);
+  const saved = useMemo(() => JSON.stringify(pick(push, members)), [push, members]);
   const dirty = JSON.stringify(draft) !== saved;
-  // Whenever a save lands, start again from exactly what the server stored.
-  useEffect(() => setDraft(pick(push)), [push.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Whenever a save lands, or the member list arrives, start again from exactly what the server stored.
+  useEffect(() => setDraft(pick(push, members)), [push.updatedAt, members]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
-  const members = claim?.members ?? [];
+  /** Leave these members out; everyone else in the claim, now or later, counts. */
+  const leave = (out: string[]) => {
+    const leftOut = [...new Set(out)].sort();
+    set({ leftOut, players: countedPlayers({ players: [], leftOut }, members) });
+  };
+  const leftOut = draft.leftOut ?? [];
   const tiers = townshipTiers(ctx);
   const tier = Math.min(Math.max((claim?.tier ?? 2) + 1, tiers[0] ?? 3), tiers[tiers.length - 1] ?? 10);
 
@@ -111,16 +133,18 @@ export function SetupTab({ scope }: { scope: PushScope }) {
 
       <section>
         <h2 className="text-[15px] font-semibold">Whose storage counts</h2>
-        <p className="mt-1 text-sm text-ink-2">The claim's chests always count. Tick the people whose own bags, bank stashes, carts and houses should count too.</p>
+        <p className="mt-1 text-sm text-ink-2">
+          The claim's chests always count. Tick the people whose own bags, bank stashes, carts and houses should count too. Anyone who joins the claim later counts automatically.
+        </p>
         {members.length === 0 ? (
           <p className="mt-3 text-sm text-ink-2">The member list has not loaded.</p>
         ) : (
           <>
             <div className="mt-3 flex gap-2">
-              <Button size="sm" onClick={() => set({ players: members.map((m) => m.id) })}>
+              <Button size="sm" onClick={() => leave([])}>
                 Everyone
               </Button>
-              <Button size="sm" onClick={() => set({ players: [] })}>
+              <Button size="sm" onClick={() => leave(members.map((m) => m.id))}>
                 Nobody
               </Button>
             </div>
@@ -130,8 +154,8 @@ export function SetupTab({ scope }: { scope: PushScope }) {
                   <input
                     type="checkbox"
                     className="h-4 w-4 accent-[var(--accent)]"
-                    checked={draft.players.includes(m.id)}
-                    onChange={(e) => set({ players: e.target.checked ? [...draft.players, m.id] : draft.players.filter((p) => p !== m.id) })}
+                    checked={!leftOut.includes(m.id)}
+                    onChange={(e) => leave(e.target.checked ? leftOut.filter((p) => p !== m.id) : [...leftOut, m.id])}
                   />
                   {m.name}
                 </label>
@@ -204,7 +228,7 @@ export function SetupTab({ scope }: { scope: PushScope }) {
         <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3 sm:px-6">
             <span className="flex-1 text-sm text-ink-2">You have changes that are not saved.</span>
-            <Button variant="ghost" onClick={() => setDraft(pick(push))} disabled={busy}>
+            <Button variant="ghost" onClick={() => setDraft(pick(push, members))} disabled={busy}>
               Discard
             </Button>
             <Button variant="primary" onClick={submit} disabled={busy}>

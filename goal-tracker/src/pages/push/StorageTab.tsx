@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
+import { chestNickname, isLeftOut } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
 import type { StockLocation } from '../../lib/shapes.ts';
 import { Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
@@ -23,14 +24,19 @@ export function StorageTab({ scope }: { scope: PushScope }) {
 
   if (!snapshot) return <Empty title="Storage has not loaded yet" />;
 
-  const excluded = new Set(push.excluded);
+  // A named claim chest is also left out by its nickname, so it stays out after being rebuilt or upgraded.
   const toggle = async (loc: StockLocation) => {
     setBusy(loc.id);
-    const next = new Set(excluded);
-    if (next.has(loc.id)) next.delete(loc.id);
-    else next.add(loc.id);
+    const nickname = chestNickname(loc);
+    const turningOff = !isLeftOut(loc, push);
+    const excluded = push.excluded.filter((id) => id !== loc.id);
+    const excludedNames = (push.excludedNames ?? []).filter((n) => n.trim().toLowerCase() !== nickname);
+    if (turningOff) {
+      excluded.push(loc.id);
+      if (nickname) excludedNames.push(loc.name.trim());
+    }
     try {
-      await save({ excluded: [...next] });
+      await save({ excluded, excludedNames });
     } catch {
       /* the page shows the error */
     } finally {
@@ -53,7 +59,7 @@ export function StorageTab({ scope }: { scope: PushScope }) {
           <Card className="mt-2.5 divide-y divide-line">
             {group.list.map((loc) => {
               const relevant = loc.items.filter(([id]) => view.rows.has(id)).sort((a, b) => b[1] - a[1]);
-              const off = excluded.has(loc.id);
+              const off = isLeftOut(loc, push);
               const fixed = loc.id === 'built';
               return (
                 <details key={loc.id} className="group">
