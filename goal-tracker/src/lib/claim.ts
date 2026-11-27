@@ -28,3 +28,15 @@ export const FREE_FOOD_CHESTS = ['Food'];
 
 /** The market Mythic tool push hand-ins are priced against: the claim's own region. */
 export const MARKET_REGION = { id: 8, name: 'Ossura' } as const;
+
+/**
+ * Alts, by in-game name (any case), and whose they are. Alts still count wherever storage
+ * is counted; they are only left out of people pickers and of the player count.
+ * A longer-term way to group characters under one person can replace this list.
+ */
+export const ALTS: Record<string, string> = { pumapance: 'chels', vel: 'Velcruza', cynth: 'Velcruza', whitelinx: 'skyediver' };
+export const isAlt = (name: string) => Object.prototype.hasOwnProperty.call(ALTS, name.toLowerCase());
+/** Members split into people and their alts, for head counts. */
+export function playersAndAlts<T extends { name: string }>(members: readonly T[]) {
+  return { players: members.filter((m) => !isAlt(m.name)), alts: members.filter((m) => isAlt(m.name)) };
+}

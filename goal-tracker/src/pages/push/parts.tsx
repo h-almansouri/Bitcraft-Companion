@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
+import { isAlt } from '../../lib/claim.ts';
 import { ArrowRight, Hammer, Hand, Hourglass, UserPlus } from 'lucide-react';
 import { flowOf, type FlowBranch, type PushView, type Row } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
@@ -123,11 +124,20 @@ export function StationLines({ jobs, className }: { jobs: CraftJob[]; className?
   );
 }
 
-/** Everyone a job can be handed to: claim members in name order, then the claim's own buy order. */
-export const assigneesOf = (scope: PushScope): { id: string; name: string }[] => [
-  ...[...(scope.claim?.members ?? [])].sort((a, b) => a.name.localeCompare(b.name)).map((m) => ({ id: m.id, name: m.name })),
-  { id: BUY_ORDER, name: BUY_ORDER_NAME },
-];
+/**
+ * Everyone a job can be handed to: claim members in name order, then the claim's own buy order.
+ * Alts are left out (see ALTS), unless one already has a job on this push, so nothing goes missing.
+ */
+export const assigneesOf = (scope: PushScope): { id: string; name: string }[] => {
+  const assigned = new Set(Object.values(scope.push.assignments ?? {}).flat());
+  return [
+    ...[...(scope.claim?.members ?? [])]
+      .filter((m) => !isAlt(m.name) || assigned.has(m.id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((m) => ({ id: m.id, name: m.name })),
+    { id: BUY_ORDER, name: BUY_ORDER_NAME },
+  ];
+};
 
 /** Dropdown to hand a material to one or more claim members, or to a claim buy order. Saves as soon as it changes. */
 export function AssignControl({ scope, id }: { scope: PushScope; id: Ref }) {

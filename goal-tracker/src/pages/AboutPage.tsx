@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowRight, Check, Compass, Gem, Hammer, Hexagon, Trophy, TriangleAlert, Utensils, Warehouse, X } from 'lucide-react';
+import { ArrowRight, ArrowUp, Check, Gem, Hammer, Trophy, TriangleAlert, Utensils, Warehouse, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useCachedBoard } from '../lib/boards.ts';
-import { CLAIM, FREE_FOOD_CHESTS, HOME, MARKET_REGION } from '../lib/claim.ts';
+import { CLAIM, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
 import { buildView, countedPlayers } from '../lib/derive.ts';
-import { TIER_NAMES, day, num, pct } from '../lib/format.ts';
+import { TIER_NAMES, day, num, pct, plural } from '../lib/format.ts';
 import { useGame, type GameCtx } from '../lib/game.ts';
 import { useLoad, type Loaded } from '../lib/hooks.ts';
 import { Link } from '../lib/router.tsx';
@@ -14,25 +14,27 @@ import { StorageRead, useStock } from '../ui/storage.tsx';
 import { KIND_LABEL } from './BoardPage.tsx';
 
 const PUSHES = HOME + '/pushes';
+const LOGO = HOME + '/logo.png';
 
 /**
  * Facts about the group, in one place so they are easy to correct.
- * Tier, members and supplies are read live; these are not.
+ * Tier and members are read live; these are not.
  */
 const GROUP = {
   home: 'Rocky Gardens',
-  /** EA2 track record. The Mythic count is Chelsey's recollection ("6 or 7") until checked. */
-  ea2: { pushes: 3, mythics: '6+' },
-  /** The tier that opens Mythic tool pushes, and the one the trading hub waits for. */
+  /** EA2: two of us, three Mythic tool pushes, six Mythic tools. */
+  ea2: { people: 'two', pushes: 'three', mythics: 'six' },
+  /** The tier that opens Mythic tool pushes, the trading hub pitstop, and the end goal. */
   mythicTier: 6,
   hubTier: 7,
+  goalTier: 10,
 };
 
 /** The page's sections, in order. The bar under the header jumps between them. */
 const SECTIONS = [
-  { id: 'offer', label: 'What we offer' },
+  { id: 'perks', label: 'Claim perks' },
   { id: 'us', label: 'Who we are' },
-  { id: 'open', label: 'Out in the open' },
+  { id: 'transparency', label: 'Transparency' },
   { id: 'food', label: 'Food' },
   { id: 'tool-pushes', label: 'Tool pushes' },
 ] as const;
@@ -85,40 +87,55 @@ export function AboutPage() {
       <Hero claim={claim.data} region={region} />
       <JumpBar />
       <div className="mt-10 space-y-16">
-        <WhatWeOffer />
+        <ClaimPerks />
         <WhoWeAre claim={claim.data} pushes={pushes ?? []} />
-        <OutInTheOpen pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
+        <Transparency pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
         <FreeFood ctx={ctx} stock={stock} />
         <ToolPushes />
       </div>
+      <BackToTop />
     </div>
   );
 }
 
 function Hero({ claim, region }: { claim: ClaimDetail | null; region: string }) {
+  const heads = claim ? playersAndAlts(claim.members) : null;
   const stats: [string, ReactNode][] = [
-    ['Claim tier', claim ? <span style={{ color: `color-mix(in oklab, var(--tier-${claim.tier}) 82%, var(--ink))` }}>Tier {claim.tier}</span> : null],
-    ['Members', claim ? num(claim.members.length) : null],
+    ['Claim tier', claim ? <span style={{ color: `color-mix(in oklab, var(--tier-${claim.tier}) 70%, var(--ink))` }}>Tier {claim.tier}</span> : null],
+    [
+      'Players',
+      heads ? (
+        <span>
+          {num(heads.players.length)}
+          {heads.alts.length > 0 && (
+            <span className="ml-1.5 text-[13px] font-normal text-ink-2">
+              + {heads.alts.length} {plural(heads.alts.length, 'alt')}
+            </span>
+          )}
+        </span>
+      ) : null,
+    ],
     ['Home', `${GROUP.home}, R${MARKET_REGION.id}`],
-    ['Supplies', claim ? num(claim.supplies) : null],
   ];
   return (
     <section className="relative overflow-hidden rounded-card border border-line bg-surface">
-      {/* A soft teal glow and a large faint hexagon behind the words. Decoration only. */}
+      {/* A soft gold glow behind the words, like the lamp-lit sign in the logo. Decoration only. */}
       <div aria-hidden="true" className="pointer-events-none absolute inset-0" style={{ background: 'radial-gradient(ellipse 70% 90% at 0% 0%, var(--accent-soft), transparent 70%)' }} />
-      <Hexagon aria-hidden="true" strokeWidth={0.6} className="pointer-events-none absolute -right-16 -top-20 hidden text-accent opacity-[0.07] sm:block" size={360} />
+      <img src={LOGO} alt="" aria-hidden="true" width={176} height={176} className="pointer-events-none absolute right-9 top-9 hidden h-44 w-44 rounded-full md:block" />
 
       <div className="relative px-5 pb-6 pt-8 sm:px-9 sm:pb-8 sm:pt-11">
-        <SectionLabel className="text-accent-ink">
-          BitCraft claim · {GROUP.home}, {region} (R{MARKET_REGION.id})
-        </SectionLabel>
+        <div className="flex items-center gap-3">
+          <img src={LOGO} alt="" aria-hidden="true" width={44} height={44} className="h-11 w-11 rounded-full md:hidden" />
+          <SectionLabel className="text-accent-ink">
+            BitCraft claim · {GROUP.home}, {region} (R{MARKET_REGION.id})
+          </SectionLabel>
+        </div>
         <h1 className="mt-2 text-[34px] font-semibold leading-tight tracking-tight sm:text-[44px]">{CLAIM.name}</h1>
-        <p className="mt-3 max-w-[60ch] text-[15px] leading-relaxed text-ink-2 sm:text-base">
-          We're a small community of active players building something together. Free food and basic tool upgrades are on us, so you can spend your time playing the way you
-          want to, with people who've got your back.
+        <p className="mt-3 max-w-[54ch] text-[15px] leading-relaxed text-ink-2 sm:text-base">
+          A small group of active players building a claim together. We keep free food and basic tool upgrades around so everyone can play however they like.
         </p>
         <div className="mt-6 flex flex-wrap gap-2.5">
-          <Link to={PUSHES} className="inline-flex h-10 items-center gap-1.5 rounded-md border border-accent bg-accent-dim px-4 text-[13px] font-medium text-accent-ink no-underline transition-colors hover:bg-accent hover:text-white">
+          <Link to={PUSHES} className="inline-flex h-10 items-center gap-1.5 rounded-md border border-accent bg-accent-dim px-4 text-[13px] font-medium text-accent-ink no-underline transition-colors hover:bg-accent hover:text-bg">
             See what we're working on
             <ArrowRight size={15} />
           </Link>
@@ -131,7 +148,7 @@ function Hero({ claim, region }: { claim: ClaimDetail | null; region: string }) 
           </a>
         </div>
 
-        <dl className="mt-8 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-4">
+        <dl className="mt-8 grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-3 md:max-w-[calc(100%-13rem)]">
           {stats.map(([label, value]) => (
             <div key={label} className="bg-surface px-4 py-3">
               <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">{label}</dt>
@@ -186,6 +203,34 @@ function JumpBar() {
   );
 }
 
+/** A round button that floats in the corner once you've scrolled a way down. */
+function BackToTop() {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const check = () => setShown(window.scrollY > 600);
+    check();
+    window.addEventListener('scroll', check, { passive: true });
+    return () => window.removeEventListener('scroll', check);
+  }, []);
+  return (
+    <button
+      type="button"
+      aria-label="Back to top"
+      title="Back to top"
+      onClick={() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        window.history.replaceState(null, '', window.location.pathname);
+      }}
+      className={cx(
+        'fixed bottom-5 right-5 z-30 flex h-11 w-11 items-center justify-center rounded-full border border-accent bg-accent-dim text-accent-ink shadow-lg shadow-black/30 transition-all hover:bg-accent hover:text-bg',
+        shown ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
+      )}
+    >
+      <ArrowUp size={18} />
+    </button>
+  );
+}
+
 /** Heading block shared by every section. */
 function SectionHead({ id, eyebrow, title, children, extra }: { id?: SectionId; eyebrow: string; title: string; children?: ReactNode; extra?: ReactNode }) {
   return (
@@ -211,26 +256,44 @@ function Section({ id, children, className }: { id: SectionId; children: ReactNo
   );
 }
 
-const OFFERS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
-  { icon: <Utensils size={18} />, title: 'Free food', body: "There's always food in the claim's free stock. Grab what you need, no asking.", jump: 'food' },
-  { icon: <Hammer size={18} />, title: 'Free basic tool upgrades', body: 'Basic tool upgrades are on the house, so a worn-out tool never holds you back.' },
-  { icon: <Compass size={18} />, title: 'Play your way', body: "No obligation to play a certain way. Level whatever you like, or nothing at all. Solo's welcome too." },
+/** Short "if this is you" stories: everyone's playstyle has a place. */
+const PLAYSTYLES: { who: string; story: string }[] = [
+  { who: 'Love gathering?', story: "Head out and gather to your heart's content. We've got alts at base processing full-time, so drop off your haul and get back out there." },
+  { who: 'Rather stay home?', story: "If you'd rather hang at base and craft, most community crafts are open. Jump in on whatever's going." },
+  { who: 'Chasing a goal?', story: "Let the group know. If you're pushing for something specific, people are usually happy to pitch in." },
+];
+
+const PERKS: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
+  { icon: <Utensils size={18} />, title: 'Free food', body: "Take what you need. You don't have to restock it, just keep in mind everyone shares it.", jump: 'food' },
+  {
+    icon: <Hammer size={18} />,
+    title: 'Free basic tool upgrades',
+    body: "We're setting up a small chest of upgrade materials so you can upgrade your own tools. Not at the smithing level yet? Ask someone in the claim to do it for you.",
+  },
   {
     icon: <Gem size={18} />,
     title: 'Optional tool pushes',
-    body: "Want in on Mythic tools? Tool pushes track who put in what so everyone gets a fair cut. That's the only thing we track.",
+    body: 'For the min-maxers, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. Totally optional, and the only contribution-based thing we track.',
     jump: 'tool-pushes',
   },
 ];
 
-function WhatWeOffer() {
+function ClaimPerks() {
   return (
-    <Section id="offer">
-      <SectionHead id="offer" eyebrow="What we offer" title="Everything you need to play your way.">
-        <p>Nobody gets handed a job here. The claim is set up to back you up, whatever you feel like doing today.</p>
-      </SectionHead>
-      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {OFFERS.map((o) => {
+    <Section id="perks">
+      <SectionHead id="perks" eyebrow="Claim perks" title="No set roles. Play however you like." />
+
+      <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-4 border-y border-line py-4 md:grid-cols-3">
+        {PLAYSTYLES.map((p) => (
+          <p key={p.who} className="text-[13px] leading-relaxed text-ink-2">
+            <span className="block font-semibold text-accent-ink">{p.who}</span>
+            {p.story}
+          </p>
+        ))}
+      </div>
+
+      <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
+        {PERKS.map((o) => {
           const card = (
             <Card className={cx('h-full px-5 py-4', o.jump && 'transition-colors group-hover:border-accent')}>
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">{o.icon}</span>
@@ -259,8 +322,9 @@ const MILESTONES: Milestone[] = [
   { title: 'A road from the ocean to the swamp', done: true },
   { title: 'A tool push', note: 'Rolling tools for everyone right now', now: true },
   { title: `Tier ${GROUP.mythicTier}`, note: 'Unlocks Mythic tool pushes', reachedAt: GROUP.mythicTier },
-  { title: 'The Storehouse and trader stands', note: 'Free food and mats in one spot, and stands that make traveler tasks quick and easy' },
-  { title: `Tier ${GROUP.hubTier}`, note: 'The region bank and market, and an oceanside trading hub for other regions', reachedAt: GROUP.hubTier, goal: true },
+  { title: 'The Storehouse and trader stands', note: 'Free food and mats in one spot, plus stands that make traveler tasks quick' },
+  { title: `Tier ${GROUP.hubTier}`, note: 'A pitstop for our trading hub: region bank and market, right on the ocean', reachedAt: GROUP.hubTier },
+  { title: `Tier ${GROUP.goalTier}`, note: 'The end goal', reachedAt: GROUP.goalTier, goal: true },
 ];
 const STAGE_PILL: Partial<Record<Stage, [string, 'accent' | 'info' | 'neutral']>> = { now: ['Now', 'accent'], next: ['Next', 'info'], goal: ['Long-term goal', 'neutral'] };
 
@@ -275,16 +339,26 @@ function WhoWeAre({ claim, pushes }: { claim: ClaimDetail | null; pushes: Push[]
 
   return (
     <Section id="us" className="grid grid-cols-1 items-start gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_400px]">
-      <SectionHead id="us" eyebrow="Who we are" title="A small crew with big plans.">
-        <p>
-          Five of us started Nowhere: a mix of EA2 veterans and people brand new to BitCraft. Two weeks in, we had a tier 5 claim. We've made our home in the {GROUP.home} in{' '}
-          {MARKET_REGION.name} (R{MARKET_REGION.id}), and we've built a road from the ocean to the swamp.
+      <div>
+        <SectionHead id="us" eyebrow="Who we are" title="Small crew, big plans.">
+          <p>
+            Five of us started Nowhere. A few of us played EA2 for a few months, and the rest are brand new to BitCraft. We hit tier 5 in our first two weeks, settled in the{' '}
+            {GROUP.home} in {MARKET_REGION.name} (R{MARKET_REGION.id}), and built a road from the ocean to the swamp.
+          </p>
+          <p>
+            Back in EA2, just {GROUP.ea2.people} of us ran {GROUP.ea2.pushes} Mythic tool pushes and rolled {GROUP.ea2.mythics} Mythic tools. We'd love to do it again with the whole
+            crew once we hit tier {GROUP.mythicTier}.
+          </p>
+          <p>
+            The end goal is a tier {GROUP.goalTier} claim. Along the way we'll stop at tier {GROUP.hubTier} to set up a trading hub, with a region bank and market right by the
+            ocean for players from other regions.
+          </p>
+        </SectionHead>
+        <p className="mt-5 max-w-[68ch] rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
+          <span className="font-semibold text-ink">House rules?</span> Not many. Be a team player, be respectful, and no hate speech of any kind. Follow the game's rules too (no
+          hacking or cheating). Beyond that, use your best judgment.
         </p>
-        <p>
-          Back in EA2 we ran {GROUP.ea2.pushes} Mythic tool pushes and rolled {GROUP.ea2.mythics} Mythic tools between us. We're itching to do it again once we hit tier{' '}
-          {GROUP.mythicTier}. The big dream is tier {GROUP.hubTier}: the region bank and market, and an oceanside trading hub for players from other regions.
-        </p>
-      </SectionHead>
+      </div>
 
       <Card className="px-5 py-4 lg:mt-1">
         <SectionLabel>Where we're headed</SectionLabel>
@@ -335,16 +409,17 @@ function usePushView(push: Push, members: Members, ctx: GameCtx | null, stock: S
   );
 }
 
-function OutInTheOpen({ pushes, members, ctx, stock, loading }: { pushes: Push[]; members: Members; ctx: GameCtx | null; stock: StockSnapshot | null; loading: boolean }) {
+function Transparency({ pushes, members, ctx, stock, loading }: { pushes: Push[]; members: Members; ctx: GameCtx | null; stock: StockSnapshot | null; loading: boolean }) {
   const open = pushes.filter((p) => p.status === 'active' || p.status === 'planned');
   const done = pushes.filter((p) => p.status === 'done');
   return (
-    <Section id="open">
-      <SectionHead id="open" eyebrow="Out in the open" title="Nothing's hidden.">
+    <Section id="transparency">
+      <SectionHead id="transparency" eyebrow="Transparency" title="All our goals are out in the open.">
         <p>
-          Every push lives on this site: what we're going for, how far along we are, and what's still needed. If something catches your eye, put your name on it with the
-          "Who's on it" picker, or drop materials in the Dropbox. Nobody's going to check up on you, and if you'd rather just do your own thing, that's totally fine.
+          We're big on transparency. Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
+          chipping in for. If something catches your eye, put your name on it in the "Who's on it" dropdown, or drop materials in the Dropbox. No pressure, and nobody's checking.
         </p>
+        <p>We care about feedback too. It's why we built this site, the push trackers and Bitcraft Companion. Got an idea, or something bugging you? Tell us.</p>
       </SectionHead>
 
       {pushes.length > 0 && (
@@ -377,11 +452,6 @@ function OutInTheOpen({ pushes, members, ctx, stock, loading }: { pushes: Push[]
           </Link>
         </>
       )}
-
-      <div className="mt-6 rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
-        <span className="font-semibold text-ink">House rules?</span> Not many. Be a team player, be respectful, and no hate speech of any kind. Play by the game's rules too (no
-        hacking or cheating), and beyond that, use your best judgment.
-      </div>
     </Section>
   );
 }
@@ -456,8 +526,8 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
 
   return (
     <Section id="food">
-      <SectionHead id="food" eyebrow="Food" title="Hungry? It's on us.">
-        <p>Anything in the {FREE_FOOD_CHESTS.join(' and ')} chest is free to take. Here's what's in there right now.</p>
+      <SectionHead id="food" eyebrow="Food" title="What's in the food chest.">
+        <p>Everything in the {FREE_FOOD_CHESTS.join(' and ')} chest is free for claim members. No need to restock it, just remember it's shared. Here's what's in there right now.</p>
       </SectionHead>
 
       <Card className="mt-5 overflow-hidden">
@@ -518,8 +588,8 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
             The Storehouse <Pill tone="warn">Coming soon</Pill>
           </p>
           <p className="mt-1">
-            We're building a Storehouse: a barter stand stocked with free food and materials, plus a drop box for anything you want to give. Most chests around the claim
-            aren't open to everyone, so the Storehouse will be the one place to grab and drop. Trader stands are on the list too, so traveler tasks get quick and easy.
+            We're building a Storehouse: a barter stand with free food and materials, plus a drop box for anything you want to give back. Most chests around the claim aren't
+            open to everyone, so this'll be the spot to grab and drop. Trader stands are on the list too, to make traveler tasks quick.
           </p>
         </div>
       </div>
@@ -528,20 +598,20 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
 }
 
 const TOOL_CARDS = [
-  ['A share, not a buy-back', 'You get your percentage of every tool the push rolls, as tools or as gold.', 'accent'],
-  ['Usually comes out ahead', 'In EA2, the tools we rolled were usually worth more than the raw materials that went in.', 'good'],
+  ['A share, not a buy-back', 'You get your percentage of everything the push rolls, as tools or gold.', 'accent'],
+  ['Usually comes out ahead', 'In EA2, what we rolled was usually worth more than the raw materials we put in.', 'good'],
   ['You can get back less', 'Rolls are random. An unlucky push can be worth less than what you put in.', 'warn'],
 ] as const;
 
 const STEPS: { title: string; body: string }[] = [
-  { title: 'We call a push', body: "The goal and the materials it takes go up on this site, so everyone can see what's needed and how far along it is." },
+  { title: 'We call a push', body: "The goal and the materials list go up here, so you can see what's needed and how far along it is." },
   {
-    title: 'You hand in materials',
-    body: `Drop them in the push's drop box. Each hand-in gets logged and priced at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market value, and that price is locked in.`,
+    title: 'You hand stuff in',
+    body: `Drop materials in the push's drop box. Each hand-in gets logged at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price, and that price sticks.`,
   },
-  { title: 'Your share is set', body: "Everyone's gold value gets added up. Put in 15% of the total and you own 15% of what comes out." },
-  { title: 'We roll', body: 'The materials become tools. Every tool the push rolls goes into the haul: Mythic, Legendary, Epic and everything below.' },
-  { title: 'We split the haul', body: 'You get your share as tools, as gold at market value, or a mix of both.' },
+  { title: 'Your share adds up', body: "Everyone's gold value gets totalled. Put in 15% of it, own 15% of what comes out." },
+  { title: 'We roll', body: 'Materials become tools, and every tool rolled goes in the pot: Mythic, Legendary, Epic and everything below.' },
+  { title: 'We split it', body: 'You take your share as tools, gold at market value, or a mix.' },
 ];
 
 /** The worked example. Everyone hands in the same; only the luck of the rolls changes. */
@@ -552,30 +622,25 @@ const OUTCOMES = [
 ];
 
 const FAQ: { q: string; a: string }[] = [
-  { q: 'Do I have to join one?', a: 'Nope. Tool pushes are optional like everything else here, and the free basic tool upgrades are yours either way.' },
-  { q: 'How little can I put in?', a: 'Any amount. A smaller hand-in just means a smaller share.' },
+  { q: 'Do I have to join?', a: 'Nope. Tool pushes are optional like everything else, and the free basic tool upgrades are yours either way.' },
+  { q: 'How little can I put in?', a: 'Any amount. Smaller hand-in, smaller share.' },
   {
     q: 'Which price counts?',
-    a: `The ${MARKET_REGION.name} (R${MARKET_REGION.id}) market value on the day you hand something in. It's locked in, so a price swing later can't shrink what you put in.`,
+    a: `The ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price on the day you hand something in. It's locked in, so a price drop later won't shrink what you put in.`,
   },
-  { q: 'Can I take gold instead of a tool?', a: 'Yes. Tools, gold at market value, or a mix of the two.' },
+  { q: 'Can I take gold instead of a tool?', a: 'Yep. Tools, gold at market value, or a mix.' },
 ];
 
-/** How a Mythic tool push works, at the bottom of the page for anyone weighing whether to join one. */
+/** How a tool push works, at the bottom of the page for anyone weighing whether to join one. */
 function ToolPushes() {
   const share = EXAMPLE.yours / EXAMPLE.total;
-  const toTop = (e: MouseEvent) => {
-    e.preventDefault();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    window.history.replaceState(null, '', window.location.pathname);
-  };
   return (
     <Section id="tool-pushes" className="space-y-10">
       <div>
-        <SectionHead id="tool-pushes" eyebrow="Mythic tool pushes" title="Pool materials, share the haul." extra={<Pill tone="info">Starts at tier {GROUP.mythicTier}</Pill>}>
+        <SectionHead id="tool-pushes" eyebrow="Tool pushes" title="Pool materials, split the haul." extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}>
           <p>
-            Mythic tools take a mountain of materials and a lot of luck, so we roll them together. Once we hit tier {GROUP.mythicTier}, anyone who wants in can chip in materials
-            and get a share of everything the push rolls. It's the one thing we keep track of, so everyone gets a fair cut. We share the wins, and we share the risk.
+            For anyone who wants to min-max, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. They're completely optional, and they're the only place
+            we track who put in what, so everyone gets a fair cut. Wins and losses get shared.
           </p>
         </SectionHead>
         <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -602,29 +667,29 @@ function ToolPushes() {
             </li>
           ))}
         </ol>
-        <p className="mt-3 text-[13px] text-muted">A tracker on this site will log hand-ins and prices for us. It's in the works.</p>
+        <p className="mt-3 text-[13px] text-muted">A tracker on this site will log hand-ins and prices. It's in the works.</p>
       </div>
 
       <div>
-        <SubHead title="Why a share, and not a buy-back?">
-          We could just pay you market value for your materials. We don't, because in EA2 the tools we rolled (Mythic, Legendary, Epic and down) were usually worth more at
-          market than the raw materials that went in. A share lets everyone ride that, and it keeps a push feeling like a group thing.
+        <SubHead title="Why a share and not a buy-back?">
+          We could just pay you market price for your materials. But in EA2, the tools we rolled (Mythic, Legendary, Epic and down) were usually worth more than the raw materials
+          that went in, so a share lets everyone in on that. It also keeps pushes feeling like a group thing.
         </SubHead>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Compare title="A buy-back" tag="Not how we do it" good={false} lines={['You get exactly what your materials were worth', 'Lucky rolls go to the claim, not to you', "You can't come out ahead"]} />
+          <Compare title="A buy-back" tag="Not how we do it" good={false} lines={['You get exactly what your materials were worth', 'Lucky rolls go to the claim, not you', 'No way to come out ahead']} />
           <Compare
             title="A share of the haul"
             tag="How we do it"
             good
-            lines={['You get your percentage of everything the push rolls', 'A lucky push lifts everyone who chipped in', 'An unlucky push is shared too, so you can get back less']}
+            lines={['You get your cut of everything rolled', 'A lucky push pays off for everyone who chipped in', 'An unlucky one is shared too, so you can get back less']}
           />
         </div>
       </div>
 
       <div>
         <SubHead title="Same hand-in, two different pushes">
-          Say you hand in {num(EXAMPLE.yours)} gold of materials out of {num(EXAMPLE.total)} gold in total. That's a {Math.round(share * 100)}% share, and what it's worth depends on
-          what the push rolls.
+          Say you hand in {num(EXAMPLE.yours)} gold worth of materials out of {num(EXAMPLE.total)} total. That's a {Math.round(share * 100)}% share, and what it's worth depends on the
+          rolls.
         </SubHead>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           {OUTCOMES.map((o) => (
@@ -639,7 +704,7 @@ function ToolPushes() {
           <p className="font-semibold text-warn">Heads up: you can get back less than you put in.</p>
           <p className="mt-1">
             Rolls are random, and a push can roll tools worth less than the materials that went in. Our EA2 pushes usually came out ahead, but that's a track record, not a
-            promise. Put in what you're happy to share the risk on.
+            promise. Only put in what you're cool sharing the risk on.
           </p>
         </div>
       </div>
@@ -655,10 +720,6 @@ function ToolPushes() {
           ))}
         </dl>
       </div>
-
-      <a href={HOME} onClick={toTop} className="inline-flex text-[13px] font-medium text-accent-ink no-underline hover:underline">
-        Back to top
-      </a>
     </Section>
   );
 }

@@ -18,7 +18,7 @@ export function Button({
       className={cx(
         'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border font-medium transition-colors disabled:cursor-default disabled:opacity-50',
         size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-9 px-3.5 text-[13px]',
-        variant === 'primary' && 'border-accent bg-accent-dim text-accent-ink hover:bg-accent hover:text-white',
+        variant === 'primary' && 'border-accent bg-accent-dim text-accent-ink hover:bg-accent hover:text-bg',
         variant === 'soft' && 'border-line-2 bg-surface-2 text-ink hover:bg-surface-3',
         variant === 'ghost' && 'border-transparent text-ink-2 hover:bg-surface-2 hover:text-ink',
         variant === 'danger' && 'border-line-2 bg-surface-2 text-bad hover:bg-bad-soft',

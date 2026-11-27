@@ -4,30 +4,32 @@
 @source not "../dist";
 
 /*
- * One look: near-black navy, teal accent, hairline borders, compact type.
+ * One look, taken from the Nowhere logo: night-sky navy (#22303f), parchment cream
+ * (#ede3cc) for text, and the gold of the "Nowhere" sign (#e8a33d) as the accent.
  * Components only use the names below (bg-surface, text-ink, border-line...),
  * so the whole palette can be changed from this one block.
  */
 :root {
-  --bg: #0d0f14;
-  --surface: #13171f;
-  --surface-2: #1a1f2b;
-  --surface-3: #222836;
-  --line: #2a3040;
-  --line-2: #3a4257;
-  --ink: #e2e8f0;
-  --ink-2: #8fa3bf;
-  --muted: #5a6a82;
+  --bg: #19232f;
+  --surface: #22303f;
+  --surface-2: #2a3a4b;
+  --surface-3: #334558;
+  --line: #34465a;
+  --line-2: #46596f;
+  --ink: #ede3cc;
+  --ink-2: #b9b5a7;
+  --muted: #8e98a4;
 
-  --accent: #1d9e75;
-  --accent-dim: #0f6e56;
-  --accent-ink: #9fe1cb;
-  --accent-soft: rgba(29, 158, 117, 0.14);
+  --accent: #e8a33d;
+  --accent-dim: #5e4219;
+  --accent-ink: #f3c47a;
+  --accent-soft: rgba(232, 163, 61, 0.14);
 
   --good: #97c459;
   --good-soft: rgba(99, 153, 34, 0.16);
-  --warn: #fac775;
-  --warn-soft: rgba(186, 117, 23, 0.18);
+  /* Paler and yellower than the gold accent, so "planned" never reads as "active". */
+  --warn: #f2d88a;
+  --warn-soft: rgba(242, 216, 138, 0.14);
   --bad: #f08a84;
   --bad-soft: rgba(226, 75, 74, 0.15);
   --info: #afa9ec;

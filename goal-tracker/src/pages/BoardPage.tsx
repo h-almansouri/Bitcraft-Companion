@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, Lock, LockOpen, Plus, Trophy } from 'lucide-react';
+import { playersAndAlts } from '../lib/claim.ts';
 import { api, rememberKey } from '../lib/api.ts';
 import { putBoard } from '../lib/boards.ts';
 import { buildView, countedPlayers } from '../lib/derive.ts';
@@ -14,6 +15,12 @@ import { guarded } from '../ui/unlock.tsx';
 import { NewPush } from './NewPush.tsx';
 
 export const KIND_LABEL: Record<PushKind, string> = { 'claim-tier': 'Claim tier', 'tool-push': 'Tool push', traveler: 'Traveler tasks', custom: 'Custom' };
+
+/** "5 players", "4 alts": alts (see ALTS) are counted apart so the claim isn't oversold. */
+function headCount(members: ClaimDetail['members']): string[] {
+  const { players, alts } = playersAndAlts(members);
+  return [`${players.length} ${plural(players.length, 'player')}`, alts.length ? `${alts.length} ${plural(alts.length, 'alt')}` : ''];
+}
 const SECTIONS: { status: PushStatus; title: string; empty: string }[] = [
   { status: 'active', title: 'Active', empty: 'Nothing running right now.' },
   { status: 'planned', title: 'Planned', empty: 'Nothing lined up yet.' },
@@ -62,7 +69,7 @@ export function BoardPage({ slug }: { slug: string }) {
             {claim.data && <TierChip tier={claim.data.tier} />}
           </div>
           <p className="mt-0.5 text-[13px] text-ink-2">
-            {[claim.data?.region || b.region, claim.data && `${claim.data.members.length} members`, claim.data && `${num(claim.data.supplies)} supplies`].filter(Boolean).join(' · ')}
+            {[claim.data?.region || b.region, ...(claim.data ? headCount(claim.data.members) : [])].filter(Boolean).join(' · ')}
           </p>
         </div>
         <Button variant="soft" onClick={() => setLocking(true)} title={b.locked ? 'Changes need the board password' : 'Anyone with the link can make changes'}>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { ChevronRight, Compass, Hexagon, House, LayoutList, Menu } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Compass, House, LayoutList, Menu } from 'lucide-react';
 import { api } from './lib/api.ts';
 import { putBoard, useCachedBoard } from './lib/boards.ts';
 import { CLAIM, HOME } from './lib/claim.ts';
@@ -70,9 +70,7 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
   return (
     <div className="flex h-full flex-col">
       <Link to={HOME} onClick={onNavigate} className="flex h-14 shrink-0 items-center gap-2.5 border-b border-line px-5 no-underline">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-dim text-accent-ink" aria-hidden="true">
-          <Hexagon size={17} />
-        </span>
+        <img src={HOME + '/logo.png'} alt="" aria-hidden="true" width={36} height={36} className="h-9 w-9 shrink-0 rounded-full" />
         <span className="min-w-0">
           <span className="block truncate text-[15px] font-semibold leading-tight text-ink">{CLAIM.name}</span>
           <span className="block text-[11px] leading-tight text-muted">{APP_NAME}</span>
@@ -80,7 +78,17 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
       </Link>
 
       <nav className="flex-1 overflow-y-auto pb-6" aria-label="Main">
-        <SectionLabel className="px-5 pb-2 pt-5">Claim</SectionLabel>
+        {/* A plain link: the Companion's home is outside this site, so it is a full page load. */}
+        <a
+          href="/"
+          className="mt-3 flex h-9 items-center gap-2.5 border-l-2 border-transparent pl-[18px] pr-3 text-[13px] text-ink-2 no-underline transition-colors hover:bg-surface-2 hover:text-ink"
+        >
+          <span className="flex w-4 shrink-0 justify-center">
+            <ArrowLeft size={15} />
+          </span>
+          <span className="min-w-0 flex-1 truncate">Bitcraft Companion</span>
+        </a>
+        <SectionLabel className="px-5 pb-2 pt-4">Claim</SectionLabel>
         <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
           About {CLAIM.name}
         </NavItem>
