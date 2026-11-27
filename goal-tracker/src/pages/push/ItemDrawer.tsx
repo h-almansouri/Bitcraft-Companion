@@ -32,8 +32,25 @@ export function ItemDrawer({ scope, id, onClose }: { scope: PushScope; id: Ref |
         )
       }
     >
-      {id && (row ? <Detail key={id} scope={scope} row={row} /> : <Notice>This is not part of the push right now. It may already be covered further up the chain.</Notice>)}
+      {id && (row ? <Detail key={id} scope={scope} row={row} /> : <NotInPush key={id} scope={scope} id={id} />)}
     </Drawer>
+  );
+}
+
+/** Something the plan does not use right now, such as the animal that can stand in for the planned one. */
+function NotInPush({ scope, id }: { scope: PushScope; id: Ref }) {
+  const sources = scope.ctx.router.gatherSources(id);
+  return (
+    <>
+      <Notice>This is not part of the push right now. It may already be covered further up the chain.</Notice>
+      {sources.length > 0 && (
+        <Section title="How to get it">
+          <Card className="px-4 py-1.5">
+            <SourceList scope={scope} sources={sources} id={id} />
+          </Card>
+        </Section>
+      )}
+    </>
   );
 }
 

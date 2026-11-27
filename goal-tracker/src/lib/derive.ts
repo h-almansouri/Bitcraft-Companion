@@ -728,3 +728,26 @@ export function rawMaterials(products: Product[]): RawMaterial[] {
   for (const raw of found.values()) raw.ends.sort((a, b) => b.share - a.share);
   return [...found.values()].sort((a, b) => professionRank(a.step.profession) - professionRank(b.step.profession) || a.step.tier - b.step.tier || a.step.name.localeCompare(b.step.name));
 }
+
+/**
+ * Other gathered things that would do the same job as `id`: the T5 pelt comes from
+ * butchering a Plains Ox or a Dromai, three pelts either way, so whichever the plan
+ * picked, the other is a stand-in. Only recipes that take that one thing and are about
+ * as much work count. The planner already uses a stand-in that is sitting in storage.
+ */
+export function standIns(ctx: GameCtx, view: PushView, id: Ref): Ref[] {
+  const node = view.plan.nodes.get(id) ?? view.scratch.nodes.get(id);
+  const found = new Set<Ref>();
+  for (const use of node?.uses ?? []) {
+    const recipe = use.recipeId ? ctx.book.recipe(use.recipeId) : undefined;
+    if (!use.into || !recipe || recipe.inputs.length !== 1 || recipe.inputs[0].id !== id) continue;
+    const cost = ctx.router.recipeCost(recipe, use.into);
+    for (const other of ctx.router.crafts(use.into)) {
+      const input = other.inputs[0]?.id;
+      if (other === recipe || other.inputs.length !== 1 || input === id) continue;
+      if (ctx.router.choose(input) !== null || !ctx.router.gatherSources(input).some((r) => !r.loot)) continue;
+      if (ctx.router.recipeCost(other, use.into) <= cost * 1.25 + 1e-9) found.add(input);
+    }
+  }
+  return [...found];
+}

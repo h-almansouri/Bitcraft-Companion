@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { ChevronDown, PartyPopper } from 'lucide-react';
-import { BOUGHT, buildProducts, rawMaterials, type RawMaterial } from '../../lib/derive.ts';
+import { BOUGHT, buildProducts, rawMaterials, standIns, type RawMaterial } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
 import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
@@ -101,6 +101,7 @@ function RawCard({ scope, raw }: { scope: PushScope; raw: Raw }) {
   const sources = buying ? [] : [...new Set(ctx.router.gatherSources(step.id).filter((r) => !r.loot).map((r) => r.source))].slice(0, 3);
   const spots = (view.stock.where.get(step.id) ?? []).slice(0, 2).map((h) => `${num(h.qty)} in ${h.loc.kind === 'player' ? h.loc.owner + ': ' : ''}${h.loc.name}`);
   const how = buying ? (view.onOrder.has(step.id) ? 'On a claim buy order' : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}`) : sources.length ? `From ${sources.join(', ')}` : 'No farmable source in the game data';
+  const swaps = buying ? [] : standIns(ctx, view, step.id);
 
   return (
     <Card className={cx('flex min-w-0 flex-col px-3.5 py-3', done && 'opacity-80')}>
@@ -117,6 +118,24 @@ function RawCard({ scope, raw }: { scope: PushScope; raw: Raw }) {
           <div className="text-[11px] text-muted">{done ? 'in hand' : buying ? 'to buy' : 'to gather'}</div>
         </div>
       </button>
+
+      {swaps.length > 0 && (
+        <div className="mt-1 text-xs text-ink-2">
+          Or instead:{' '}
+          {swaps.map((id, i) => {
+            const held = view.stock.totals.get(id) ?? 0;
+            return (
+              <span key={id}>
+                {i > 0 && ', '}
+                <button type="button" onClick={() => openItem(id)} className="text-ink hover:underline">
+                  {ctx.book.name(id)}
+                </button>
+                {held > 0 && <span className="num text-muted"> ({num(held)} in hand)</span>}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       <Bar value={step.total ? got / step.total : 1} className="mt-2.5" />
       <div className="num mt-1 text-[11px] text-muted">
