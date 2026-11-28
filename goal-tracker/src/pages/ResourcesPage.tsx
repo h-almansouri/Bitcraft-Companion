@@ -470,17 +470,22 @@ function ClaimHouse({
   );
 }
 
-const FAQ: { q: string; a: ReactNode }[] = [
+// In pairs of about the same length, so each row of two cards comes out about even. The long one runs the full width.
+const FAQ: { q: string; a: ReactNode; wide?: boolean }[] = [
   {
     q: 'Can I take stuff from the boxes?',
     a: 'Yes! Anything in the storage boxes is free for claim members. The inventory is a shared resource, supplied by a combination of member contributions and claim purchases. Take what you need, but please be mindful of others.',
   },
+  {
+    q: 'Where do I drop stuff for a claim push?',
+    a: "Any storage box works, and the push's numbers pick it up within seconds. If it doesn't fit any of the other chests, put it in the Dropbox, which holds misc items.",
+  },
   { q: 'Do I have to restock or pay anything back?', a: "Nope. If you've got extras, dropping them in a box always helps, but nobody's keeping score." },
-  { q: 'Does anything I put in get tracked?', a: "Only in the tool house, for tool pushes. The boxes and the claim house aren't tracked." },
   {
     q: 'Where did all the [thing] go?',
     a: 'Most likely a co-owner moved it into the claim house. You can check the activity log in-game or above to confirm.',
   },
+  { q: 'Does anything I put in get tracked?', a: "Only in the tool house, for tool pushes. The boxes and the claim house aren't tracked." },
   {
     q: 'How do I get something from the claim house?',
     a: (
@@ -495,11 +500,8 @@ const FAQ: { q: string; a: ReactNode }[] = [
   },
   {
     q: 'Why not keep everything in the storage boxes?',
+    wide: true,
     a: "Keeping the majority of the claim's stockpile in the house ensures that the claim's progress stays safe, with plenty of resources still available for members to use. It also helps organize better tracking towards claim projects. While contributions and withdrawals are technically not tracked in a formal setting, we enabled audit logs above so members can keep co-owners and one another accountable for any misuse of shared claim resources.",
-  },
-  {
-    q: 'Where do I drop stuff for a claim push?',
-    a: "Any storage box works, and the push's numbers pick it up within seconds. If it doesn't fit any of the other chests, put it in the Dropbox, which holds misc items.",
   },
 ];
 
@@ -509,7 +511,7 @@ function Faq() {
       <SectionHead id="faq" eyebrow="FAQ" title="Storage chest and store house FAQs" />
       <dl className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
         {FAQ.map((item) => (
-          <Card key={item.q} className="px-5 py-4">
+          <Card key={item.q} className={cx('px-5 py-4', item.wide && 'md:col-span-2')}>
             <dt className="text-[14px] font-semibold text-ink">{item.q}</dt>
             <dd className="mt-1 text-[13px] leading-relaxed text-ink-2">{item.a}</dd>
           </Card>
