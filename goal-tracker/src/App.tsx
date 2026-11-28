@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { ArrowLeft, Boxes, ChevronRight, Compass, House, LayoutList, Menu, MessageCircle } from 'lucide-react';
+import { ArrowLeft, Boxes, ChevronRight, House, Menu, MessageCircle } from 'lucide-react';
 import { api } from './lib/api.ts';
 import { putBoard, useCachedBoard } from './lib/boards.ts';
 import { CLAIM, DISCORD_URL, HOME } from './lib/claim.ts';
@@ -15,7 +15,6 @@ import { Travelers } from './pages/Travelers.tsx';
 import { UnlockHost } from './ui/unlock.tsx';
 
 export const APP_NAME = 'Goal Tracker';
-const TRAVELERS = HOME + '/travelers';
 const PUSHES = HOME + '/pushes';
 const RESOURCES = HOME + '/resources';
 
@@ -109,16 +108,11 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
         <NavItem to={RESOURCES} active={route.page === 'resources'} icon={<Boxes size={15} />} onNavigate={onNavigate}>
           Resources
         </NavItem>
-        <NavItem to={PUSHES} active={route.page === 'pushes'} icon={<LayoutList size={15} />} onNavigate={onNavigate}>
-          All pushes
-        </NavItem>
-        <NavItem to={TRAVELERS} active={route.page === 'travelers'} icon={<Compass size={15} />} onNavigate={onNavigate}>
-          Traveler restock
-        </NavItem>
+        {/* All pushes and Traveler restock are left out of the sidebar for now. Their pages still work at their links. */}
 
         {open.length > 0 && (
           <>
-            <SectionLabel className="px-5 pb-2 pt-6">Pushes</SectionLabel>
+            <SectionLabel className="px-5 pb-2 pt-6">Active pushes</SectionLabel>
             {open.map(pushLink)}
           </>
         )}
