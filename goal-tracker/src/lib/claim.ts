@@ -26,7 +26,7 @@ export const RESERVED_SLUGS = ['travelers', 'pushes', 'api', 'assets'];
  */
 export const FREE_FOOD_CHESTS = ['Food'];
 
-/** The market Mythic tool push hand-ins are priced against: the claim's own region. */
+/** The claim's home region. Tool push hand-ins are priced across every region, not this one. */
 export const MARKET_REGION = { id: 8, name: 'Ossura' } as const;
 
 /**

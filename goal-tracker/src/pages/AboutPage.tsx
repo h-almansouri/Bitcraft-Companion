@@ -720,7 +720,7 @@ const TOOL_CARDS = [
 
 const STEPS: { title: string; body: string }[] = [
   { title: 'The claim calls a push', body: "When the claim decides it wants to work on a tool push, the goal and the materials list go up here, so you can see what's needed and how far along it is." },
-  { title: 'You hand stuff in', body: `Drop materials in the push's drop box. Each hand-in gets logged at that day's ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price.` },
+  { title: 'You hand stuff in', body: "Drop materials in the push's drop box. Each hand-in gets logged at that day's market price, averaged across every region." },
   { title: 'Contributions are tallied', body: "The fair market value of everyone's contribution gets totaled. Put in 15% of it, own 15% of what comes out." },
   { title: 'We roll', body: 'Materials become tools, and every tool rolled goes in the pot: Mythic, Legendary and Epic.' },
   { title: 'Tools are split', body: 'You take your share as tools, gold at market value, or a mix.' },
@@ -743,7 +743,7 @@ const FAQ: { q: string; a: string }[] = [
   { q: 'How little can I put in?', a: 'Any amount. Smaller hand-in, smaller share.' },
   {
     q: 'Which price counts?',
-    a: `The ${MARKET_REGION.name} (R${MARKET_REGION.id}) market price on the day you hand something in. It's locked in, so a price drop later won't shrink what you put in.`,
+    a: "The average market price across every region on the day you hand something in. It's locked in, so a price drop later won't shrink what you put in.",
   },
   { q: 'Can I take gold instead of a tool?', a: 'Yep. Tools, gold at market value, or a mix.' },
 ];
