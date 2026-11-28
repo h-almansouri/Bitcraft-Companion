@@ -144,11 +144,7 @@ export function ResourcesPage() {
   const open = (chest: Chest, item: string | null = null) => setOpened({ chest, item });
   useLandOnHash();
 
-  // Claim pushes that count the claim house, so the page can point at them.
   const claimOwner = ownerOf('claim', claim.data?.members);
-  const countedBy = (pushes ?? []).filter(
-    (p) => p.kind === 'claim-tier' && p.status !== 'done' && !!claimOwner && countedPlayers(p, claim.data?.members).includes(claimOwner.id),
-  );
 
   return (
     <div className="pb-10">
@@ -159,7 +155,7 @@ export function ResourcesPage() {
         <SectionBreak />
         <StorageBoxes chests={chests} stock={stock} ctx={ctx} onOpen={open} />
         <SectionBreak />
-        <ClaimHouse chests={chests?.claim ?? null} found={!!claimOwner || !claim.data} stock={stock} countedBy={countedBy} onOpen={open} />
+        <ClaimHouse chests={chests?.claim ?? null} found={!!claimOwner || !claim.data} stock={stock} onOpen={open} />
         <SectionBreak />
         <Faq />
         <SectionBreak />
@@ -436,13 +432,11 @@ function ClaimHouse({
   chests,
   found,
   stock,
-  countedBy,
   onOpen,
 }: {
   chests: Chest[] | null;
   found: boolean;
   stock: StockState;
-  countedBy: Push[];
   onOpen: (chest: Chest, item?: string | null) => void;
 }) {
   const house = RESOURCE_HOUSES.claim;
@@ -451,7 +445,7 @@ function ClaimHouse({
       <SectionHead
         id="claim-house"
         eyebrow="Claim house"
-        title="The claim's stockpile"
+        title="Resources for claim projects"
         extra={
           <Pill tone="warn">
             <Lock size={10} /> Co-owners only
@@ -471,29 +465,21 @@ function ClaimHouse({
           and they'll pull it out for you.
         </p>
       </SectionHead>
-      {countedBy.length > 0 && (
-        <p className="-mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-2">
-          <span className="font-semibold text-ink">Counted by:</span>
-          {countedBy.map((p) => (
-            <Link key={p.slug} to={`${HOME}/${p.slug}`} className="inline-flex items-center gap-1 font-medium text-accent-ink no-underline hover:underline">
-              {p.name}
-              <ArrowRight size={13} />
-            </Link>
-          ))}
-        </p>
-      )}
       <HouseChests kind="claim" chests={chests} found={found} stock={stock} onOpen={onOpen} />
     </Section>
   );
 }
 
 const FAQ: { q: string; a: ReactNode }[] = [
-  { q: 'Can I take stuff from the boxes?', a: "Yep. Anything in the storage boxes is free for claim members, food included. Take what you need, just remember it's shared." },
+  {
+    q: 'Can I take stuff from the boxes?',
+    a: 'Yes! Anything in the storage boxes is free for claim members. The inventory is a shared resource, supplied by a combination of member contributions and claim purchases. Take what you need, but please be mindful of others.',
+  },
   { q: 'Do I have to restock or pay anything back?', a: "Nope. If you've got extras, dropping them in a box always helps, but nobody's keeping score." },
   { q: 'Does anything I put in get tracked?', a: "Only in the tool house, for tool pushes. The boxes and the claim house aren't tracked." },
   {
     q: 'Where did all the [thing] go?',
-    a: 'Most likely a co-owner moved it into the claim house. Open the box above and check its recent activity: every deposit and withdrawal shows who did it and when.',
+    a: 'Most likely a co-owner moved it into the claim house. You can check the activity log in-game or above to confirm.',
   },
   {
     q: 'How do I get something from the claim house?',
@@ -508,16 +494,12 @@ const FAQ: { q: string; a: ReactNode }[] = [
     ),
   },
   {
-    q: 'Why not keep everything in the boxes?',
-    a: "One slip, or one bad actor, could empty a box. Keeping the boxes light and the stockpile in the house keeps everyone's progress safe, with plenty still around to use.",
+    q: 'Why not keep everything in the storage boxes?',
+    a: "Keeping the majority of the claim's stockpile in the house ensures that the claim's progress stays safe, with plenty of resources still available for members to use. It also helps organize better tracking towards claim projects. While contributions and withdrawals are technically not tracked in a formal setting, we enabled audit logs above so members can keep co-owners and one another accountable for any misuse of shared claim resources.",
   },
   {
     q: 'Where do I drop stuff for a claim push?',
     a: "Any storage box works, and the push's numbers pick it up within seconds. If it doesn't fit any of the other chests, put it in the Dropbox, which holds misc items.",
-  },
-  {
-    q: 'How up to date is this?',
-    a: "It's live. What's in each box comes straight from the game, and the page updates by itself every 15 seconds while it's open. A box's deposits and withdrawals are read fresh each time you open it.",
   },
 ];
 
