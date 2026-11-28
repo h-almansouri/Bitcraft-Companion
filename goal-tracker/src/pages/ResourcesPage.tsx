@@ -521,16 +521,16 @@ function Faq() {
   );
 }
 
-const ACCESS: { title: string; body: string }[] = [
-  { title: 'Sign up for the push', body: "Tell a co-owner you're in, and they'll give you access to the house." },
-  { title: 'No push, no access', body: "If you're not in the push, you can't get in. That way nothing leaves the house without counting against someone." },
-  { title: 'Heading out?', body: "Let a co-owner know. If you've taken out more than you've put in, square that up first." },
-];
-
 const STEPS: { title: string; body: string }[] = [
   { title: 'Put something in', body: "It's credited at that day's market price, averaged across every region." },
-  { title: 'Take something out', body: "It counts against you at that day's price. Taking out your own stuff just cancels it, so moving things in and out never earns anything." },
-  { title: 'Process it for credit', body: "Take out raw pelts and put back leather, and you're credited the difference. That's your processing." },
+  {
+    title: 'Take something out',
+    body: "It counts against you at that day's price. Wash sales are excluded, so taking your previous contributions out and re-depositing at another market value will still net zero. You will not be allowed to arbitrage off your previous or other members' contributions.",
+  },
+  {
+    title: 'Credit for processing',
+    body: "Take out raw materials (i.e. raw pelts), process to completion and re-deposit (i.e. leather), and you're credited the difference for processing.",
+  },
   { title: 'Only push materials count', body: "Anything that goes into the tools counts, raw materials included. Anything the push doesn't need earns nothing." },
   { title: 'Split the rolls', body: 'Rolled tools go back in the house so they\'re on record. Your share is your total out of everyone\'s, as tools, gold or a mix.' },
 ];
@@ -584,7 +584,7 @@ function ToolHouse({ chests, found, stock, onOpen }: { chests: Chest[] | null; f
   const house = RESOURCE_HOUSES.tools;
   return (
     <Section id="tool-house" className="space-y-10">
-      <SectionHead id="tool-house" eyebrow="Tool house" title={`${house.name}: just for tool pushes`} extra={<Pill tone="info">Tool push members only</Pill>}>
+      <SectionHead id="tool-house" eyebrow="Tool house" title="Resources for tool pushes" extra={<Pill tone="info">Tool push members only</Pill>}>
         <p>
           This part only matters if you're in a tool push, so if you're not, feel free to skip it. {house.name} holds everything for the push, and it's the one place on the claim
           where what you put in and take out is tracked, so everyone gets a fair cut of what's rolled.
@@ -599,33 +599,25 @@ function ToolHouse({ chests, found, stock, onOpen }: { chests: Chest[] | null; f
       </SectionHead>
 
       <div>
-        <SubHead title="Who gets in" />
-        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-          {ACCESS.map((a) => (
-            <Card key={a.title} className="px-5 py-4">
-              <h4 className={cx('text-[16px]', titleFont)}>{a.title}</h4>
-              <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{a.body}</p>
-            </Card>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <SubHead title="How your share is counted" />
-        <ol className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {STEPS.map((step, i) => (
-            <li key={step.title}>
-              <Card className="h-full px-4 py-4">
-                <span className="num flex h-7 w-7 items-center justify-center rounded-full border border-accent text-[13px] font-semibold text-accent-ink">{i + 1}</span>
-                <h4 className={cx('mt-3 text-[16px]', titleFont)}>{step.title}</h4>
-                <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{step.body}</p>
-              </Card>
-            </li>
-          ))}
-        </ol>
+        <SubHead title="Contribution tracking" />
+        {/* One step per row, so a long explanation never leaves its neighbours half empty. */}
+        <Card className="mt-4">
+          <ol className="divide-y divide-line">
+            {STEPS.map((step, i) => (
+              <li key={step.title} className="flex items-start gap-4 px-5 py-4">
+                <span className="num flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-accent text-[13px] font-semibold text-accent-ink">{i + 1}</span>
+                <div className="min-w-0 flex-1 sm:grid sm:grid-cols-[13rem_1fr] sm:gap-6">
+                  <h4 className={cx('pt-0.5 text-[16px]', titleFont)}>{step.title}</h4>
+                  <p className="mt-1 text-[13px] leading-relaxed text-ink-2 sm:mt-0 sm:pt-1">{step.body}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </Card>
         <p className="mt-3 rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
-          <span className="font-semibold text-ink">The claim chips in too.</span> It can stock shared inputs, like tannin, so you don't have to make them, and anything moved
-          over from the boxes or the claim house counts for the claim rather than whoever carried it. When the claim comes out ahead, everyone does.
+          <span className="font-semibold text-ink">The claim chips in too.</span> It can stock shared inputs (ex. tannin), so participants who specialize in certain professions
+          (ex. hunting &amp; leatherworking) don't have to make them. Anything moved over from the storage boxes or the claim house counts as credit for the claim. This means that
+          members who use items from the storage chests to process resources deposited to the tool push will not receive full credit.
         </p>
       </div>
 
