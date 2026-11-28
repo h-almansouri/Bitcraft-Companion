@@ -44,6 +44,8 @@ export const ROSTER: readonly { main: string; alts?: readonly string[] }[] = [
   { main: 'Silentstorm' },
 ];
 const MAIN_OF = new Map(ROSTER.flatMap((p) => (p.alts ?? []).map((alt) => [alt.toLowerCase(), p.main] as const)));
+/** Alt (lower case) → main, for code written before ROSTER. Prefer mainOf/isAlt. */
+export const ALTS: Record<string, string> = Object.fromEntries(MAIN_OF);
 /** The person a character belongs to, by in-game name (any case). */
 export const mainOf = (name: string) => MAIN_OF.get(name.toLowerCase()) ?? name;
 export const isAlt = (name: string) => MAIN_OF.has(name.toLowerCase());
