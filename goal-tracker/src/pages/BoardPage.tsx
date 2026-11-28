@@ -16,7 +16,7 @@ import { NewPush } from './NewPush.tsx';
 
 export const KIND_LABEL: Record<PushKind, string> = { 'claim-tier': 'Claim tier', 'tool-push': 'Tool push', traveler: 'Traveler tasks', custom: 'Custom' };
 
-/** "5 players", "4 alts": alts (see ALTS) are counted apart so the claim isn't oversold. */
+/** "5 players", "4 alts": alts (see ROSTER) are counted apart so the claim isn't oversold. */
 function headCount(members: ClaimDetail['members']): string[] {
   const { players, alts } = playersAndAlts(members);
   return [`${players.length} ${plural(players.length, 'player')}`, alts.length ? `${alts.length} ${plural(alts.length, 'alt')}` : ''];

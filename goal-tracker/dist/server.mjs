@@ -3977,6 +3977,22 @@ var RESERVED_SLUGS = [
 	"api",
 	"assets"
 ];
+new Map([
+	{
+		main: "Velcruza",
+		alts: ["Vel", "Cynth"]
+	},
+	{
+		main: "chels",
+		alts: ["pumapance"]
+	},
+	{
+		main: "skyediver",
+		alts: ["whitelinx"]
+	},
+	{ main: "Frostyy" },
+	{ main: "Silentstorm" }
+].flatMap((p) => (p.alts ?? []).map((alt) => [alt.toLowerCase(), p.main])));
 // server/app.ts
 /**
 * The site's API, written once for every place it can be hosted.

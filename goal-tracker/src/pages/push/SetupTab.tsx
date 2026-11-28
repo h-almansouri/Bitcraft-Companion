@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api.ts';
+import { isAlt, mainOf } from '../../lib/claim.ts';
 import { countedPlayers, pickRoute } from '../../lib/derive.ts';
 import { navigate } from '../../lib/router.tsx';
 import type { ClaimMember, Push, PushKind, PushStatus } from '../../lib/shapes.ts';
@@ -158,6 +159,7 @@ export function SetupTab({ scope }: { scope: PushScope }) {
                     onChange={(e) => leave(e.target.checked ? leftOut.filter((p) => p !== m.id) : [...leftOut, m.id])}
                   />
                   {m.name}
+                  {isAlt(m.name) && <span className="text-xs text-muted">{mainOf(m.name)}'s alt</span>}
                 </label>
               ))}
             </Card>

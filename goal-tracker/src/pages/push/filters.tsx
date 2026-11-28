@@ -93,7 +93,7 @@ export function useFilterBar(scope: PushScope, config: FilterConfig) {
   const members = config.people ? assigneesOf(scope) : [];
   const tiers = [...(config.tiers ?? [])].sort((a, b) => (a.tier || 99) - (b.tier || 99));
   const roles = [...(config.roles ?? [])].sort((a, b) => professionRank(a.id) - professionRank(b.id));
-  const people: Option[] = config.people ? [...members.map((m) => ({ id: m.id, label: m.name, count: config.people!(m.id) })), { id: UNASSIGNED, label: 'Nobody yet', count: config.people(UNASSIGNED) }] : [];
+  const people: Option[] = config.people ? [...members.map((m) => ({ id: m.id, label: m.label, count: config.people!(m.id) })), { id: UNASSIGNED, label: 'Nobody yet', count: config.people(UNASSIGNED) }] : [];
 
   // A choice made on another tab only applies here if this tab has it; otherwise it would hide everything for no visible reason.
   const only = (chosen: string[], offered: { id: string }[] | undefined) => (offered ? chosen.filter((c) => offered.some((o) => o.id === c)) : []);

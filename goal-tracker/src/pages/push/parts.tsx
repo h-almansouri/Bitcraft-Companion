@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { isAlt } from '../../lib/claim.ts';
+import { isAlt, withAlts } from '../../lib/claim.ts';
 import { ArrowRight, Hammer, Hand, Hourglass, UserPlus } from 'lucide-react';
 import { flowOf, type FlowBranch, type PushView, type Row } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
@@ -126,16 +126,17 @@ export function StationLines({ jobs, className }: { jobs: CraftJob[]; className?
 
 /**
  * Everyone a job can be handed to: claim members in name order, then the claim's own buy order.
- * Alts are left out (see ALTS), unless one already has a job on this push, so nothing goes missing.
+ * Alts are left out (see ROSTER), unless one already has a job on this push, so nothing goes missing.
+ * `label` is how pickers show them: a main with their alts, "Velcruza (+ Vel, Cynth)".
  */
-export const assigneesOf = (scope: PushScope): { id: string; name: string }[] => {
+export const assigneesOf = (scope: PushScope): { id: string; name: string; label: string }[] => {
   const assigned = new Set(Object.values(scope.push.assignments ?? {}).flat());
   return [
     ...[...(scope.claim?.members ?? [])]
       .filter((m) => !isAlt(m.name) || assigned.has(m.id))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((m) => ({ id: m.id, name: m.name })),
-    { id: BUY_ORDER, name: BUY_ORDER_NAME },
+      .map((m) => ({ id: m.id, name: m.name, label: isAlt(m.name) ? m.name : withAlts(m.name) })),
+    { id: BUY_ORDER, name: BUY_ORDER_NAME, label: BUY_ORDER_NAME },
   ];
 };
 
@@ -160,7 +161,7 @@ export function AssignControl({ scope, id }: { scope: PushScope; id: Ref }) {
       icon={<UserPlus size={13} />}
       value={value.filter((v) => members.some((m) => m.id === v))}
       onChange={onChange}
-      options={members.map((m) => ({ id: m.id, label: m.name }))}
+      options={members.map((m) => ({ id: m.id, label: m.label }))}
     />
   );
 }

@@ -30,12 +30,30 @@ export const FREE_FOOD_CHESTS = ['Food'];
 export const MARKET_REGION = { id: 8, name: 'Ossura' } as const;
 
 /**
- * Alts, by in-game name (any case), and whose they are. Alts still count wherever storage
- * is counted; they are only left out of people pickers and of the player count.
- * A longer-term way to group characters under one person can replace this list.
+ * Who's who: each person in the claim, their alts, and who gets the credit. This is the one
+ * list to keep up to date when someone adds or swaps a character. Alts still count wherever
+ * storage is counted. People pickers ("Who's on it", the person filter) offer the main only,
+ * written "Velcruza (+ Vel, Cynth)"; head counts count people; and anything an alt hands in
+ * to a tool push counts for the main. Anyone not listed is their own main.
  */
-export const ALTS: Record<string, string> = { pumapance: 'chels', vel: 'Velcruza', cynth: 'Velcruza', whitelinx: 'skyediver' };
-export const isAlt = (name: string) => Object.prototype.hasOwnProperty.call(ALTS, name.toLowerCase());
+export const ROSTER: readonly { main: string; alts?: readonly string[] }[] = [
+  { main: 'Velcruza', alts: ['Vel', 'Cynth'] },
+  { main: 'chels', alts: ['pumapance'] },
+  { main: 'skyediver', alts: ['whitelinx'] },
+  { main: 'Frostyy' },
+  { main: 'Silentstorm' },
+];
+const MAIN_OF = new Map(ROSTER.flatMap((p) => (p.alts ?? []).map((alt) => [alt.toLowerCase(), p.main] as const)));
+/** The person a character belongs to, by in-game name (any case). */
+export const mainOf = (name: string) => MAIN_OF.get(name.toLowerCase()) ?? name;
+export const isAlt = (name: string) => MAIN_OF.has(name.toLowerCase());
+/** A main's alts, by in-game name. */
+export const altsOf = (name: string): readonly string[] => ROSTER.find((p) => p.main.toLowerCase() === name.toLowerCase())?.alts ?? [];
+/** "Velcruza (+ Vel, Cynth)": a person and their alts, for people pickers. */
+export function withAlts(name: string) {
+  const alts = altsOf(name);
+  return alts.length ? `${name} (+ ${alts.join(', ')})` : name;
+}
 /** Members split into people and their alts, for head counts. */
 export function playersAndAlts<T extends { name: string }>(members: readonly T[]) {
   return { players: members.filter((m) => !isAlt(m.name)), alts: members.filter((m) => isAlt(m.name)) };
