@@ -53,6 +53,8 @@ export const BOARD_KEY = 'board:' + CLAIM.id;
 
 const ID = /^\d{1,24}$/;
 const REF = /^[icb]\.\d{1,12}$/;
+/** A resource node (r88) or creature (e12), as the board keeps notes on them. */
+const NODE = /^[re]\d{1,12}$/;
 
 export const slugify = (text: string) =>
   text
@@ -236,6 +238,29 @@ export function createApp<E extends Env = Env>(hostOf: (c: Context<E, any, any>)
     if (notOurs(c.req.param('slug'))) return c.json(NO_BOARD, 404);
     const board = await loadBoard(hostOf(c).store);
     return (await mayEdit(board, c.req.header('x-edit-key'))) ? c.json({ ok: true }) : c.json({ error: 'That password does not match.' }, 403);
+  });
+
+  /** Notes where a resource grows or a creature roams, for every push on the board. Empty text takes the note away. */
+  api.put('/boards/:slug/grows/:node', async (c) => {
+    if (notOurs(c.req.param('slug'))) return c.json(NO_BOARD, 404);
+    const node = c.req.param('node');
+    if (!NODE.test(node)) return c.json({ error: "That isn't something you can gather from." }, 400);
+    const host = hostOf(c);
+    const board = await loadBoard(host.store);
+    if (!(await mayEdit(board, c.req.header('x-edit-key')))) return c.json(LOCKED, 403);
+    const body = await c.req.json<{ text?: unknown }>().catch(() => null);
+    const text = String(body?.text ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
+    const grows = { ...(board.grows ?? {}) };
+    if (text) {
+      if (!(node in grows) && Object.keys(grows).length >= 3000) return c.json({ error: 'The board has too many of these notes.' }, 400);
+      grows[node] = text;
+    } else delete grows[node];
+    board.grows = Object.keys(grows).length ? grows : undefined;
+    await saveBoard(host.store, board);
+    return c.json(publicBoard(board, host));
   });
 
   // Anything else under the API is a wrong address, never the site's own page.

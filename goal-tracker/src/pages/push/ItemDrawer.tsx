@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from 'react';
-import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, CornerDownRight, MapPin } from 'lucide-react';
 import { yieldOf } from '../../engine/book.ts';
-import type { Recipe, Ref } from '../../engine/types.ts';
+import type { GatherNode, Recipe, Ref } from '../../engine/types.ts';
+import { BIOMES, nodeKey, placesIn, togglePlace } from '../../lib/biomes.ts';
 import { flowOf, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
 import { costText, tradesFor } from '../../lib/price.ts';
-import { Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
+import { Button, Card, Drawer, Notice, Pill, TierChip, cx, inputBase } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { AssignControl, BranchList, SplitBar, branchText, jobState, stationOf } from './parts.tsx';
 
@@ -372,7 +373,6 @@ function SourceRow({ scope, source, id }: { scope: PushScope; source: Recipe; id
   const creature = node?.kind === 'creature';
   const rate = yieldOf(source, id);
   const others = source.outputs.filter((o) => o.id !== id);
-  const mapUrl = node ? `https://bitcraftmap.com/?${creature ? 'enemyId' : 'resourceId'}=${node.id}` : null;
   const needs = [source.skill && `${source.skill}${source.level ? ' level ' + source.level : ''}`, node?.toolTier && `a tier ${node.toolTier} tool`].filter(Boolean);
   const unit = creature ? 'animal' : 'swing';
 
@@ -385,16 +385,7 @@ function SourceRow({ scope, source, id }: { scope: PushScope; source: Recipe; id
         {source.loot ? <span className="shrink-0 text-xs text-muted">one-off find</span> : <span className="shrink-0 text-xs text-ink-2">{[source.skill, source.level && `level ${source.level}`].filter(Boolean).join(' ')}</span>}
       </summary>
       <div className="mb-3 ml-[6px] space-y-2 border-l border-line pl-4 text-xs text-ink-2">
-        {mapUrl && (
-          <div>
-            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-medium text-accent-ink hover:underline">
-              <MapPin size={13} />
-              See which regions have {source.source}
-              <ExternalLink size={11} />
-            </a>
-            <div className="mt-0.5 text-muted">Opens BitCraft Map with every {creature ? 'herd' : 'node'} marked across all nine regions.</div>
-          </div>
-        )}
+        {node && <GrowsIn scope={scope} node={node} creature={creature} />}
         {needs.length > 0 && (
           <div>
             <span className="text-muted">Needs </span>
@@ -420,5 +411,102 @@ function SourceRow({ scope, source, id }: { scope: PushScope; source: Recipe; id
         {source.loot && <div className="text-muted">Not something you can farm on purpose: it only turns up in ruins, dungeons or events.</div>}
       </div>
     </details>
+  );
+}
+
+/**
+ * Where a resource grows (or a creature roams). The game doesn't say, so it is a note kept on
+ * the board: one note per node, shown on every push that gathers from it. The biome names are
+ * one-tap picks so they come out spelled the same; anything else can be typed too.
+ */
+function GrowsIn({ scope, node, creature }: { scope: PushScope; node: GatherNode; creature: boolean }) {
+  const key = nodeKey(node);
+  const note = scope.board.grows?.[key] ?? '';
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const label = creature ? 'Found in' : 'Grows in';
+
+  const finish = async (text: string) => {
+    setBusy(true);
+    try {
+      await scope.noteGrows(key, text);
+      setDraft(null);
+    } catch {
+      /* the page shows why; the draft stays so nothing typed is lost */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (draft === null) {
+    return (
+      <div className="flex items-start gap-1.5">
+        <MapPin size={13} className="mt-px shrink-0 text-accent-ink" />
+        <div className="min-w-0">
+          <span className="text-muted">{label} </span>
+          {note ? <span className="text-ink">{note}</span> : <span className="text-muted italic">not noted yet</span>}
+          <button type="button" onClick={() => setDraft(note)} className="ml-2 font-medium text-accent-ink hover:underline">
+            {note ? 'Edit' : 'Add'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const picked = new Set(placesIn(draft).map((p) => p.toLowerCase()));
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!busy) void finish(draft);
+      }}
+      className="space-y-2"
+    >
+      <div className="flex items-center gap-1.5 text-muted">
+        <MapPin size={13} className="text-accent-ink" />
+        {label}
+      </div>
+      <input
+        autoFocus
+        value={draft}
+        maxLength={200}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          // Escape closes just this, not the whole panel.
+          if (e.key === 'Escape') {
+            e.stopPropagation();
+            setDraft(null);
+          }
+        }}
+        placeholder="Pick below or type, e.g. Calm Forest, Misty Tundra"
+        aria-label={`Where ${creature ? 'it is found' : 'it grows'}`}
+        className={cx('h-8 w-full', inputBase)}
+      />
+      <div className="flex flex-wrap gap-1">
+        {BIOMES.map((biome) => {
+          const on = picked.has(biome.toLowerCase());
+          return (
+            <button
+              key={biome}
+              type="button"
+              aria-pressed={on}
+              onClick={() => setDraft(togglePlace(draft, biome))}
+              className={cx('rounded-full border px-2 py-0.5 text-[11px] transition-colors', on ? 'border-accent bg-accent-dim text-accent-ink' : 'border-line text-ink-2 hover:border-line-2 hover:text-ink')}
+            >
+              {biome}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="submit" size="sm" variant="primary" disabled={busy || draft.trim() === note}>
+          Save
+        </Button>
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setDraft(null)}>
+          Cancel
+        </Button>
+        <span className="text-muted">Shows on every push, for everyone.</span>
+      </div>
+    </form>
   );
 }

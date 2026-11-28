@@ -120,10 +120,28 @@ describe('the API on a plain Node host', () => {
     await call('DELETE', '/boards/nowhere/pushes/new-style');
   });
 
+  it('keeps notes on where things grow for the whole board, and takes them away when emptied', async () => {
+    const noted = await call('PUT', '/boards/nowhere/grows/r88', { text: '  Calm Forest,   Misty Tundra ' });
+    expect(noted.status).toBe(200);
+    expect(noted.data.grows).toEqual({ r88: 'Calm Forest, Misty Tundra' });
+    expect(noted.data.pushes).toHaveLength(1); // the pushes are untouched
+    await call('PUT', '/boards/nowhere/grows/e12', { text: 'Breezy Grasslands' });
+    expect((await call('GET', '/boards/nowhere')).data.grows).toEqual({ r88: 'Calm Forest, Misty Tundra', e12: 'Breezy Grasslands' });
+
+    expect((await call('PUT', '/boards/nowhere/grows/i.88', { text: 'x' })).status).toBe(400);
+    expect((await call('PUT', '/boards/nowhere/grows/r88', { text: 'y'.repeat(500) })).data.grows.r88).toHaveLength(200);
+
+    await call('PUT', '/boards/nowhere/grows/e12', { text: '' });
+    const cleared = await call('PUT', '/boards/nowhere/grows/r88', { text: '   ' });
+    expect(cleared.data.grows).toBeUndefined();
+  });
+
   it('refuses changes without the password once one is set, and never hands the password back', async () => {
     expect((await call('POST', '/boards/nowhere/lock', { key: 'test-only-value' })).data.locked).toBe(true);
     expect((await call('PUT', '/boards/nowhere/pushes/claim-t5-push', { ...push, name: 'Renamed' })).status).toBe(403);
     expect((await call('DELETE', '/boards/nowhere/pushes/claim-t5-push')).status).toBe(403);
+    expect((await call('PUT', '/boards/nowhere/grows/r88', { text: 'Swamp' })).status).toBe(403);
+    expect((await call('PUT', '/boards/nowhere/grows/r88', { text: 'Swamp' }, 'test-only-value')).data.grows).toEqual({ r88: 'Swamp' });
     expect((await call('POST', '/boards/nowhere/unlock', undefined, 'wrong')).status).toBe(403);
     expect((await call('POST', '/boards/nowhere/unlock', undefined, 'test-only-value')).status).toBe(200);
     expect((await call('PUT', '/boards/nowhere/pushes/claim-t5-push', { ...push, name: 'Renamed' }, 'test-only-value')).data.push.name).toBe('Renamed');

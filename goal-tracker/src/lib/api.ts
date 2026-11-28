@@ -64,6 +64,8 @@ export const api = {
   savePush: (slug: string, push: Partial<Push> & { name: string }, pushSlug = 'new') =>
     call<{ board: Board; push: Push }>(`/boards/${slug}/pushes/${pushSlug}`, { method: 'PUT', body: JSON.stringify(push), slug }),
   deletePush: (slug: string, pushSlug: string) => call<Board>(`/boards/${slug}/pushes/${pushSlug}`, { method: 'DELETE', slug }),
+  /** Notes where a resource grows (node key from nodeKey). Empty text takes the note away. */
+  setGrows: (slug: string, node: string, text: string) => call<Board>(`/boards/${slug}/grows/${node}`, { method: 'PUT', body: JSON.stringify({ text }), slug }),
   setLock: (slug: string, key: string) => call<Board>(`/boards/${slug}/lock`, { method: 'POST', body: JSON.stringify({ key }), slug }),
   /** Asks whether a password is right: the one remembered here, or `key` to try one out without remembering it. */
   unlock: (slug: string, key?: string) => call<{ ok: true }>(`/boards/${slug}/unlock`, { method: 'POST', slug, key }),

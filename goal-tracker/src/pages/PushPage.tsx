@@ -32,6 +32,8 @@ export interface PushScope {
   save: (patch: Partial<Push>) => Promise<void>;
   /** Set who has taken on a material. An empty list clears it. */
   assign: (id: Ref, people: string[]) => Promise<void>;
+  /** Note where a resource grows, for every push on the board (node key from nodeKey). Empty text clears it. */
+  noteGrows: (node: string, text: string) => Promise<void>;
   openItem: (id: Ref) => void;
 }
 
@@ -82,27 +84,40 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const latest = useRef<Push | null>(push);
   latest.current = push;
   const queue = useRef<Promise<void>>(Promise.resolve());
+  /** Runs one save after whatever is already being sent, and shows its error if it fails. */
+  const enqueue = useCallback((send: () => Promise<void>) => {
+    const job = queue.current
+      .catch(() => {})
+      .then(async () => {
+        setSaveError(null);
+        try {
+          await send();
+        } catch (err) {
+          setSaveError((err as Error).message);
+          throw err;
+        }
+      });
+    queue.current = job;
+    return job;
+  }, []);
   const change = useCallback(
-    (build: (current: Push) => Partial<Push>) => {
-      const job = queue.current
-        .catch(() => {})
-        .then(async () => {
-          const current = latest.current;
-          if (!current) return;
-          setSaveError(null);
-          try {
-            const saved = await guarded(slug, () => api.savePush(slug, { ...current, ...build(current) }, current.slug));
-            latest.current = saved.push;
-            setBoard(saved.board);
-          } catch (err) {
-            setSaveError((err as Error).message);
-            throw err;
-          }
-        });
-      queue.current = job;
-      return job;
-    },
-    [slug, setBoard],
+    (build: (current: Push) => Partial<Push>) =>
+      enqueue(async () => {
+        const current = latest.current;
+        if (!current) return;
+        const saved = await guarded(slug, () => api.savePush(slug, { ...current, ...build(current) }, current.slug));
+        latest.current = saved.push;
+        setBoard(saved.board);
+      }),
+    [slug, setBoard, enqueue],
+  );
+  // In the same line as push saves, so the board each one sends back never undoes the other.
+  const noteGrows = useCallback(
+    (node: string, text: string) =>
+      enqueue(async () => {
+        setBoard(await guarded(slug, () => api.setGrows(slug, node, text)));
+      }),
+    [slug, setBoard, enqueue],
   );
   const save = useCallback((patch: Partial<Push>) => change(() => patch), [change]);
   const assign = useCallback(
@@ -142,7 +157,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   }
   if (!ctx || !view) return <Notice tone="bad">{gameError ?? 'Could not load the game data.'}</Notice>;
 
-  const scope: PushScope = { ctx, board: board.data, push, claim: claim.data, snapshot: stock.data, view, save, assign, openItem };
+  const scope: PushScope = { ctx, board: board.data, push, claim: claim.data, snapshot: stock.data, view, save, assign, noteGrows, openItem };
   const waitingOnStock = !finished && (membersPending || (stock.loading && !stock.data));
   // A finished push shows what it made (and Setup, from the address).
   const shownTab: TabId = finished && tab !== 'setup' ? 'gather' : tab;

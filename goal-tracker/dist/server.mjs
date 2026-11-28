@@ -4164,6 +4164,8 @@ async function readActivity(host, chest, owner) {
 var BOARD_KEY = "board:" + CLAIM.id;
 var ID = /^\d{1,24}$/;
 var REF = /^[icb]\.\d{1,12}$/;
+/** A resource node (r88) or creature (e12), as the board keeps notes on them. */
+var NODE = /^[re]\d{1,12}$/;
 var slugify = (text) => text.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
 async function sha256(text) {
 	const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -4334,6 +4336,25 @@ function createApp(hostOf) {
 	api.post("/boards/:slug/unlock", async (c) => {
 		if (notOurs(c.req.param("slug"))) return c.json(NO_BOARD, 404);
 		return await mayEdit(await loadBoard(hostOf(c).store), c.req.header("x-edit-key")) ? c.json({ ok: true }) : c.json({ error: "That password does not match." }, 403);
+	});
+	/** Notes where a resource grows or a creature roams, for every push on the board. Empty text takes the note away. */
+	api.put("/boards/:slug/grows/:node", async (c) => {
+		if (notOurs(c.req.param("slug"))) return c.json(NO_BOARD, 404);
+		const node = c.req.param("node");
+		if (!NODE.test(node)) return c.json({ error: "That isn't something you can gather from." }, 400);
+		const host = hostOf(c);
+		const board = await loadBoard(host.store);
+		if (!await mayEdit(board, c.req.header("x-edit-key"))) return c.json(LOCKED, 403);
+		const body = await c.req.json().catch(() => null);
+		const text = String(body?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+		const grows = { ...board.grows ?? {} };
+		if (text) {
+			if (!(node in grows) && Object.keys(grows).length >= 3e3) return c.json({ error: "The board has too many of these notes." }, 400);
+			grows[node] = text;
+		} else delete grows[node];
+		board.grows = Object.keys(grows).length ? grows : void 0;
+		await saveBoard(host.store, board);
+		return c.json(publicBoard(board, host));
 	});
 	api.all("/*", (c) => c.json({ error: "Not found." }, 404));
 	app.onError((err, c) => {

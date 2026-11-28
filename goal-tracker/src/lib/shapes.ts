@@ -144,4 +144,10 @@ export interface Board {
   /** True when the server has nowhere lasting to keep pushes, so they vanish when it restarts. */
   temporary?: boolean;
   pushes: Push[];
+  /**
+   * Where things grow, as players have noted it ("Calm Forest, Misty Tundra"). The game does
+   * not say, so it is typed in. Keyed by resource node or creature (r88, e12; see nodeKey), so
+   * one note shows on every push that gathers from it.
+   */
+  grows?: Record<string, string>;
 }
