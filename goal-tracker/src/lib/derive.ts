@@ -160,6 +160,8 @@ export interface StageProgress {
 function professionOf(node: PlanNode, recipe: Recipe | undefined, ctx: GameCtx): string {
   if (recipe?.skill) return recipe.skill;
   if (recipe?.kind === 'build') return 'Construction';
+  // Replantable seeds are grown on a farm, not gathered or crafted.
+  if (!recipe && ctx.router.farming(node.id)) return 'Farming';
   if (ctx.game.sold[node.id] && !ctx.router.gatherSources(node.id).some((r) => !r.loot)) return 'Trade';
   const sources = ctx.router.gatherSources(node.id);
   return sources.find((r) => r.skill)?.skill ?? (ctx.game.sold[node.id] ? 'Trade' : 'Other');

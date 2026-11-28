@@ -21,6 +21,18 @@ const BUY_COST = 40;
  */
 const UNKNOWN_COST = 1e7;
 
+/** How a replantable seed keeps itself going: grow it into `plant`, which gives `perPlant` back. */
+export interface Farming {
+  /** The plant it is grown back from. */
+  plant: Ref;
+  /** Seeds one plant gives back. */
+  perPlant: number;
+  /** The recipe that turns a plant back into seeds. */
+  harvest: Recipe;
+  /** The recipe that grows the plant from the seed (with fertilizer, water...). */
+  grow: Recipe;
+}
+
 export interface RouterOptions {
   /** Recipes never to pick automatically. */
   excluded?: Iterable<string>;
@@ -31,6 +43,7 @@ export interface RouterOptions {
 export class Router {
   private readonly cost = new Map<Ref, number>();
   private readonly ranked = new Map<Ref, Recipe[]>();
+  private readonly farms = new Map<Ref, Farming | null>();
   private readonly excluded: Set<string>;
   private readonly sold: Record<Ref, string>;
   private readonly book: RecipeBook;
@@ -87,11 +100,38 @@ export class Router {
   }
 
   /**
+   * Seeds that multiply when replanted: grow one into a plant and the plant gives several
+   * back (one Wispweave Seed becomes a plant that gives 3 seeds). That loop is how players
+   * keep a farm going, but a planner can't follow a loop, so it used to "upgrade" five
+   * lower-tier seeds into each one instead, five-fold again for every tier below (a T6 push
+   * asked for 267,825 Basic seeds). These are planned as farmed instead, like gathering.
+   */
+  farming(id: Ref): Farming | null {
+    if (this.farms.has(id)) return this.farms.get(id)!;
+    let best: Farming | null = null;
+    for (const harvest of this.book.producers(id)) {
+      if (harvest.kind !== 'craft' || harvest.inputs.length !== 1) continue;
+      const plant = harvest.inputs[0];
+      const perPlant = yieldOf(harvest, id) / plant.qty;
+      if (perPlant <= 1 || (best && perPlant <= best.perPlant)) continue;
+      // ...and that plant has to be grown from this seed, using fewer seeds than it gives back.
+      const grow = this.book
+        .producers(plant.id)
+        .find((r) => r.kind === 'craft' && r.inputs.some((i) => i.id === id && i.qty < perPlant * yieldOf(r, plant.id)));
+      if (grow) best = { plant: plant.id, perPlant, harvest, grow };
+    }
+    this.farms.set(id, best);
+    return best;
+  }
+
+  /**
    * The recipe to plan with, or null when the thing should simply be gathered or bought.
    * `blocked` holds things already being made further up the chain; a recipe that needs
    * one of them would be a loop (seeds -> plant -> seeds), so it is skipped.
    */
   choose(id: Ref, blocked?: ReadonlySet<Ref>): Recipe | null {
+    // Replantable seeds are farmed, never crafted from lower tiers (see farming()).
+    if (this.farming(id)) return null;
     const gatherCost = this.bestGatherCost(id);
     for (const recipe of this.crafts(id)) {
       if (blocked && recipe.inputs.some((i) => blocked.has(i.id))) continue;

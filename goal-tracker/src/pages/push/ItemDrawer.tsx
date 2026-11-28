@@ -273,6 +273,9 @@ function HowTo({ scope, row }: { scope: PushScope; row: Row }) {
   const main = node.steps.find((s) => !s.fromStock);
   const stockSteps = node.steps.filter((s) => s.fromStock);
   const gatherLeft = node.toGo - node.steps.reduce((sum, s) => sum + s.runs * yieldOf(s.recipe, id), 0);
+  const farm = ctx.router.farming(id);
+  // How to get the very first seeds of a tier: upgrading lower-tier ones.
+  const starter = farm ? ctx.router.crafts(id).find((r) => !r.inputs.some((i) => i.id === farm.plant)) : undefined;
 
   return (
     <div className="space-y-2">
@@ -300,6 +303,19 @@ function HowTo({ scope, row }: { scope: PushScope; row: Row }) {
                 Buy from <span className="font-medium">{ctx.game.sold[id]}</span>. It can't be crafted.
               </p>
               {ctx.game.price[id] && <PriceGrid scope={scope} id={id} needed={node.needed} toGo={node.toGo} />}
+            </>
+          ) : farm ? (
+            <>
+              <div className="text-sm font-medium">{gatherLeft > 0 ? `${num(gatherLeft)} left to grow` : 'All grown'}</div>
+              <p className="mt-1 text-xs text-ink-2">
+                Seeds multiply when replanted: grow one into {/^[AEIOU]/i.test(ctx.book.name(farm.plant)) ? 'an' : 'a'} {ctx.book.name(farm.plant)} with{' '}
+                {farm.grow.inputs
+                  .filter((i) => i.id !== id)
+                  .map((i) => `${num(i.qty)} ${ctx.book.name(i.id)}`)
+                  .join(' and ')}
+                , and it gives {num(farm.perPlant)} back.
+                {starter && ` If you have none yet, the first ones come from ${starter.inputs.map((i) => `${num(i.qty)} ${ctx.book.name(i.id)}`).join(' + ')}.`}
+              </p>
             </>
           ) : sources.length ? (
             <>

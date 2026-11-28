@@ -96,7 +96,16 @@ function RawCard({ scope, raw }: { scope: PushScope; raw: Raw }) {
   const buying = step.state === 'buy' || step.profession === 'Trade';
   const sources = buying ? [] : [...new Set(ctx.router.gatherSources(step.id).filter((r) => !r.loot).map((r) => r.source))].slice(0, 3);
   const spots = (view.stock.where.get(step.id) ?? []).slice(0, 2).map((h) => `${num(h.qty)} in ${h.loc.kind === 'player' ? h.loc.owner + ': ' : ''}${h.loc.name}`);
-  const how = buying ? (view.onOrder.has(step.id) ? 'On a claim buy order' : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}`) : sources.length ? `From ${sources.join(', ')}` : 'No farmable source in the game data';
+  const farm = buying ? null : ctx.router.farming(step.id);
+  const how = buying
+    ? view.onOrder.has(step.id)
+      ? 'On a claim buy order'
+      : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}`
+    : farm
+      ? `Grown by replanting: each ${ctx.book.name(farm.plant)} gives ${num(farm.perPlant)} back`
+      : sources.length
+        ? `From ${sources.join(', ')}`
+        : 'No farmable source in the game data';
   const swaps = buying ? [] : standIns(ctx, view, step.id);
 
   return (
@@ -111,7 +120,7 @@ function RawCard({ scope, raw }: { scope: PushScope; raw: Raw }) {
         </div>
         <div className="shrink-0 text-right">
           <div className={cx('num text-xl font-semibold leading-tight', done ? 'text-good' : 'text-ink')}>{num(done ? got : step.toGo)}</div>
-          <div className="text-[11px] text-muted">{done ? 'in hand' : buying ? 'to buy' : 'to gather'}</div>
+          <div className="text-[11px] text-muted">{done ? 'in hand' : buying ? 'to buy' : farm ? 'to grow' : 'to gather'}</div>
         </div>
       </button>
 
