@@ -157,7 +157,7 @@ function Hero({ claim }: { claim: ClaimDetail | null }) {
       <div className="relative px-5 pb-6 pt-8 sm:px-9 sm:pb-8 sm:pt-11">
         <img src={LOGO} alt="" aria-hidden="true" width={56} height={56} className="mb-3 h-14 w-14 rounded-full md:hidden" />
         <h1 className="text-[38px] font-semibold leading-tight sm:text-[50px]">{CLAIM.name}</h1>
-        <p className="mt-3 max-w-[54ch] text-[15px] leading-relaxed text-ink-2 sm:text-base">
+        <p className="mt-3 text-[15px] leading-relaxed text-ink-2 sm:text-base md:max-w-[calc(100%-13rem)]">
           A small, active crew building a claim together. Free food and tool upgrades are always around, so you can just play.
         </p>
         <div className="mt-6 flex flex-wrap gap-2.5">
@@ -307,7 +307,7 @@ function SectionHead({ id, eyebrow, title, children, extra }: { id?: SectionId; 
       <h2 id={id ? `${id}-title` : undefined} className="mt-1.5 text-[24px] font-semibold text-ink sm:text-[28px]">
         {title}
       </h2>
-      {children && <div className="mt-2 max-w-[68ch] space-y-2 text-[14px] leading-relaxed text-ink-2">{children}</div>}
+      {children && <div className="mt-2 space-y-2 text-[14px] leading-relaxed text-ink-2">{children}</div>}
     </div>
   );
 }
@@ -433,7 +433,7 @@ function WhoWeAre({ claim, pushes }: { claim: ClaimDetail | null; pushes: Push[]
             market, right alongside the ocean and open to traders from across the map.
           </p>
         </SectionHead>
-        <p className="mt-5 max-w-[68ch] rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
+        <p className="mt-5 rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
           <span className="font-semibold text-ink">House rules?</span> Not many. Be a team player, be respectful, and no hate speech of any kind. Follow the game's rules too (no
           hacking or cheating). Beyond that, use your best judgment.
         </p>
@@ -858,6 +858,10 @@ const PROCESSING: [station: string, makes: string][] = [
 
 type StationRow = { id: string; name: string; tier: number; count: number };
 
+/** "Looms", "Animal Hutches", "Apiaries": station names need more than an added "s". */
+const stationPlural = (n: number, station: string) =>
+  plural(n, station, /(ch|sh|s|x)$/.test(station) ? station + 'es' : /[^aeiou]y$/.test(station) ? station.slice(0, -1) + 'ies' : station + 's');
+
 /**
  * The claim's layout plan, and the passive stations standing so far. The counts come from the
  * buildings list in the shared storage read, so this costs no extra Bitjita calls.
@@ -931,7 +935,7 @@ function ClaimLayout({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockS
                 return (
                   <div key={station} className="bg-surface px-4 py-3.5">
                     <div className="flex items-baseline gap-2">
-                      <h3 className={cx('text-[16px]', titleFont)}>{plural(count, station)}</h3>
+                      <h3 className={cx('text-[16px]', titleFont)}>{stationPlural(count, station)}</h3>
                       <span className="num ml-auto text-[20px] font-semibold text-ink">{num(count)}</span>
                     </div>
                     <p className="text-xs text-muted">{makes}</p>
@@ -954,7 +958,7 @@ function ClaimLayout({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockS
             </div>
             {others.length > 0 && (
               <p className="border-t border-line px-5 py-2.5 text-xs text-muted">
-                Also passive: {others.map(([station, rows]) => `${num(countOf(rows))} ${plural(countOf(rows), station)}`).join(', ')}
+                Also passive: {others.map(([station, rows]) => `${num(countOf(rows))} ${stationPlural(countOf(rows), station)}`).join(', ')}
               </p>
             )}
           </>
@@ -969,7 +973,7 @@ function SubHead({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div>
       <h3 className={cx('text-[20px]', titleFont)}>{title}</h3>
-      {children && <p className="mt-1.5 max-w-[68ch] text-[14px] leading-relaxed text-ink-2">{children}</p>}
+      {children && <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">{children}</p>}
     </div>
   );
 }
