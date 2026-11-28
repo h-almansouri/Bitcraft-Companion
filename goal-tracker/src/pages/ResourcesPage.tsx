@@ -34,7 +34,6 @@ const SECTIONS = [
   { id: 'overview', label: 'Overview' },
   { id: 'boxes', label: 'Storage boxes' },
   { id: 'claim-house', label: 'Claim house' },
-  { id: 'faq', label: 'FAQ' },
   { id: 'tool-house', label: 'Tool house' },
 ] as const;
 
@@ -586,10 +585,14 @@ function ToolHouse({ chests, found, stock, onOpen }: { chests: Chest[] | null; f
     <Section id="tool-house" className="space-y-10">
       <SectionHead id="tool-house" eyebrow="Tool house" title="Resources for tool pushes" extra={<Pill tone="info">Tool push members only</Pill>}>
         <p>
-          This part only matters if you're in a tool push, so if you're not, feel free to skip it. {house.name} holds everything for the push, and it's the one place on the claim
-          where what you put in and take out is tracked, so everyone gets a fair cut of what's rolled.
+          {house.name} tracks all tool push contributions. Similar to the claim house, this house is not used for any of Vel's personal items and is only used to store and track
+          tool push progress.
         </p>
-        <p>The tracker that does the math is still being built. Until it's live, the house's deposit and withdrawal log further down is the record.</p>
+        <p>
+          A bot uses game storage logs to audit all contributions in and out. The bot then multiplies the quantity of resources contributed or withdrawn against the fair market
+          value of the resource per Bitjita at the time of resource movement. This amount is allocated as contribution credit towards the participant. Further details can be
+          found within the individual tool push progress pages.
+        </p>
         <p>
           <Link to={`${HOME}#tool-pushes`} className="inline-flex items-center gap-1 font-medium text-accent-ink no-underline hover:underline">
             How tool pushes work
