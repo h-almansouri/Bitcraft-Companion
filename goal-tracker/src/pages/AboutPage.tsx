@@ -614,15 +614,19 @@ function describeBuff(stats: [string, number, number][]): string {
 }
 const duration = (minutes: number) => (minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} hr` : `${minutes} min`);
 
+/** Wide-screen columns for the food chest, by how many tiers it has food in, so there are no empty cells. */
+const FOOD_COLS = ['', 'lg:grid-cols-1', 'lg:grid-cols-2', 'lg:grid-cols-3', 'lg:grid-cols-4', 'lg:grid-cols-5'];
+
 function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnapshot> & { refresh: () => void } }) {
   const buffs = useLoad<FoodBuffs>('food-buffs', () => fetch(HOME + '/food-buffs.json').then((r) => (r.ok ? r.json() : {})));
 
+  // Only foods with a buff are listed. The plain ones in the chest are mostly there for traveler tasks (Heimlich, Alessi, Svim...).
   const tiers = useMemo(() => {
-    if (!stock.data || !ctx) return null;
+    if (!stock.data || !ctx || !buffs.data) return null;
     const totals = new Map<string, number>();
     for (const loc of stock.data.locations) {
       if (loc.kind !== 'claim' || !FREE_FOOD_CHESTS.includes(loc.name)) continue;
-      for (const [id, qty] of loc.items) totals.set(id, (totals.get(id) ?? 0) + qty);
+      for (const [id, qty] of loc.items) if (buffs.data[id]?.length) totals.set(id, (totals.get(id) ?? 0) + qty);
     }
     const byTier = new Map<number, { id: string; name: string; qty: number }[]>();
     for (const [id, qty] of totals) {
@@ -634,9 +638,9 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
     return [...byTier]
       .sort(([a], [b]) => b - a)
       .map(([tier, items]) => ({ tier, items: items.sort((a, b) => b.qty - a.qty), total: items.reduce((sum, i) => sum + i.qty, 0) }));
-  }, [stock.data, ctx]);
+  }, [stock.data, ctx, buffs.data]);
 
-  // The foods in the chest that do something extra, best tier first.
+  // What each of those foods does, best tier first.
   const buffed = useMemo(() => {
     if (!tiers || !buffs.data) return null;
     return tiers.flatMap(({ tier, items }) =>
@@ -660,14 +664,14 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[14px] font-semibold text-ink">{FREE_FOOD_CHESTS.join(' + ')} chest</p>
-            <p className="num text-xs text-ink-2">{tiers ? `${num(servings)} to take` : 'Reading the chest…'}</p>
+            <p className="num text-xs text-ink-2">{tiers ? `${num(servings)} buff ${plural(servings, 'food')} to take` : 'Reading the chest…'}</p>
           </div>
           <StorageRead stock={stock} />
         </div>
 
-        {stock.error && !stock.data ? (
+        {(stock.error && !stock.data) || (buffs.error && !buffs.data) ? (
           <div className="p-5">
-            <Notice tone="warn">The chest can't be read right now ({stock.error}). Try again in a few minutes.</Notice>
+            <Notice tone="warn">The chest can't be read right now ({stock.error ?? buffs.error}). Try again in a few minutes.</Notice>
           </div>
         ) : !tiers ? (
           <div className="grid grid-cols-2 gap-4 p-5 md:grid-cols-4">
@@ -678,11 +682,11 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
         ) : !found ? (
           <p className="px-5 py-6 text-[13px] text-ink-2">The {FREE_FOOD_CHESTS.join(' and ')} chest isn't showing up in the claim right now.</p>
         ) : tiers.length === 0 ? (
-          <p className="px-5 py-6 text-[13px] text-ink-2">Empty right now. Check back soon.</p>
+          <p className="px-5 py-6 text-[13px] text-ink-2">No buff food in there right now. Check back soon.</p>
         ) : (
-          <div className="grid grid-cols-1 gap-px bg-line sm:grid-cols-2 lg:grid-cols-5">
+          <div className={cx('grid grid-cols-1 gap-px bg-line sm:grid-cols-2', FOOD_COLS[Math.min(tiers.length, FOOD_COLS.length - 1)])}>
             {tiers.map(({ tier, items, total }) => (
-              <div key={tier} className="bg-surface px-4 py-3.5">
+              <div key={tier} className="bg-surface px-4 py-3.5 sm:max-lg:last:odd:col-span-2">
                 <div className="flex items-center gap-2">
                   {tier ? <TierChip tier={tier} /> : null}
                   <span className="text-[12px] font-semibold text-ink-2">{TIER_NAMES[tier] || 'Other'}</span>
@@ -691,10 +695,7 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
                 <ul className="mt-2.5 space-y-1">
                   {items.map((item) => (
                     <li key={item.id} className="flex items-baseline gap-2 text-[13px]">
-                      <span className="min-w-0 flex-1 text-ink">
-                        {item.name}
-                        {buffs.data?.[item.id] && <Sparkles size={11} className="ml-1 inline align-[-1px] text-accent-ink" aria-label="has a buff" />}
-                      </span>
+                      <span className="min-w-0 flex-1 text-ink">{item.name}</span>
                       <span className="num shrink-0 text-ink-2">{num(item.qty)}</span>
                     </li>
                   ))}
