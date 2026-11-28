@@ -54,6 +54,8 @@ export interface CraftJob {
 
 export interface StockSnapshot {
   at: string;
+  /** True when this came over the relay connection: it is the game as it stands, and asking again costs Bitjita nothing. */
+  live?: boolean;
   claim: { id: string; name: string; tier: number };
   locations: StockLocation[];
   crafts: CraftJob[];

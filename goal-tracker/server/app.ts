@@ -9,7 +9,9 @@
  * host is the Companion's pass-through to Bitjita.
  */
 import { Hono, type Context, type Env } from 'hono';
-import { chestActivity, claimDetail, stockSnapshot, UpstreamError, usage, type Memo } from './bitjita.ts';
+import { UpstreamError, usage, type Memo } from './bitjita.ts';
+import type { LiveSource } from './live.ts';
+import { readActivity, readClaim, readStock } from './read.ts';
 import { API, CLAIM, RESERVED_SLUGS } from '../src/lib/claim.ts';
 import { BUY_ORDER } from '../src/lib/shapes.ts';
 import type { Board, Push, PushKind, PushStatus } from '../src/lib/shapes.ts';
@@ -26,6 +28,12 @@ export interface Host {
   store: KV;
   /** Where Bitjita's answers are remembered. */
   memo: Memo;
+  /**
+   * The one relay connection (Bitjita's relay, or BitCraftSync's as its stand-in), on hosts that can hold one. When it is set, the
+   * claim, storage and chest logs are read from it, and fetching is only the stand-in
+   * (see server/read.ts).
+   */
+  live?: LiveSource;
   /**
    * False when `store` will not survive a restart (a host with no disk or database).
    * The site then warns that pushes are not being kept.
@@ -136,13 +144,13 @@ export function createApp<E extends Env = Env>(hostOf: (c: Context<E, any, any>)
 
   // ---- live game data (the claim and its members only) ----------------------------
 
-  api.get('/claim', async (c) => c.json(await claimDetail(hostOf(c).memo, CLAIM.id)));
+  api.get('/claim', async (c) => c.json(await readClaim(hostOf(c))));
 
   api.get('/stock', async (c) => {
-    // Ids that are not members of the claim are dropped inside stockSnapshot.
+    // Ids that are not members of the claim are dropped by whichever way the storage is read.
     const players = (c.req.query('players') ?? '').split(',').filter((p) => ID.test(p)).slice(0, 60);
     // fresh=1 is someone pressing refresh; the snapshot still has to be old enough before Bitjita is asked again.
-    return c.json(await stockSnapshot(hostOf(c).memo, CLAIM.id, players, c.req.query('fresh') === '1'));
+    return c.json(await readStock(hostOf(c), players, c.req.query('fresh') === '1'));
   });
 
   /**
@@ -153,12 +161,12 @@ export function createApp<E extends Env = Env>(hostOf: (c: Context<E, any, any>)
     const chest = c.req.query('chest') ?? '';
     const owner = c.req.query('owner') || undefined;
     if (!ID.test(chest) || (owner !== undefined && !ID.test(owner))) return c.json({ error: 'That is not a chest.' }, 400);
-    const activity = await chestActivity(hostOf(c).memo, CLAIM.id, chest, owner);
+    const activity = await readActivity(hostOf(c), chest, owner);
     return activity ? c.json(activity) : c.json({ error: `That chest isn't one of ${CLAIM.name}'s shared chests.` }, 404);
   });
 
-  /** How hard this server has been leaning on Bitjita. */
-  api.get('/status', (c) => c.json(usage()));
+  /** How hard this server has been leaning on Bitjita: the relay connection, and the fetches made the older way. */
+  api.get('/status', (c) => c.json({ relay: hostOf(c).live?.status() ?? null, ...usage() }));
 
   /** For the host's "is it up" check. Touches nothing outside this process. */
   api.get('/health', (c) => {

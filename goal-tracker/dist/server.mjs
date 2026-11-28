@@ -3826,20 +3826,20 @@ async function get(memo, path, ttl, missing, force = false) {
 	}
 	return JSON.parse(body);
 }
-var ref = (id, type) => (type === 1 || type === "cargo" || type === "Cargo" ? "c." : "i.") + id;
+var ref$1 = (id, type) => (type === 1 || type === "cargo" || type === "Cargo" ? "c." : "i.") + id;
 /** Adds up a list of storage slots into [thing, quantity] pairs. */
-function tally(slots) {
+function tally$1(slots) {
 	const totals = /* @__PURE__ */ new Map();
 	for (const slot of slots ?? []) {
 		const c = slot?.contents;
 		if (!c) continue;
-		const id = ref(c.item_id ?? c.itemId, c.item_type ?? c.itemType);
+		const id = ref$1(c.item_id ?? c.itemId, c.item_type ?? c.itemType);
 		totals.set(id, (totals.get(id) ?? 0) + (Number(c.quantity) || 0));
 	}
 	return [...totals];
 }
 /** How many of a chest's latest moves are read in one go (Bitjita allows up to 1,000). */
-var ACTIVITY_LIMIT = 500;
+var ACTIVITY_LIMIT$1 = 500;
 /**
 * A chest's log is read only when someone opens that chest, is shared for 15 minutes, and
 * no more than this many logs are read in an hour, so storage reads always have room.
@@ -3870,7 +3870,7 @@ function movesOf(raw) {
 			who: String(log.subjectName ?? "Someone"),
 			whoId: String(log.subjectEntityId ?? ""),
 			kind: type === "deposit_item" ? "in" : "out",
-			item: ref(log.data.item_id, log.data.item_type),
+			item: ref$1(log.data.item_id, log.data.item_type),
 			qty: Number(log.data.quantity) || 0
 		});
 	}
@@ -3904,12 +3904,12 @@ async function chestActivity(memo, claimId, chestId, ownerId) {
 	while (activityCalls.length && now - activityCalls[0] > 36e5) activityCalls.shift();
 	if (activityCalls.length >= ACTIVITY_PER_HOUR) throw new UpstreamError(429, `Holding off: ${activityCalls.length} chest logs read in the last hour.`);
 	activityCalls.push(now);
-	const raw = await get(memo, `/logs/storage?buildingEntityId=${chestId}&limit=${ACTIVITY_LIMIT}`, 60, { logs: [] });
+	const raw = await get(memo, `/logs/storage?buildingEntityId=${chestId}&limit=${ACTIVITY_LIMIT$1}`, 60, { logs: [] });
 	const activity = {
 		chest: chestId,
 		at: (/* @__PURE__ */ new Date()).toISOString(),
 		moves: movesOf(raw),
-		more: (raw?.logs?.length ?? 0) >= ACTIVITY_LIMIT
+		more: (raw?.logs?.length ?? 0) >= ACTIVITY_LIMIT$1
 	};
 	memo.set(key, JSON.stringify(activity), TTL.activity);
 	return activity;
@@ -3961,7 +3961,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 			owner: detail.name,
 			name: b.buildingNickname || b.buildingName,
 			detail: b.buildingNickname ? b.buildingName : "",
-			items: tally(b.inventory)
+			items: tally$1(b.inventory)
 		});
 		const built = await get(memo, `/claims/${claimId}/buildings`, TTL.buildings, []).catch(() => []);
 		const counts = /* @__PURE__ */ new Map();
@@ -3985,7 +3985,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 				if (!made) continue;
 				crafts.push({
 					id: String(c.entityId),
-					item: ref(made.item_id, made.item_type),
+					item: ref$1(made.item_id, made.item_type),
 					qty: (Number(made.quantity) || 1) * (Number(c.craftCount) || 1),
 					owner,
 					ownerId: pid,
@@ -4002,7 +4002,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 			for (const c of passive.craftResults ?? []) {
 				const made = c.craftedItem?.[0];
 				if (!made) continue;
-				const item = ref(made.item_id, made.item_type);
+				const item = ref$1(made.item_id, made.item_type);
 				const done = /complete/i.test(String(c.status ?? ""));
 				const key = `${c.buildingEntityId}|${item}|${done}`;
 				const batch = batches.get(key);
@@ -4029,7 +4029,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 		try {
 			const inv = await get(memo, `/players/${pid}/inventories`, TTL.storage, void 0, force);
 			for (const box of inv.inventories ?? []) {
-				const items = tally(box.pockets);
+				const items = tally$1(box.pockets);
 				if (!items.length) continue;
 				const where = box.claimName ? `${box.inventoryName ?? box.buildingName} @ ${box.claimName}` : box.inventoryName ?? box.buildingName ?? "Storage";
 				locations.push({
@@ -4052,7 +4052,7 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 				if (!h || h.isEmpty || !h.buildingEntityId) continue;
 				const house = await get(memo, `/players/${pid}/housing/${h.buildingEntityId}`, TTL.storage, { inventories: [] }, force);
 				for (const box of house.inventories ?? []) {
-					const items = tally(box.inventory);
+					const items = tally$1(box.inventory);
 					if (!items.length) continue;
 					locations.push({
 						id: "h" + pid + ":" + box.entityId,
@@ -4093,6 +4093,61 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 	};
 	if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot + TTL.fallback);
 	return snapshot;
+}
+// server/read.ts
+/**
+* Where the site's live numbers come from.
+*
+* First choice is the one relay connection (server/live.ts; Bitjita's relay, or BitCraftSync's
+* while that one cannot be reached): it is live, and a page asking costs the relay nothing
+* because the answer is already here in memory.
+*
+* The older way, fetching from Bitjita's public API under strict limits (server/bitjita.ts),
+* is only the stand-in:
+*
+*  - when this host has no relay connection at all (`host.live` is not set);
+*  - while neither relay can be reached, so the site keeps working;
+*  - for a member who is in another region. One connection sees one region and a
+*    travelling member's bags go with them, so that one member is read the older way
+*    until they are back.
+*/
+async function readClaim(host) {
+	return await host.live?.claim() ?? claimDetail(host.memo, CLAIM.id);
+}
+async function readStock(host, players, fresh) {
+	const live = await host.live?.stock(players);
+	if (!live) return stockSnapshot(host.memo, CLAIM.id, players, fresh);
+	const { claim, away } = live;
+	let { locations, crafts } = live;
+	const problems = [];
+	if (away.length) {
+		const gone = new Set(away.map((m) => m.id));
+		try {
+			const theirs = await stockSnapshot(host.memo, CLAIM.id, [...gone], fresh);
+			locations = [...locations.filter((l) => !l.ownerId || !gone.has(l.ownerId)), ...theirs.locations.filter((l) => l.ownerId && gone.has(l.ownerId))];
+			crafts = [...crafts.filter((c) => !gone.has(c.ownerId)), ...theirs.crafts.filter((c) => gone.has(c.ownerId))];
+			problems.push(...theirs.problems);
+		} catch (err) {
+			const names = away.map((m) => m.name).join(", ");
+			problems.push(`${names} ${away.length === 1 ? "is" : "are"} outside ${claim.region || "the region"} right now, and what they carry could not be read (${err.message}).`);
+		}
+	}
+	return {
+		at: (/* @__PURE__ */ new Date()).toISOString(),
+		live: true,
+		claim: {
+			id: claim.id,
+			name: claim.name,
+			tier: claim.tier
+		},
+		locations,
+		crafts,
+		problems
+	};
+}
+async function readActivity(host, chest, owner) {
+	const live = await host.live?.activity(chest, owner);
+	return live !== void 0 ? live : chestActivity(host.memo, CLAIM.id, chest, owner);
 }
 // server/app.ts
 /**
@@ -4194,10 +4249,10 @@ var LOCKED = { error: "This board is locked. Enter its password to make changes.
 function createApp(hostOf) {
 	const app = new Hono();
 	const api = app.basePath(API);
-	api.get("/claim", async (c) => c.json(await claimDetail(hostOf(c).memo, CLAIM.id)));
+	api.get("/claim", async (c) => c.json(await readClaim(hostOf(c))));
 	api.get("/stock", async (c) => {
 		const players = (c.req.query("players") ?? "").split(",").filter((p) => ID.test(p)).slice(0, 60);
-		return c.json(await stockSnapshot(hostOf(c).memo, CLAIM.id, players, c.req.query("fresh") === "1"));
+		return c.json(await readStock(hostOf(c), players, c.req.query("fresh") === "1"));
 	});
 	/**
 	* A chest's latest deposits and withdrawals, for the Resources page. Only the claim's chests,
@@ -4207,11 +4262,14 @@ function createApp(hostOf) {
 		const chest = c.req.query("chest") ?? "";
 		const owner = c.req.query("owner") || void 0;
 		if (!ID.test(chest) || owner !== void 0 && !ID.test(owner)) return c.json({ error: "That is not a chest." }, 400);
-		const activity = await chestActivity(hostOf(c).memo, CLAIM.id, chest, owner);
+		const activity = await readActivity(hostOf(c), chest, owner);
 		return activity ? c.json(activity) : c.json({ error: `That chest isn't one of ${CLAIM.name}'s shared chests.` }, 404);
 	});
-	/** How hard this server has been leaning on Bitjita. */
-	api.get("/status", (c) => c.json(usage()));
+	/** How hard this server has been leaning on Bitjita: the relay connection, and the fetches made the older way. */
+	api.get("/status", (c) => c.json({
+		relay: hostOf(c).live?.status() ?? null,
+		...usage()
+	}));
 	/** For the host's "is it up" check. Touches nothing outside this process. */
 	api.get("/health", (c) => {
 		const host = hostOf(c);
@@ -4287,6 +4345,1140 @@ function createApp(hostOf) {
 		return c.json({ error: "Something went wrong on our side." }, 500);
 	});
 	return app;
+}
+// server/relay.ts
+/** No relay is answering right now. The caller reads the slower way instead. */
+var RelayDown = class extends Error {};
+/** The name the region databases share on both relays ("idc-8"): it says which game world is mirrored. */
+var WORLD = "idc";
+var database = (region) => `${WORLD}-${region}`;
+/** In order of preference. Bitjita's is one host for every region; BitCraftSync's has a port per region. */
+var RELAYS = [{
+	name: "relay.bitjita.com",
+	socket: (region) => `wss://relay.bitjita.com/v1/database/${database(region)}/subscribe?compression=None`,
+	layout: (region) => `https://relay.bitjita.com/v1/database/${database(region)}/schema?version=9`
+}, {
+	name: "relay.bitcraftsync.app",
+	socket: (region) => `wss://relay.bitcraftsync.app:${3e3 + region}/v1/database/${database(region)}/subscribe?compression=None`,
+	layout: (region) => `https://relay.bitcraftsync.app:${3e3 + region}/v1/database/${database(region)}/schema?version=9`
+}];
+var PROTOCOL = "v1.json.spacetimedb";
+/** How long opening the socket plus its first answer may take. */
+var CONNECT_MS = 1e4;
+/** How long any later set of questions may take to be answered. */
+var STEP_MS = 8e3;
+/** After this long with no page asking, the socket is closed. Pages on screen ask every 15 minutes. */
+var IDLE_MS = 12e5;
+/** A socket that has said nothing for this long is checked before its rows are trusted. */
+var QUIET_MS = 45e3;
+var PING_MS = 4e3;
+/** After a failed connection a relay is left alone this long, doubling each time up to the limit. */
+var HOLD_OFF_MS = 6e4;
+var MAX_HOLD_OFF_MS = 6e5;
+/** A cap on questions per connection, so a surprise in the data can never turn into a flood. */
+var MAX_QUERIES = 500;
+/** How many rounds of follow-up questions one settling may take before it is called complete. */
+var MAX_ROUNDS = 8;
+/** A relay's own table layout is re-read at most this often. */
+var LAYOUT_EVERY_MS = 6e5;
+/**
+* Column names, in order, of the tables the site reads. Rows arrive as bare lists (always
+* from Bitjita's relay, and for changes from BitCraftSync's), so these are what name them.
+* Taken from the layout the relays publish (/schema, 2026-11-27); if a game patch changes
+* a table, the published layout is read again (see `learnLayout`).
+*/
+var COLUMNS = {
+	claim_state: [
+		"entity_id",
+		"owner_player_entity_id",
+		"owner_building_entity_id",
+		"name",
+		"neutral"
+	],
+	claim_local_state: [
+		"entity_id",
+		"supplies",
+		"building_maintenance",
+		"num_tiles",
+		"num_tile_neighbors",
+		"location",
+		"treasury",
+		"xp_gained_since_last_coin_minting",
+		"supplies_purchase_threshold",
+		"supplies_purchase_price",
+		"building_description_id"
+	],
+	claim_tech_state: [
+		"entity_id",
+		"learned",
+		"researching",
+		"start_timestamp",
+		"scheduled_id"
+	],
+	claim_member_state: [
+		"entity_id",
+		"claim_entity_id",
+		"player_entity_id",
+		"user_name",
+		"inventory_permission",
+		"build_permission",
+		"officer_permission",
+		"co_owner_permission"
+	],
+	building_state: [
+		"entity_id",
+		"claim_entity_id",
+		"direction_index",
+		"building_description_id",
+		"constructed_by_player_entity_id"
+	],
+	building_nickname_state: ["entity_id", "nickname"],
+	inventory_state: [
+		"entity_id",
+		"pockets",
+		"inventory_index",
+		"cargo_index",
+		"owner_entity_id",
+		"player_owner_entity_id"
+	],
+	deployable_state_v2: [
+		"entity_id",
+		"owner_id",
+		"claim_entity_id",
+		"direction",
+		"deployable_description_id",
+		"nickname",
+		"hidden",
+		"appearance_override_id"
+	],
+	player_housing_state: [
+		"entity_id",
+		"entrance_building_entity_id",
+		"network_entity_id",
+		"exit_portal_entity_id",
+		"rank",
+		"locked_until",
+		"is_empty",
+		"region_index"
+	],
+	dimension_description_state: [
+		"entity_id",
+		"dimension_network_entity_id",
+		"collapse_timestamp",
+		"interior_instance_id",
+		"dimension_position_large_x",
+		"dimension_position_large_z",
+		"dimension_size_large_x",
+		"dimension_size_large_z",
+		"dimension_id",
+		"dimension_type"
+	],
+	location_state: [
+		"entity_id",
+		"chunk_index",
+		"x",
+		"z",
+		"dimension"
+	],
+	progressive_action_state: [
+		"entity_id",
+		"building_entity_id",
+		"function_type",
+		"progress",
+		"recipe_id",
+		"craft_count",
+		"last_crit_outcome",
+		"owner_entity_id",
+		"lock_expiration",
+		"preparation"
+	],
+	public_progressive_action_state: [
+		"entity_id",
+		"building_entity_id",
+		"owner_entity_id"
+	],
+	passive_craft_state: [
+		"entity_id",
+		"owner_entity_id",
+		"recipe_id",
+		"building_entity_id",
+		"timestamp",
+		"status",
+		"slot"
+	],
+	storage_log_state: [
+		"id",
+		"object_entity_id",
+		"subject_entity_id",
+		"subject_name",
+		"subject_type",
+		"data",
+		"timestamp",
+		"days_since_epoch"
+	],
+	world_region_name_state: [
+		"id",
+		"player_facing_name",
+		"module_name_prefix"
+	]
+};
+/**
+* Game ids are 64-bit numbers, bigger than JavaScript can hold exactly, so every whole number
+* of 16 or more digits is turned into text before the row is parsed. Text inside quotes is
+* left alone (a chest nicknamed "1234567890123456" stays what it was).
+*/
+function quoteLongNumbers(raw) {
+	let out = "";
+	let kept = 0;
+	let i = 0;
+	const n = raw.length;
+	while (i < n) {
+		const ch = raw.charCodeAt(i);
+		if (ch === 34) {
+			i++;
+			while (i < n && raw.charCodeAt(i) !== 34) i += raw.charCodeAt(i) === 92 ? 2 : 1;
+			i++;
+		} else if (ch === 45 || ch >= 48 && ch <= 57) {
+			let j = ch === 45 ? i + 1 : i;
+			const from = j;
+			while (j < n && raw.charCodeAt(j) >= 48 && raw.charCodeAt(j) <= 57) j++;
+			const next = raw.charCodeAt(j);
+			if (next !== 46 && next !== 69 && next !== 101 && j - from >= 16) {
+				out += raw.slice(kept, i) + "\"" + raw.slice(i, j) + "\"";
+				kept = j;
+			}
+			while (j < n && "0123456789.eE+-".includes(raw[j])) j++;
+			i = j;
+		} else i++;
+	}
+	return kept === 0 ? raw : out + raw.slice(kept);
+}
+var keyOf = (row) => String(row.entity_id ?? row.id);
+var Feed = class {
+	region;
+	plan;
+	dial;
+	read;
+	onConnect;
+	idleMs;
+	log;
+	hosts;
+	/** The relay the socket is on (or was last on). */
+	host = null;
+	wire = null;
+	state = "off";
+	tables = /* @__PURE__ */ new Map();
+	/** Every question asked on the current connection. */
+	sent = /* @__PURE__ */ new Set();
+	/** Sets of questions sent and not answered yet. */
+	awaiting = 0;
+	rounds = 0;
+	nextSet = 10;
+	waiters = [];
+	columns = { ...COLUMNS };
+	/** A row came in that the column lists could not name: the table it was in. */
+	misfit = null;
+	needLayout = false;
+	layoutAt = 0;
+	lastFrame = 0;
+	lastAsk = 0;
+	liveSince = 0;
+	lastError = "";
+	stepTimer = null;
+	idleTimer = null;
+	soonTimer = null;
+	pinging = null;
+	pings = /* @__PURE__ */ new Map();
+	pingSeq = 1e6;
+	counts = {
+		connections: 0,
+		failed: 0,
+		frames: 0
+	};
+	constructor(options) {
+		this.region = options.region;
+		this.plan = options.plan;
+		this.hosts = (options.relays ?? RELAYS).map((relay) => ({
+			relay,
+			retryAt: 0,
+			failures: 0,
+			lastError: ""
+		}));
+		this.dial = options.dial ?? ((url, protocols) => new WebSocket(url, protocols));
+		this.read = options.read ?? (async (url) => (await fetch(url)).text());
+		this.onConnect = options.onConnect ?? (() => {});
+		this.idleMs = options.idleMs ?? IDLE_MS;
+		this.log = options.log ?? ((line) => console.log(line));
+	}
+	/**
+	* The rows as they stand right now, connecting first if need be. Throws RelayDown when no
+	* relay can be had at the moment. Every call counts as "someone is looking".
+	*/
+	async ready() {
+		this.lastAsk = Date.now();
+		this.armIdle();
+		if (this.state === "live") {
+			if (Date.now() - this.lastFrame < QUIET_MS || await this.ping()) {
+				if (this.state === "live") return this.tables;
+			} else if (this.state === "live") {
+				this.log("Relay: the connection had gone quiet and did not answer. Connecting again.");
+				this.shut();
+			}
+		}
+		if (this.state === "off") {
+			if (!this.nextHost()) throw new RelayDown(`Leaving the relay alone for another ${this.heldOffSeconds()} s (${this.lastError}).`);
+			this.connect();
+		}
+		return new Promise((resolve, reject) => this.waiters.push({
+			resolve,
+			reject
+		}));
+	}
+	/** Have the plan looked at again now, because what it wants has changed (someone opened a chest's log). */
+	async extend() {
+		const tables = await this.ready();
+		this.rounds = 0;
+		const waiting = new Promise((resolve, reject) => this.waiters.push({
+			resolve,
+			reject
+		}));
+		this.guarded(() => this.step());
+		return this.state === "live" && !this.waiters.length ? tables : waiting;
+	}
+	/** For the status page. */
+	status() {
+		const now = Date.now();
+		let rows = 0;
+		for (const table of this.tables.values()) rows += table.size;
+		return {
+			host: this.wire ? this.host?.relay.name ?? null : null,
+			database: database(this.region),
+			state: this.state,
+			sockets: this.wire ? 1 : 0,
+			questions: this.sent.size,
+			rows,
+			liveForSeconds: this.state === "live" ? Math.round((now - this.liveSince) / 1e3) : 0,
+			lastChangeSecondsAgo: this.lastFrame ? Math.round((now - this.lastFrame) / 1e3) : null,
+			lastAskedSecondsAgo: this.lastAsk ? Math.round((now - this.lastAsk) / 1e3) : null,
+			closesAfterIdleMinutes: this.idleMs / 6e4,
+			heldOffForSeconds: this.state === "off" ? this.heldOffSeconds() : 0,
+			lastProblem: this.lastError || null,
+			relays: this.hosts.map((h) => ({
+				host: h.relay.name,
+				heldOffForSeconds: Math.max(0, Math.ceil((h.retryAt - now) / 1e3)),
+				lastProblem: h.lastError || null
+			})),
+			sinceStart: { ...this.counts }
+		};
+	}
+	/** Hang up and forget everything. */
+	close() {
+		if (this.idleTimer) clearTimeout(this.idleTimer);
+		this.idleTimer = null;
+		this.shut(new RelayDown("The relay connection was closed."));
+	}
+	/** The first relay, in order of preference, that is not being left alone right now. */
+	nextHost() {
+		const now = Date.now();
+		return this.hosts.find((h) => h.retryAt <= now);
+	}
+	/** How long until some relay may be tried again. */
+	heldOffSeconds() {
+		return Math.max(0, Math.ceil((Math.min(...this.hosts.map((h) => h.retryAt)) - Date.now()) / 1e3));
+	}
+	async connect() {
+		const host = this.nextHost();
+		if (!host) return this.shut(new RelayDown("No relay is answering."));
+		this.host = host;
+		this.state = "opening";
+		this.counts.connections++;
+		this.clear();
+		this.arm(CONNECT_MS, "it did not answer in time");
+		if (this.needLayout) await this.learnLayout(host);
+		if (this.state !== "opening" || this.host !== host) return;
+		let wire;
+		try {
+			this.onConnect();
+			wire = this.dial(host.relay.socket(this.region), [PROTOCOL]);
+		} catch (err) {
+			return this.fail(`a socket could not be opened (${err.message})`);
+		}
+		this.wire = wire;
+		wire.onopen = () => {
+			if (this.wire !== wire) return;
+			this.guarded(() => {
+				const first = this.plan(this.tables).slice(0, MAX_QUERIES);
+				for (const sql of first) this.sent.add(sql);
+				this.state = "settling";
+				this.awaiting = 1;
+				this.send({ Subscribe: {
+					request_id: 1,
+					query_strings: first
+				} });
+			});
+		};
+		wire.onmessage = (ev) => {
+			const { data } = ev;
+			if (this.wire === wire && typeof data === "string") this.guarded(() => this.frame(data));
+		};
+		wire.onerror = () => {
+			try {
+				wire.close();
+			} catch {}
+		};
+		wire.onclose = () => {
+			if (this.wire !== wire) return;
+			this.wire = null;
+			if (this.state === "live") {
+				this.log(`Relay: ${host.relay.name} closed the connection. The next page that asks connects again.`);
+				host.retryAt = Date.now() + 2e3;
+				this.shut();
+			} else this.fail("the connection closed before it had answered");
+		};
+	}
+	send(message) {
+		try {
+			this.wire?.send(JSON.stringify(message));
+		} catch {}
+	}
+	/**
+	* Everything that runs because the socket said something goes through here. A surprise in
+	* what came back ends this connection and nothing more: it never reaches the rest of the server.
+	*/
+	guarded(work) {
+		try {
+			work();
+		} catch (err) {
+			this.fail(`something it sent could not be read (${err.message})`);
+		}
+	}
+	frame(text) {
+		let message;
+		try {
+			message = JSON.parse(text);
+		} catch {
+			return;
+		}
+		this.lastFrame = Date.now();
+		this.counts.frames++;
+		if (message.InitialSubscription) {
+			this.apply(message.InitialSubscription.database_update);
+			this.answered();
+		} else if (message.SubscribeMultiApplied) {
+			const pong = this.pings.get(Number(message.SubscribeMultiApplied.query_id?.id));
+			if (pong) return pong();
+			this.apply(message.SubscribeMultiApplied.update);
+			this.answered();
+		} else if (message.TransactionUpdate) {
+			const committed = message.TransactionUpdate.status?.Committed;
+			if (!committed) return;
+			this.apply(committed);
+			if (this.misfit) return this.fail(`its "${this.misfit}" table has changed shape`);
+			if (this.state === "live" && !this.soonTimer) {
+				this.soonTimer = setTimeout(() => {
+					this.soonTimer = null;
+					if (this.state !== "live") return;
+					this.rounds = 0;
+					this.guarded(() => this.step());
+				}, 150);
+				this.soonTimer.unref?.();
+			}
+		} else if (message.SubscriptionError) this.fail(`it refused a question (${String(message.SubscriptionError.error ?? "").slice(0, 160)})`);
+	}
+	/** A set of questions has been answered. */
+	answered() {
+		this.awaiting = Math.max(0, this.awaiting - 1);
+		if (this.misfit) return this.fail(`its "${this.misfit}" table has changed shape`);
+		this.step();
+	}
+	/** Ask whatever the plan now wants that has not been asked; with nothing left to ask, the picture is complete. */
+	step() {
+		if (!this.wire || this.awaiting > 0) return;
+		const more = this.rounds < MAX_ROUNDS ? this.plan(this.tables).filter((sql) => !this.sent.has(sql)).slice(0, MAX_QUERIES - this.sent.size) : [];
+		if (more.length) {
+			this.rounds++;
+			this.awaiting++;
+			this.state = "settling";
+			for (const sql of more) this.sent.add(sql);
+			const id = this.nextSet++;
+			this.arm(STEP_MS, "it stopped answering");
+			this.send({ SubscribeMulti: {
+				request_id: id,
+				query_id: { id },
+				query_strings: more
+			} });
+			return;
+		}
+		this.disarm();
+		this.state = "live";
+		this.lastError = "";
+		if (this.host) {
+			this.host.failures = 0;
+			this.host.lastError = "";
+		}
+		if (!this.liveSince) {
+			this.liveSince = Date.now();
+			let rows = 0;
+			for (const table of this.tables.values()) rows += table.size;
+			this.log(`Relay: live on ${this.host?.relay.name} (${database(this.region)}) with ${this.sent.size} questions open and ${rows} rows.`);
+		}
+		for (const waiter of this.waiters.splice(0)) waiter.resolve(this.tables);
+	}
+	apply(update) {
+		for (const part of update?.tables ?? []) {
+			const name = String(part.table_name);
+			let table = this.tables.get(name);
+			if (!table) this.tables.set(name, table = /* @__PURE__ */ new Map());
+			for (const u of part.updates ?? []) {
+				for (const raw of u.deletes ?? []) {
+					const row = this.named(name, raw);
+					if (row) table.delete(keyOf(row));
+				}
+				for (const raw of u.inserts ?? []) {
+					const row = this.named(name, raw);
+					if (row) table.set(keyOf(row), row);
+				}
+			}
+		}
+	}
+	/** One row as text → a row by column name. BitCraftSync's relay names its first answers itself; bare lists are named here. */
+	named(table, raw) {
+		let value;
+		try {
+			value = typeof raw === "string" ? JSON.parse(quoteLongNumbers(raw)) : raw;
+		} catch {
+			return null;
+		}
+		if (Array.isArray(value)) {
+			const columns = this.columns[table];
+			if (!columns || columns.length !== value.length) {
+				this.misfit = table;
+				this.needLayout = true;
+				return null;
+			}
+			const row = {};
+			for (let i = 0; i < columns.length; i++) row[columns[i]] = value[i];
+			return row;
+		}
+		return value && typeof value === "object" ? value : null;
+	}
+	/**
+	* A game patch can add a column to a table, and then its rows no longer fit the lists at
+	* the top of this file. The relays publish the layout they mirror, so that is read (one
+	* request, at most every ten minutes) and the column names taken from it.
+	*/
+	async learnLayout(host) {
+		if (Date.now() - this.layoutAt < LAYOUT_EVERY_MS) return;
+		this.layoutAt = Date.now();
+		try {
+			const layout = JSON.parse(await this.read(host.relay.layout(this.region)));
+			const types = layout?.typespace?.types ?? [];
+			for (const table of layout?.tables ?? []) {
+				const elements = types[table.product_type_ref]?.Product?.elements;
+				if (!elements || !(table.name in COLUMNS)) continue;
+				this.columns[table.name] = elements.map((e) => String(e?.name?.some ?? ""));
+			}
+			this.needLayout = false;
+			this.log(`Relay: read ${host.relay.name}'s table layout again, because a row no longer fitted.`);
+		} catch (err) {
+			this.log(`Relay: could not read ${host.relay.name}'s table layout (${err.message}).`);
+		}
+	}
+	/**
+	* Asks one question that matches nothing and waits for the (empty) answer. The answer
+	* coming back at all is the point: this socket is still alive.
+	*/
+	ping() {
+		if (this.pinging) return this.pinging;
+		const wire = this.wire;
+		if (!wire) return Promise.resolve(false);
+		const id = this.pingSeq++;
+		const check = new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.pings.delete(id);
+				resolve(false);
+			}, PING_MS);
+			timer.unref?.();
+			this.pings.set(id, () => {
+				clearTimeout(timer);
+				this.pings.delete(id);
+				if (this.wire === wire) this.send({ UnsubscribeMulti: {
+					request_id: id,
+					query_id: { id }
+				} });
+				resolve(this.wire === wire);
+			});
+			this.send({ SubscribeMulti: {
+				request_id: id,
+				query_id: { id },
+				query_strings: ["SELECT * FROM world_region_name_state WHERE id = 65535"]
+			} });
+		}).finally(() => {
+			this.pinging = null;
+		});
+		this.pinging = check;
+		return check;
+	}
+	arm(ms, what) {
+		this.disarm();
+		this.stepTimer = setTimeout(() => this.fail(what), ms);
+		this.stepTimer.unref?.();
+	}
+	disarm() {
+		if (this.stepTimer) clearTimeout(this.stepTimer);
+		this.stepTimer = null;
+	}
+	armIdle() {
+		if (this.idleTimer) clearTimeout(this.idleTimer);
+		this.idleTimer = setTimeout(() => {
+			this.idleTimer = null;
+			if (this.state === "off") return;
+			this.log(`Relay: no page has asked for ${Math.round(this.idleMs / 6e4)} minutes. Closing the connection.`);
+			this.shut(new RelayDown("The relay connection was closed for lack of use."));
+		}, this.idleMs);
+		this.idleTimer.unref?.();
+	}
+	/**
+	* This connection did not work out. That relay is left alone for a while. If pages are
+	* waiting and the other relay may be tried, it is, at once; otherwise they are told to
+	* read the slower way.
+	*/
+	fail(reason) {
+		const host = this.host;
+		this.counts.failed++;
+		this.lastError = host ? `${host.relay.name}: ${reason}` : reason;
+		if (host) {
+			host.failures++;
+			host.lastError = reason;
+			host.retryAt = Date.now() + Math.min(HOLD_OFF_MS * 2 ** (host.failures - 1), MAX_HOLD_OFF_MS);
+		}
+		const other = this.nextHost();
+		if (other && this.waiters.length) {
+			this.log(`Relay: ${this.lastError}. Trying ${other.relay.name} instead.`);
+			this.hangUp();
+			this.connect();
+			return;
+		}
+		this.log(`Relay: ${this.lastError}. ${other ? `${other.relay.name} is tried next.` : `Reading the slower way for the next ${this.heldOffSeconds()} s.`}`);
+		this.shut(new RelayDown(`The relay is not answering (${this.lastError}).`));
+	}
+	/** Forget this connection's rows and questions. */
+	clear() {
+		this.disarm();
+		if (this.soonTimer) clearTimeout(this.soonTimer);
+		this.soonTimer = null;
+		this.tables = /* @__PURE__ */ new Map();
+		this.sent = /* @__PURE__ */ new Set();
+		this.awaiting = 0;
+		this.rounds = 0;
+		this.misfit = null;
+		this.liveSince = 0;
+	}
+	/** Close the socket and forget what it held. Pages waiting are left waiting. */
+	hangUp() {
+		const wire = this.wire;
+		this.wire = null;
+		this.state = "off";
+		this.clear();
+		for (const pong of [...this.pings.values()]) pong();
+		try {
+			wire?.close();
+		} catch {}
+	}
+	shut(why = new RelayDown("The relay connection is being made again.")) {
+		this.hangUp();
+		for (const waiter of this.waiters.splice(0)) waiter.reject(why);
+	}
+};
+// server/live.ts
+/**
+* The claim, read live from a relay (Bitjita's, or BitCraftSync's as its stand-in).
+*
+* server/relay.ts keeps the one connection and the rows; this file says which questions
+* that connection asks for Nowhere, and turns the rows into the shapes the pages already
+* use (the claim, a stock snapshot, a chest's activity), so nothing on the site has to
+* know where the numbers came from.
+*
+* What is asked, all in the claim's own region:
+*
+*  - the claim itself: its name, supplies, tier, members, every building standing in it,
+*    and what is inside its chests;
+*  - for each member: their bags, their bank stashes, their carts and mounts, their house,
+*    and the crafts they have going at stations (wherever in the region the station is);
+*  - what those rows point at: the contents of each cart, the building a stash or a craft
+*    sits in and the claim that building is in, the chests inside a member's house;
+*  - a chest's deposit and withdrawal log, only once someone opens that chest.
+*
+* One connection sees one region. A member who has travelled to another region takes
+* their bags with them, so they are reported as `away` and the caller reads just that
+* member the older way (server/read.ts).
+*/
+/** Picks the two facts this file needs out of the site's game data. */
+function factsFrom(gamedata) {
+	const recipes = /* @__PURE__ */ new Map();
+	for (const r of gamedata?.recipes ?? []) {
+		const m = /^r(\d+)$/.exec(String(r.id));
+		const outputs = (r.o ?? []).map((o) => [String(o[0]), Number(o[1]) || 0]);
+		if (!m || !outputs.length) continue;
+		const sure = outputs.filter(([, qty]) => qty >= 1);
+		recipes.set(Number(m[1]), {
+			makes: sure.length ? sure : [outputs[0]],
+			actions: Number(r.a) || 0
+		});
+	}
+	const buildings = /* @__PURE__ */ new Map();
+	for (const thing of gamedata?.things ?? []) {
+		const m = /^b\.(\d+)$/.exec(String(thing?.[0]));
+		if (m) buildings.set(Number(m[1]), String(thing[1]));
+	}
+	return {
+		recipe: (id) => recipes.get(id),
+		building: (id) => buildings.get(id)
+	};
+}
+var rows = (t, table) => [...t.get(table)?.values() ?? []];
+/** Ids arrive as text when long and as numbers when short; compare them as text. */
+var id = (value) => String(value ?? "0");
+var isId = (value) => /^\d{1,24}$/.test(value);
+/** The game packs the region into the top byte of every id. */
+var regionOf = (entityId) => Number(BigInt(entityId) >> 56n);
+var byNumber = (a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+var round = (n) => Math.round(n * 100) / 100;
+/** "Some value or nothing": [0, value] or [1, []] on the wire. */
+var some = (option) => Array.isArray(option) ? option[0] === 0 ? option[1] : void 0 : option?.some;
+/** Which choice of several a value is: its position in the game's own list. */
+var choice = (sum) => Array.isArray(sum) ? Number(sum[0]) : -1;
+var ref = (itemId, type) => (choice(type) === 1 || type === 1 ? "c." : "i.") + itemId;
+/** Adds up what is in the pockets of some inventories, as [thing, quantity] pairs. */
+function tally(inventories) {
+	const totals = /* @__PURE__ */ new Map();
+	for (const inventory of inventories) for (const pocket of inventory.pockets ?? []) {
+		const stack = some(Array.isArray(pocket) ? pocket[1] : pocket?.contents);
+		if (!stack) continue;
+		const [itemId, quantity, type] = Array.isArray(stack) ? stack : [
+			stack.item_id,
+			stack.quantity,
+			stack.item_type
+		];
+		const qty = Number(quantity) || 0;
+		if (qty <= 0) continue;
+		const key = ref(itemId, type);
+		totals.set(key, (totals.get(key) ?? 0) + qty);
+	}
+	return [...totals];
+}
+var isoOfMicros = (stamp) => {
+	const micros = Array.isArray(stamp) ? stamp[0] : stamp?.__timestamp_micros_since_unix_epoch__ ?? stamp;
+	try {
+		return new Date(Number(BigInt(micros) / 1000n)).toISOString();
+	} catch {
+		return "";
+	}
+};
+function membersOf(t, claimId) {
+	return rows(t, "claim_member_state").filter((r) => id(r.claim_entity_id) === claimId).sort((a, b) => byNumber(id(a.entity_id), id(b.entity_id))).map((r) => ({
+		id: id(r.player_entity_id),
+		name: String(r.user_name ?? "Member")
+	}));
+}
+/**
+* A claim's tier. The game hands out the upgrade "Tier N" (numbered N × 100) the moment the
+* tier below is reached, as the thing to work toward next, so the tier is one less than the
+* highest of those the claim holds.
+*/
+function tierOf(learned) {
+	let top = 0;
+	for (const tech of Array.isArray(learned) ? learned : []) {
+		const n = Number(tech);
+		if (n >= 200 && n <= 2e3 && n % 100 === 0) top = Math.max(top, n / 100);
+	}
+	return Math.max(1, top - 1);
+}
+function claimFrom(t, claimId) {
+	const claim = t.get("claim_state")?.get(claimId);
+	if (!claim) return null;
+	const members = membersOf(t, claimId);
+	return {
+		id: claimId,
+		name: String(claim.name ?? ""),
+		tier: tierOf(t.get("claim_tech_state")?.get(claimId)?.learned),
+		region: String(rows(t, "world_region_name_state")[0]?.player_facing_name ?? ""),
+		owner: members.find((m) => m.id === id(claim.owner_player_entity_id))?.name ?? "",
+		supplies: Number(t.get("claim_local_state")?.get(claimId)?.supplies) || 0,
+		members: members.map((m) => ({
+			...m,
+			lastSeen: null
+		}))
+	};
+}
+/**
+* The inside of a house is a small world of its own (a "dimension"), cut into cells, and
+* everything standing in it is listed by cell. From the game's own formula:
+* cell = (dimension − 1) × 1,000,000 + z × 1000 + x + 1, over the dimension's rectangle.
+*/
+function cellsOf(dimension) {
+	const dim = Number(dimension.dimension_id);
+	if (!dim) return [];
+	const x0 = Number(dimension.dimension_position_large_x) || 0;
+	const z0 = Number(dimension.dimension_position_large_z) || 0;
+	const wide = Math.max(1, Math.min(4, Number(dimension.dimension_size_large_x) || 1));
+	const deep = Math.max(1, Math.min(4, Number(dimension.dimension_size_large_z) || 1));
+	const cells = [];
+	for (let z = z0; z < z0 + deep; z++) for (let x = x0; x < x0 + wide; x++) cells.push(String((dim - 1) * 1e6 + z * 1e3 + x + 1));
+	return cells;
+}
+/** A member's house: 'none' when they have none or it is empty, 'elsewhere' when it is in another region. */
+function houseOf(t, playerId, region) {
+	const housing = t.get("player_housing_state")?.get(playerId);
+	if (!housing || housing.is_empty === true) return "none";
+	if (Number(housing.region_index) !== region) return "elsewhere";
+	const network = id(housing.network_entity_id);
+	const cells = rows(t, "dimension_description_state").filter((d) => id(d.dimension_network_entity_id) === network).flatMap(cellsOf).slice(0, 8);
+	const inside = new Set(cells);
+	return {
+		network,
+		cells,
+		things: rows(t, "location_state").filter((l) => inside.has(id(l.chunk_index))).map((l) => id(l.entity_id)).slice(0, 80)
+	};
+}
+/**
+* Every question the connection should have open, given the rows received so far. It is
+* asked again after each answer, so it works outward in a few rounds: the claim and its
+* members first, then what each member has, then what those things point at.
+*
+* Each is a plain lookup on a column the relay keeps an index for (or a two-table join on
+* indexed columns), never a search through a whole table.
+*/
+function planQueries(t, claimId, region, watching) {
+	const C = claimId;
+	const sql = [
+		`SELECT * FROM claim_state WHERE entity_id = ${C}`,
+		`SELECT * FROM claim_local_state WHERE entity_id = ${C}`,
+		`SELECT * FROM claim_tech_state WHERE entity_id = ${C}`,
+		`SELECT * FROM claim_member_state WHERE claim_entity_id = ${C}`,
+		`SELECT * FROM building_state WHERE claim_entity_id = ${C}`,
+		`SELECT inventory_state.* FROM inventory_state JOIN building_state ON inventory_state.owner_entity_id = building_state.entity_id WHERE building_state.claim_entity_id = ${C} AND inventory_state.player_owner_entity_id = 0`,
+		`SELECT building_nickname_state.* FROM building_nickname_state JOIN building_state ON building_nickname_state.entity_id = building_state.entity_id WHERE building_state.claim_entity_id = ${C}`,
+		"SELECT * FROM world_region_name_state"
+	];
+	const lookup = (table, column, value) => {
+		if (isId(value) && value !== "0") sql.push(`SELECT * FROM ${table} WHERE ${column} = ${value}`);
+	};
+	const members = membersOf(t, C).map((m) => m.id);
+	const isMember = new Set(members);
+	for (const m of members) {
+		lookup("inventory_state", "owner_entity_id", m);
+		lookup("inventory_state", "player_owner_entity_id", m);
+		lookup("deployable_state_v2", "owner_id", m);
+		lookup("player_housing_state", "entity_id", m);
+		lookup("progressive_action_state", "owner_entity_id", m);
+		lookup("public_progressive_action_state", "owner_entity_id", m);
+		lookup("passive_craft_state", "owner_entity_id", m);
+	}
+	const buildings = t.get("building_state");
+	const unknownBuilding = (b) => b !== "0" && !buildings?.has(b);
+	const vehicles = /* @__PURE__ */ new Set();
+	for (const d of rows(t, "deployable_state_v2")) {
+		if (!isMember.has(id(d.owner_id))) continue;
+		vehicles.add(id(d.entity_id));
+		lookup("inventory_state", "owner_entity_id", id(d.entity_id));
+	}
+	for (const inv of rows(t, "inventory_state")) {
+		const owner = id(inv.owner_entity_id);
+		if (isMember.has(id(inv.player_owner_entity_id)) && !isMember.has(owner) && !vehicles.has(owner) && unknownBuilding(owner)) lookup("building_state", "entity_id", owner);
+	}
+	for (const table of ["progressive_action_state", "passive_craft_state"]) for (const craft of rows(t, table)) {
+		const station = id(craft.building_entity_id);
+		if (isMember.has(id(craft.owner_entity_id)) && unknownBuilding(station)) lookup("building_state", "entity_id", station);
+	}
+	const claims = t.get("claim_state");
+	for (const b of rows(t, "building_state")) {
+		const claim = id(b.claim_entity_id);
+		if (claim !== C && claim !== "0" && !claims?.has(claim)) lookup("claim_state", "entity_id", claim);
+	}
+	for (const m of members) {
+		const housing = t.get("player_housing_state")?.get(m);
+		if (!housing || housing.is_empty === true || Number(housing.region_index) !== region) continue;
+		lookup("dimension_description_state", "dimension_network_entity_id", id(housing.network_entity_id));
+		const house = houseOf(t, m, region);
+		if (typeof house === "string") continue;
+		for (const cell of house.cells) lookup("location_state", "chunk_index", cell);
+		for (const thing of house.things) {
+			lookup("inventory_state", "owner_entity_id", thing);
+			lookup("building_nickname_state", "entity_id", thing);
+			if (unknownBuilding(thing)) lookup("building_state", "entity_id", thing);
+		}
+	}
+	for (const chest of watching.chests) if (isId(chest)) sql.push(`SELECT * FROM storage_log_state WHERE object_entity_id = ${chest} AND days_since_epoch >= ${watching.logsFromDay}`);
+	return [...new Set(sql)];
+}
+var BAG_NAMES = [
+	"Inventory",
+	"Toolbelt",
+	"Wallet"
+];
+/** Everything the claim and the wanted members are holding in this region, plus their crafts on the go. */
+function stockFrom(t, claimId, wanted, facts, region) {
+	const claim = claimFrom(t, claimId);
+	if (!claim) return null;
+	const buildings = t.get("building_state");
+	const nicknames = t.get("building_nickname_state");
+	const claims = t.get("claim_state");
+	const kindOf = (buildingId) => {
+		const b = buildings?.get(buildingId);
+		return b ? facts.building(Number(b.building_description_id)) : void 0;
+	};
+	const nicknameOf = (buildingId) => String(nicknames?.get(buildingId)?.nickname ?? "").trim();
+	const claimNameOf = (buildingId) => String(claims?.get(id(buildings?.get(buildingId)?.claim_entity_id))?.name ?? "");
+	const inventories = rows(t, "inventory_state");
+	const heldBy = /* @__PURE__ */ new Map();
+	for (const inv of inventories) {
+		const owner = id(inv.owner_entity_id);
+		const list = heldBy.get(owner);
+		if (list) list.push(inv);
+		else heldBy.set(owner, [inv]);
+	}
+	const locations = [];
+	const chests = [...heldBy.keys()].filter((b) => id(buildings?.get(b)?.claim_entity_id) === claimId).sort(byNumber);
+	for (const chest of chests) {
+		const shared = heldBy.get(chest).filter((inv) => id(inv.player_owner_entity_id) === "0");
+		if (!shared.length) continue;
+		const nickname = nicknameOf(chest);
+		const kind = kindOf(chest) ?? "Storage";
+		locations.push({
+			id: "b" + chest,
+			kind: "claim",
+			owner: claim.name,
+			name: nickname || kind,
+			detail: nickname ? kind : "",
+			items: tally(shared)
+		});
+	}
+	const standing = /* @__PURE__ */ new Map();
+	for (const b of buildings?.values() ?? []) {
+		if (id(b.claim_entity_id) !== claimId) continue;
+		const key = "b." + b.building_description_id;
+		standing.set(key, (standing.get(key) ?? 0) + 1);
+	}
+	if (standing.size) locations.push({
+		id: "built",
+		kind: "claim",
+		owner: claim.name,
+		name: "Standing in the claim",
+		detail: "Buildings",
+		items: [...standing]
+	});
+	const nameOf = new Map(claim.members.map((m) => [m.id, m.name]));
+	const players = [...new Set(wanted)].filter((p) => nameOf.has(p)).sort();
+	const away = [];
+	const crafts = [];
+	const shared = t.get("public_progressive_action_state");
+	for (const pid of players) {
+		const owner = nameOf.get(pid);
+		const place = (boxId, prefix, name, held) => {
+			const items = tally(held);
+			if (items.length) locations.push({
+				id: prefix + pid + ":" + boxId,
+				kind: "player",
+				owner,
+				ownerId: pid,
+				name,
+				detail: "",
+				items
+			});
+		};
+		const carried = heldBy.get(pid) ?? [];
+		if (!carried.some((inv) => Number(inv.inventory_index) === 0)) away.push({
+			id: pid,
+			name: owner
+		});
+		for (const inv of carried) {
+			const index = Number(inv.inventory_index);
+			place(id(inv.entity_id), "p", index === -1 ? `Recovery Chest (R${region})` : BAG_NAMES[index] ?? "Storage", [inv]);
+		}
+		const vehicles = /* @__PURE__ */ new Set();
+		for (const d of rows(t, "deployable_state_v2")) {
+			if (id(d.owner_id) !== pid) continue;
+			const vehicle = id(d.entity_id);
+			vehicles.add(vehicle);
+			const held = heldBy.get(vehicle);
+			if (held) place(vehicle, "p", String(d.nickname || "Cart"), held);
+		}
+		for (const inv of inventories) {
+			const building = id(inv.owner_entity_id);
+			if (id(inv.player_owner_entity_id) !== pid || building === pid || vehicles.has(building)) continue;
+			const kind = kindOf(building);
+			const town = claimNameOf(building);
+			place(id(inv.entity_id), "p", kind ? town ? `${kind} @ ${town}` : kind : "Storage", [inv]);
+		}
+		const house = houseOf(t, pid, region);
+		if (typeof house !== "string") for (const thing of house.things) {
+			const held = heldBy.get(thing);
+			if (held) place(thing, "h", "House: " + (nicknameOf(thing) || kindOf(thing) || "storage"), held);
+		}
+		for (const c of rows(t, "progressive_action_state")) {
+			if (id(c.owner_entity_id) !== pid) continue;
+			const recipe = facts.recipe(Number(c.recipe_id));
+			if (!recipe) continue;
+			const count = Number(c.craft_count) || 1;
+			const station = id(c.building_entity_id);
+			const total = recipe.actions * count;
+			const progress = Number(c.progress) || 0;
+			recipe.makes.forEach(([item, qty], n) => {
+				crafts.push({
+					id: id(c.entity_id) + (n ? ":" + n : ""),
+					item,
+					qty: round(qty * count),
+					owner,
+					ownerId: pid,
+					station: kindOf(station) ?? "",
+					claim: claimNameOf(station),
+					passive: false,
+					progress,
+					total,
+					done: total > 0 && progress >= total,
+					shared: !!shared?.has(id(c.entity_id))
+				});
+			});
+		}
+		const batches = /* @__PURE__ */ new Map();
+		for (const c of rows(t, "passive_craft_state")) {
+			if (id(c.owner_entity_id) !== pid) continue;
+			const recipe = facts.recipe(Number(c.recipe_id));
+			if (!recipe) continue;
+			const station = id(c.building_entity_id);
+			const done = choice(c.status) === 2;
+			for (const [item, qty] of recipe.makes) {
+				const key = `${station}|${item}|${done}`;
+				const batch = batches.get(key);
+				if (batch) batch.qty = round(batch.qty + qty);
+				else batches.set(key, {
+					id: `passive:${pid}:${key}`,
+					item,
+					qty,
+					owner,
+					ownerId: pid,
+					station: kindOf(station) ?? "",
+					claim: claimNameOf(station),
+					passive: true,
+					progress: 0,
+					total: 0,
+					done,
+					shared: false
+				});
+			}
+		}
+		crafts.push(...batches.values());
+	}
+	return {
+		claim,
+		locations,
+		crafts,
+		away
+	};
+}
+/** A chest's deposits and withdrawals from the rows on hand, newest first. */
+function movesFrom(t, chestId) {
+	const moves = [];
+	for (const log of rows(t, "storage_log_state")) {
+		if (id(log.object_entity_id) !== chestId) continue;
+		const kind = choice(log.data);
+		if (kind !== 1 && kind !== 2) continue;
+		const what = log.data[1];
+		const [itemId, quantity, type] = Array.isArray(what) ? what : [
+			what?.item_id,
+			what?.quantity,
+			what?.item_type
+		];
+		moves.push({
+			at: isoOfMicros(log.timestamp),
+			who: String(log.subject_name ?? "Someone"),
+			whoId: id(log.subject_entity_id),
+			kind: kind === 2 ? "in" : "out",
+			item: ref(itemId, type),
+			qty: Number(quantity) || 0
+		});
+	}
+	return moves.sort((a, b) => a.at < b.at ? 1 : a.at > b.at ? -1 : 0);
+}
+/** How far back a chest's log is read. */
+var LOG_DAYS = 30;
+/** The same cap the older way had on one chest's list. */
+var ACTIVITY_LIMIT = 500;
+/** A chest's log stays open this long after someone last looked at it. */
+var WATCH_MS = 12e5;
+function liveSource(options) {
+	const { claimId } = options;
+	const region = regionOf(claimId);
+	const log = options.log ?? ((line) => console.log(line));
+	const watched = /* @__PURE__ */ new Map();
+	let logsFromDay = 0;
+	const feed = new Feed({
+		region,
+		relays: options.relays,
+		dial: options.dial,
+		read: options.read,
+		idleMs: options.idleMs,
+		log,
+		onConnect: () => {
+			logsFromDay = Math.floor(Date.now() / 864e5) - LOG_DAYS;
+			for (const [chest, at] of watched) if (Date.now() - at > WATCH_MS) watched.delete(chest);
+		},
+		plan: (tables) => planQueries(tables, claimId, region, {
+			chests: watched.keys(),
+			logsFromDay
+		})
+	});
+	/** A relay that is down is an everyday thing the caller handles; anything else is worth a line in the log. */
+	const orNothing = async (work) => {
+		try {
+			return await work();
+		} catch (err) {
+			if (!(err instanceof RelayDown)) log(`Relay: could not be read (${err.message}).`);
+			return;
+		}
+	};
+	return {
+		claim: () => orNothing(async () => claimFrom(await feed.ready(), claimId) ?? void 0),
+		stock: (players) => orNothing(async () => {
+			const [tables, facts] = await Promise.all([feed.ready(), options.facts()]);
+			return stockFrom(tables, claimId, players, facts, region) ?? void 0;
+		}),
+		async activity(chest, owner) {
+			try {
+				const tables = await feed.ready();
+				const claim = claimFrom(tables, claimId);
+				if (!claim) return void 0;
+				if (owner) {
+					const who = claim.members.find((m) => m.id === owner);
+					if (!who || !isHouseOwner(who.name)) return null;
+					const house = houseOf(tables, owner, region);
+					if (house === "elsewhere") return void 0;
+					if (house === "none" || !house.things.includes(chest)) return null;
+				} else {
+					const ours = id(tables.get("building_state")?.get(chest)?.claim_entity_id) === claimId;
+					const isStorage = rows(tables, "inventory_state").some((inv) => id(inv.owner_entity_id) === chest && id(inv.player_owner_entity_id) === "0");
+					if (!ours || !isStorage) return null;
+				}
+				watched.set(chest, Date.now());
+				const moves = movesFrom(await feed.extend(), chest);
+				return {
+					chest,
+					at: (/* @__PURE__ */ new Date()).toISOString(),
+					moves: moves.slice(0, ACTIVITY_LIMIT),
+					more: moves.length > ACTIVITY_LIMIT
+				};
+			} catch (err) {
+				if (!(err instanceof RelayDown)) log(`Relay: could not be read (${err.message}).`);
+				return;
+			}
+		},
+		status: () => ({
+			...feed.status(),
+			chestLogsOpen: watched.size
+		}),
+		close: () => feed.close()
+	};
 }
 // server/storage.ts
 /**
@@ -4437,9 +5629,15 @@ async function start({ root, dataDir }) {
 	const page = readFileSync(path.join(site, "index.html"), "utf8");
 	const chosen = await chooseStore(dataDir);
 	const seeded = await seed(chosen.store, path.join(root, "seed", "board.json"));
+	let facts;
+	const live = process.env.GOAL_TRACKER_RELAY?.trim().toLowerCase() === "off" ? void 0 : liveSource({
+		claimId: CLAIM.id,
+		facts: async () => facts ??= factsFrom(JSON.parse(readFileSync(path.join(root, "public", "gamedata.json"), "utf8")))
+	});
 	const host = {
 		...chosen,
-		memo: memoryMemo()
+		memo: memoryMemo(),
+		live
 	};
 	const app = new Hono();
 	app.use(compress());
@@ -4452,7 +5650,7 @@ async function start({ root, dataDir }) {
 			c.header("Cache-Control", /[\\/]assets[\\/]/.test(file) ? "public, max-age=31536000, immutable" : "public, max-age=300");
 		}
 	}));
-	console.log(`Goal Tracker ready at ${HOME}. Board storage: ${host.storage}${seeded ? " (filled from seed/board.json)" : ""}.`);
+	console.log(`Goal Tracker ready at ${HOME}. Board storage: ${host.storage}${seeded ? " (filled from seed/board.json)" : ""}. Live numbers: ${live ? "one relay connection (relay.bitjita.com, or relay.bitcraftsync.app as its stand-in), opened when a page asks" : "fetched (relay turned off)"}.`);
 	if (!host.durable) console.warn("Goal Tracker: no DATABASE_URL or DATA_DIR is set, so pushes will be lost whenever this server restarts.");
 	return getRequestListener(app.fetch);
 }

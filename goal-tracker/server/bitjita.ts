@@ -2,6 +2,10 @@
  * Reads live game state from Bitjita's public API (https://bitjita.com/docs/api)
  * and reshapes it into one consistent "stock snapshot".
  *
+ * On the live site this is the stand-in, not the usual way: the numbers come over one
+ * relay connection (server/live.ts, server/relay.ts), and this file is used only while
+ * no relay can be reached, or for a member who is in another region (server/read.ts).
+ *
  * Bitjita is a free community service. This tool is deliberately a light guest:
  *
  *  - The server never fetches by itself. Storage is read only because a page asked:

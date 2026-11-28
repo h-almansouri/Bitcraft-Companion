@@ -27,8 +27,9 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { compress } from 'hono/compress';
 import { BOARD_KEY, createApp, type Host, type KV } from './app.ts';
+import { factsFrom, liveSource, type GameFacts } from './live.ts';
 import { connectPostgres, fileStore, memoryMemo, postgresStore } from './storage.ts';
-import { HOME } from '../src/lib/claim.ts';
+import { CLAIM, HOME } from '../src/lib/claim.ts';
 
 export interface Options {
   /** This project's folder: dist/client, public and seed are found inside it. */
@@ -69,7 +70,15 @@ export async function start({ root, dataDir }: Options) {
 
   const chosen = await chooseStore(dataDir);
   const seeded = await seed(chosen.store, path.join(root, 'seed', 'board.json'));
-  const host: Host = { ...chosen, memo: memoryMemo() };
+  // Live numbers come over one connection to a relay: Bitjita's, or BitCraftSync's while that one
+  // cannot be reached (server/relay.ts). GOAL_TRACKER_RELAY=off
+  // goes back to fetching only. The game data it needs is read from disk the first time it is used.
+  let facts: GameFacts | undefined;
+  const live =
+    process.env.GOAL_TRACKER_RELAY?.trim().toLowerCase() === 'off'
+      ? undefined
+      : liveSource({ claimId: CLAIM.id, facts: async () => (facts ??= factsFrom(JSON.parse(readFileSync(path.join(root, 'public', 'gamedata.json'), 'utf8')))) });
+  const host: Host = { ...chosen, memo: memoryMemo(), live };
 
   const app = new Hono();
   app.use(compress());
@@ -96,7 +105,7 @@ export async function start({ root, dataDir }: Options) {
   }
   // A missing file (an old script name after an update) falls through to a 404, so a browser never gets the page in place of a script.
 
-  console.log(`Goal Tracker ready at ${HOME}. Board storage: ${host.storage}${seeded ? ' (filled from seed/board.json)' : ''}.`);
+  console.log(`Goal Tracker ready at ${HOME}. Board storage: ${host.storage}${seeded ? ' (filled from seed/board.json)' : ''}. Live numbers: ${live ? 'one relay connection (relay.bitjita.com, or relay.bitcraftsync.app as its stand-in), opened when a page asks' : 'fetched (relay turned off)'}.`);
   if (!host.durable) console.warn('Goal Tracker: no DATABASE_URL or DATA_DIR is set, so pushes will be lost whenever this server restarts.');
   return getRequestListener(app.fetch);
 }

@@ -17,6 +17,9 @@ const CHECK_EVERY_MS = 60_000;
  * refresh, and by itself once the read on screen is 15 minutes old. The automatic
  * ask only happens while the page is actually on screen, and it never forces a new
  * read (see lib/refresh.ts), so a forgotten tab costs Bitjita nothing.
+ *
+ * On the live site the answer comes from the server's one relay connection
+ * (server/live.ts): it is the game as it stands, and asking costs the relay nothing.
  */
 export function useStock(key: string | null, players: string[]): Loaded<StockSnapshot> & { refresh: () => void } {
   const wantFresh = useRef(false);
@@ -75,15 +78,17 @@ export function StorageRead({ stock }: { stock: Loaded<StockSnapshot> & { refres
   }, []);
   const at = stock.data?.at;
   const stale = at ? Date.now() - new Date(at).getTime() > STALE_MINUTES * 60_000 : false;
+  /** Came over the relay connection, so pressing refresh always gets the game as it stands. */
+  const live = !!stock.data?.live;
   return (
     <>
       <span
         className={cx('hidden text-xs sm:inline', stale ? 'text-warn' : 'text-muted')}
-        title={stale ? 'This is getting old. Press refresh for a newer read.' : `Read again every ${AUTO_REFRESH_MINUTES} minutes while this page is on screen.`}
+        title={stale ? 'This is getting old. Press refresh for a newer read.' : `${live ? 'Live from the game. ' : ''}Read again every ${AUTO_REFRESH_MINUTES} minutes while this page is on screen.`}
       >
         {at ? `Storage read ${ago(at)}` : ''}
       </span>
-      <IconButton label="Read storage again. To go easy on the data service this fetches a new copy at most every 5 minutes." onClick={stock.refresh}>
+      <IconButton label={live ? 'Read storage again' : 'Read storage again. To go easy on the data service this fetches a new copy at most every 5 minutes.'} onClick={stock.refresh}>
         <RefreshCw size={15} className={stock.loading ? 'animate-spin' : ''} />
       </IconButton>
     </>
