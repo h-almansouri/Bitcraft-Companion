@@ -1,11 +1,10 @@
 import { useState, type ReactNode } from 'react';
-import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin, Workflow } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin } from 'lucide-react';
 import { yieldOf } from '../../engine/book.ts';
 import type { Recipe, Ref } from '../../engine/types.ts';
 import { flowOf, pickRoute, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
 import { costText, tradesFor } from '../../lib/price.ts';
-import { navigate } from '../../lib/router.tsx';
 import { Button, Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { AssignControl, BranchList, SplitBar, branchText, jobState, stationOf } from './parts.tsx';
@@ -91,23 +90,12 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
     else loaded.push({ ...l });
   }
   const [choosing, setChoosing] = useState(false);
-  // Opens Process on the full picture, with this material's chain brought into view.
-  const showChain = () => {
-    const params = new URLSearchParams(window.location.search);
-    params.set('tab', 'process');
-    params.set('chain', id);
-    params.delete('item');
-    navigate(window.location.pathname + '?' + params.toString());
-  };
 
   return (
     <div>
       <div className="mb-3 flex items-center gap-2">
         <span className="text-xs text-muted">Who's on it</span>
         <AssignControl scope={scope} id={id} />
-        <button type="button" onClick={showChain} className="ml-auto inline-flex items-center gap-1 text-[13px] text-accent-ink hover:underline">
-          <Workflow size={13} /> See the full picture
-        </button>
       </div>
       <div className="grid grid-cols-3 gap-2">
         <Stat label="Needed in total" value={num(node.needed)} />

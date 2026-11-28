@@ -15,7 +15,7 @@ import { LockedPanel, guarded, useAccess } from '../ui/unlock.tsx';
 import { KIND_LABEL } from './BoardPage.tsx';
 import { CompletedTab } from './push/CompletedTab.tsx';
 import { GatherTab } from './push/GatherTab.tsx';
-import { ProcessTab } from './push/ProcessTab.tsx';
+import { MakeTab } from './push/MakeTab.tsx';
 import { StorageTab } from './push/StorageTab.tsx';
 import { SetupTab } from './push/SetupTab.tsx';
 import { ItemDrawer } from './push/ItemDrawer.tsx';
@@ -281,7 +281,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
             ))}
           </div>
         ) : tab === 'process' ? (
-          <ProcessTab scope={scope} />
+          <MakeTab scope={scope} />
         ) : tab === 'storage' ? (
           <StorageTab scope={scope} />
         ) : (
