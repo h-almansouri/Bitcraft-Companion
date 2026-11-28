@@ -108,12 +108,17 @@ export function AboutPage() {
     <div className="pb-10">
       <Hero claim={claim.data} />
       <JumpBar />
-      <div className="mt-10 space-y-16">
+      <div className="mt-10">
         <Overview />
+        <SectionBreak />
         <WhoWeAre claim={claim.data} pushes={pushes ?? []} />
+        <SectionBreak />
         <Roadmap pushes={pushes ?? []} members={claim.data?.members} ctx={ctx} stock={stock.data} loading={stock.loading} />
+        <SectionBreak />
         <FreeFood ctx={ctx} stock={stock} />
+        <SectionBreak />
         <ToolPushes />
+        <SectionBreak />
       </div>
       <BackToTop />
     </div>
@@ -230,9 +235,9 @@ function JumpBar() {
 }
 
 /**
- * A round button floating in the corner. After a jump (the bar, a card, a header button) it takes
- * you back to where you were. Otherwise, once you've scrolled a way down, it goes to the top, and
- * then offers the way back to where you were reading.
+ * A round arrow button floating in the corner. After a jump (the bar, a card, a header button) it
+ * takes you back to where you were, pointing up or down toward that spot. Otherwise, once you've
+ * scrolled a way down, it goes to the top, and then offers the way back to where you were reading.
  */
 function BackToTop() {
   const [y, setY] = useState(0);
@@ -264,14 +269,26 @@ function BackToTop() {
       title={label}
       onClick={go}
       className={cx(
-        'fixed bottom-5 right-5 z-30 flex h-11 items-center justify-center gap-2 rounded-full border border-accent bg-accent-dim text-accent-ink shadow-lg shadow-black/30 transition-all hover:bg-accent hover:text-bg',
-        returning ? 'px-4' : 'w-11',
+        'fixed bottom-5 right-5 z-30 flex h-11 w-11 items-center justify-center rounded-full border border-accent bg-accent-dim text-accent-ink shadow-lg shadow-black/30 transition-all hover:bg-accent hover:text-bg',
         shown ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
       )}
     >
       {returning && back !== null && back > y ? <ArrowDown size={18} /> : <ArrowUp size={18} />}
-      {returning && <span className="text-[13px] font-medium">Back to where you were</span>}
     </button>
+  );
+}
+
+/** The line between sections, with a small gold diamond in the middle, so the long scroll reads in parts. Decoration only. */
+function SectionBreak() {
+  const line = (side: 'right' | 'left') => `linear-gradient(to ${side}, transparent, var(--line-2) 35%, color-mix(in oklab, var(--accent) 65%, var(--line-2)))`;
+  return (
+    <div aria-hidden="true" className="my-12 flex items-center gap-2.5 sm:my-16">
+      <span className="h-px flex-1" style={{ background: line('right') }} />
+      <span className="h-1.5 w-1.5 rotate-45 bg-accent/60" />
+      <span className="h-3 w-3 rotate-45 border border-accent bg-accent-dim" />
+      <span className="h-1.5 w-1.5 rotate-45 bg-accent/60" />
+      <span className="h-px flex-1" style={{ background: line('left') }} />
+    </div>
   );
 }
 
