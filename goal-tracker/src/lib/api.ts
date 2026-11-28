@@ -1,5 +1,5 @@
 import { API } from './claim.ts';
-import type { Board, ClaimDetail, Push, StockSnapshot } from './shapes.ts';
+import type { Board, ChestActivity, ClaimDetail, Push, StockSnapshot } from './shapes.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -58,6 +58,8 @@ export const api = {
   claim: () => call<ClaimDetail>('/claim'),
   /** What the claim's chests hold, plus the personal storage of the members listed. */
   stock: (players: string[], fresh = false) => call<StockSnapshot>(`/stock?players=${players.join(',')}${fresh ? '&fresh=1' : ''}`),
+  /** A shared chest's latest deposits and withdrawals. `owner` is the house owner, for a chest inside one of the shared houses. */
+  activity: (chest: string, owner?: string) => call<ChestActivity>(`/activity?chest=${chest}${owner ? `&owner=${owner}` : ''}`),
   board: (slug: string) => call<Board>(`/boards/${slug}`),
   savePush: (slug: string, push: Partial<Push> & { name: string }, pushSlug = 'new') =>
     call<{ board: Board; push: Push }>(`/boards/${slug}/pushes/${pushSlug}`, { method: 'PUT', body: JSON.stringify(push), slug }),

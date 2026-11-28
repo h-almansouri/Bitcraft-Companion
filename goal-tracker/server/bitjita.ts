@@ -27,7 +27,8 @@
  * (Cloudflare's cache as a Worker, a map in memory under Node) and this file
  * decides what goes in it and for how long.
  */
-import type { CraftJob, StockLocation, StockSnapshot, ClaimDetail } from '../src/lib/shapes.ts';
+import type { ChestActivity, ChestMove, CraftJob, StockLocation, StockSnapshot, ClaimDetail } from '../src/lib/shapes.ts';
+import { isHouseOwner } from '../src/lib/claim.ts';
 
 const BASE = 'https://bitjita.com/api';
 const APP = 'nowhere-craft-tracker (one claim, cached)';
@@ -46,6 +47,8 @@ const TTL = {
   fallback: 3600,
   /** After a newer read fails, how long everyone gets the older one before Bitjita is tried again. */
   holdOff: 300,
+  /** A chest's deposit and withdrawal log, shared by everyone who opens that chest. */
+  activity: 900,
 };
 /** Bump when what a snapshot contains changes, so copies saved in the old shape are not served. */
 const SNAPSHOT_SHAPE = 2;
@@ -124,6 +127,8 @@ export function usage() {
     bitjitaLimitPerMinute: 250,
     snapshotReusedForMinutes: TTL.snapshot / 60,
     refreshAtMostEveryMinutes: MIN_REFRESH_SECONDS / 60,
+    chestLogsReadInLastHour: activityCalls.filter((t) => Date.now() - t < 3_600_000).length,
+    chestLogsCapPerHour: ACTIVITY_PER_HOUR,
     sinceStart: { ...counters },
   };
 }
@@ -189,6 +194,90 @@ function tally(slots: any[] | undefined): [string, number][] {
     totals.set(id, (totals.get(id) ?? 0) + (Number(c.quantity) || 0));
   }
   return [...totals];
+}
+
+// ---- chest activity (the Resources page) ----------------------------------------
+
+/** How many of a chest's latest moves are read in one go (Bitjita allows up to 1,000). */
+const ACTIVITY_LIMIT = 500;
+/**
+ * A chest's log is read only when someone opens that chest, is shared for 15 minutes, and
+ * no more than this many logs are read in an hour, so storage reads always have room.
+ */
+const ACTIVITY_PER_HOUR = 30;
+const activityCalls: number[] = [];
+
+/** Bitjita writes times as "2026-11-27 10:49:06.003104+00"; this turns them into plain ISO times. */
+export function isoOf(stamp: unknown): string {
+  const text = String(stamp ?? '');
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(text);
+  if (!m) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+  }
+  let zone = m[4] ?? 'Z';
+  if (/^[+-]\d{2}$/.test(zone)) zone += ':00';
+  else if (/^[+-]\d{4}$/.test(zone)) zone = `${zone.slice(0, 3)}:${zone.slice(3)}`;
+  return new Date(`${m[1]}T${m[2]}${m[3] ? m[3].slice(0, 4) : ''}${zone}`).toISOString();
+}
+
+/** Bitjita's storage log, kept to deposits and withdrawals, newest first. */
+export function movesOf(raw: any): ChestMove[] {
+  const moves: ChestMove[] = [];
+  for (const log of raw?.logs ?? []) {
+    const type = log?.data?.type;
+    if (type !== 'deposit_item' && type !== 'withdraw_item') continue;
+    moves.push({
+      at: isoOf(log.timestamp),
+      who: String(log.subjectName ?? 'Someone'),
+      whoId: String(log.subjectEntityId ?? ''),
+      kind: type === 'deposit_item' ? 'in' : 'out',
+      item: ref(log.data.item_id, log.data.item_type),
+      qty: Number(log.data.quantity) || 0,
+    });
+  }
+  return moves.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
+
+/**
+ * The latest deposits and withdrawals at one chest. Only the claim's own chests and the
+ * chests inside the two shared houses (RESOURCE_HOUSES) can be read; for anything else
+ * the answer is null. `ownerId` is the house owner, for a chest inside a house.
+ */
+export async function chestActivity(memo: Memo, claimId: string, chestId: string, ownerId?: string): Promise<ChestActivity | null> {
+  if (ownerId) {
+    const detail = await claimDetail(memo, claimId);
+    const owner = detail.members.find((m) => m.id === ownerId);
+    if (!owner || !isHouseOwner(owner.name)) return null;
+    let houses = await get<any>(memo, `/players/${ownerId}/housing`, TTL.houseList, []);
+    if (!Array.isArray(houses)) houses = [houses];
+    let inside = false;
+    for (const h of houses) {
+      if (!h?.buildingEntityId || h.isEmpty) continue;
+      const house = await get<any>(memo, `/players/${ownerId}/housing/${h.buildingEntityId}`, TTL.storage, { inventories: [] });
+      if ((house.inventories ?? []).some((box: any) => String(box.entityId) === chestId)) {
+        inside = true;
+        break;
+      }
+    }
+    if (!inside) return null;
+  } else {
+    const inv = await get<any>(memo, `/claims/${claimId}/inventories`, TTL.storage);
+    if (!(inv.buildings ?? []).some((b: any) => String(b.entityId) === chestId)) return null;
+  }
+
+  // The trimmed answer is what everyone shares. The raw log is only kept long enough to stop two people asking at once.
+  const key = `https://activity.internal/v1/${chestId}`;
+  const ready = await memo.get(key);
+  if (ready) return JSON.parse(ready);
+  const now = Date.now();
+  while (activityCalls.length && now - activityCalls[0] > 3_600_000) activityCalls.shift();
+  if (activityCalls.length >= ACTIVITY_PER_HOUR) throw new UpstreamError(429, `Holding off: ${activityCalls.length} chest logs read in the last hour.`);
+  activityCalls.push(now);
+  const raw = await get<any>(memo, `/logs/storage?buildingEntityId=${chestId}&limit=${ACTIVITY_LIMIT}`, 60, { logs: [] });
+  const activity: ChestActivity = { chest: chestId, at: new Date().toISOString(), moves: movesOf(raw), more: (raw?.logs?.length ?? 0) >= ACTIVITY_LIMIT };
+  memo.set(key, JSON.stringify(activity), TTL.activity);
+  return activity;
 }
 
 export async function claimDetail(memo: Memo, id: string): Promise<ClaimDetail> {

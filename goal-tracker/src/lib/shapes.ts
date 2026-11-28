@@ -60,6 +60,27 @@ export interface StockSnapshot {
   problems: string[];
 }
 
+/** One deposit or withdrawal at a chest, as Bitjita logged it. */
+export interface ChestMove {
+  at: string;
+  /** The character who did it, and their id. */
+  who: string;
+  whoId: string;
+  kind: 'in' | 'out';
+  item: Ref;
+  qty: number;
+}
+
+/** A chest's latest deposits and withdrawals, newest first. */
+export interface ChestActivity {
+  chest: string;
+  /** When the log was read from Bitjita. */
+  at: string;
+  moves: ChestMove[];
+  /** True when the log was cut off at its limit, so older moves exist that are not here. */
+  more: boolean;
+}
+
 /**
  * Stands in for a member in `assignments` when the claim will simply buy the thing
  * ("Claim Buy Order"). Anything given to it is planned as bought: nobody is asked to

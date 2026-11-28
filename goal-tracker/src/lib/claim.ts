@@ -18,7 +18,22 @@ export const HOME = '/' + CLAIM.slug;
 /** The site's own API. The Companion's /api/… is its pass-through to Bitjita, a different thing. */
 export const API = HOME + '/api';
 /** Pages of the site that sit where a push's address would, so no push may take these names. */
-export const RESERVED_SLUGS = ['travelers', 'pushes', 'api', 'assets'];
+export const RESERVED_SLUGS = ['travelers', 'pushes', 'resources', 'api', 'assets'];
+
+/**
+ * The two shared houses on the Resources page, by the in-game name of the character who
+ * owns each one. Their chests show up there for everyone to see, with their recent deposits
+ * and withdrawals. No other member's house is ever shown or logged.
+ */
+export const RESOURCE_HOUSES = {
+  /** Admins only. Most of the claim's stock, contributions included. Claim pushes count it. */
+  claim: { owner: 'chels', name: "Chels's house" },
+  /** Tool push members only. Every deposit and withdrawal counts toward a share. */
+  tools: { owner: 'Vel', name: "Vel's house" },
+} as const;
+export type HouseKind = keyof typeof RESOURCE_HOUSES;
+/** Whether a character owns one of the two shared houses. */
+export const isHouseOwner = (name: string) => Object.values(RESOURCE_HOUSES).some((h) => h.owner.toLowerCase() === name.toLowerCase());
 
 /**
  * Chests whose contents members may take for free, listed live on the front page.

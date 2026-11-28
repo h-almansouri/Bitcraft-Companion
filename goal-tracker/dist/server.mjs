@@ -3631,6 +3631,69 @@ var shouldTransform = (res) => {
 	const cacheControl = res.headers.get("Cache-Control");
 	return !cacheControl || !cacheControlNoTransformRegExp.test(cacheControl);
 };
+// src/lib/claim.ts
+/**
+* This is an internal tool for one claim. Both the site and the server read the
+* claim from here, and the server refuses to look up anything else.
+*/
+var CLAIM = {
+	/** The claim's id in the game (and on Bitjita). */
+	id: "576460753011209206",
+	/** Its place in the address bar: /nowhere/claim-t5-push */
+	slug: "nowhere",
+	name: "Nowhere"
+};
+/**
+* The site lives inside the Companion app, which serves everything under /nowhere
+* from here (see server/embed.ts) and keeps every other address for itself.
+*/
+var HOME = "/" + CLAIM.slug;
+/** The site's own API. The Companion's /api/… is its pass-through to Bitjita, a different thing. */
+var API = HOME + "/api";
+/** Pages of the site that sit where a push's address would, so no push may take these names. */
+var RESERVED_SLUGS = [
+	"travelers",
+	"pushes",
+	"resources",
+	"api",
+	"assets"
+];
+/**
+* The two shared houses on the Resources page, by the in-game name of the character who
+* owns each one. Their chests show up there for everyone to see, with their recent deposits
+* and withdrawals. No other member's house is ever shown or logged.
+*/
+var RESOURCE_HOUSES = {
+	/** Admins only. Most of the claim's stock, contributions included. Claim pushes count it. */
+	claim: {
+		owner: "chels",
+		name: "Chels's house"
+	},
+	/** Tool push members only. Every deposit and withdrawal counts toward a share. */
+	tools: {
+		owner: "Vel",
+		name: "Vel's house"
+	}
+};
+/** Whether a character owns one of the two shared houses. */
+var isHouseOwner = (name) => Object.values(RESOURCE_HOUSES).some((h) => h.owner.toLowerCase() === name.toLowerCase());
+var MAIN_OF = new Map([
+	{
+		main: "Velcruza",
+		alts: ["Vel", "Cynth"]
+	},
+	{
+		main: "chels",
+		alts: ["pumapance"]
+	},
+	{
+		main: "skyediver",
+		alts: ["whitelinx"]
+	},
+	{ main: "Frostyy" },
+	{ main: "Silentstorm" }
+].flatMap((p) => (p.alts ?? []).map((alt) => [alt.toLowerCase(), p.main])));
+Object.fromEntries(MAIN_OF);
 // server/bitjita.ts
 var BASE = "https://bitjita.com/api";
 var APP = "nowhere-craft-tracker (one claim, cached)";
@@ -3647,7 +3710,9 @@ var TTL = {
 	/** How much longer a complete snapshot is kept, to fall back on when a newer read comes back with gaps. */
 	fallback: 3600,
 	/** After a newer read fails, how long everyone gets the older one before Bitjita is tried again. */
-	holdOff: 300
+	holdOff: 300,
+	/** A chest's deposit and withdrawal log, shared by everyone who opens that chest. */
+	activity: 900
 };
 /** Bump when what a snapshot contains changes, so copies saved in the old shape are not served. */
 var SNAPSHOT_SHAPE = 2;
@@ -3712,6 +3777,8 @@ function usage() {
 		bitjitaLimitPerMinute: 250,
 		snapshotReusedForMinutes: TTL.snapshot / 60,
 		refreshAtMostEveryMinutes: MIN_REFRESH_SECONDS / 60,
+		chestLogsReadInLastHour: activityCalls.filter((t) => Date.now() - t < 36e5).length,
+		chestLogsCapPerHour: ACTIVITY_PER_HOUR,
 		sinceStart: { ...counters }
 	};
 }
@@ -3770,6 +3837,82 @@ function tally(slots) {
 		totals.set(id, (totals.get(id) ?? 0) + (Number(c.quantity) || 0));
 	}
 	return [...totals];
+}
+/** How many of a chest's latest moves are read in one go (Bitjita allows up to 1,000). */
+var ACTIVITY_LIMIT = 500;
+/**
+* A chest's log is read only when someone opens that chest, is shared for 15 minutes, and
+* no more than this many logs are read in an hour, so storage reads always have room.
+*/
+var ACTIVITY_PER_HOUR = 30;
+var activityCalls = [];
+/** Bitjita writes times as "2026-11-27 10:49:06.003104+00"; this turns them into plain ISO times. */
+function isoOf(stamp) {
+	const text = String(stamp ?? "");
+	const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(text);
+	if (!m) {
+		const parsed = new Date(text);
+		return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+	}
+	let zone = m[4] ?? "Z";
+	if (/^[+-]\d{2}$/.test(zone)) zone += ":00";
+	else if (/^[+-]\d{4}$/.test(zone)) zone = `${zone.slice(0, 3)}:${zone.slice(3)}`;
+	return (/* @__PURE__ */ new Date(`${m[1]}T${m[2]}${m[3] ? m[3].slice(0, 4) : ""}${zone}`)).toISOString();
+}
+/** Bitjita's storage log, kept to deposits and withdrawals, newest first. */
+function movesOf(raw) {
+	const moves = [];
+	for (const log of raw?.logs ?? []) {
+		const type = log?.data?.type;
+		if (type !== "deposit_item" && type !== "withdraw_item") continue;
+		moves.push({
+			at: isoOf(log.timestamp),
+			who: String(log.subjectName ?? "Someone"),
+			whoId: String(log.subjectEntityId ?? ""),
+			kind: type === "deposit_item" ? "in" : "out",
+			item: ref(log.data.item_id, log.data.item_type),
+			qty: Number(log.data.quantity) || 0
+		});
+	}
+	return moves.sort((a, b) => a.at < b.at ? 1 : a.at > b.at ? -1 : 0);
+}
+/**
+* The latest deposits and withdrawals at one chest. Only the claim's own chests and the
+* chests inside the two shared houses (RESOURCE_HOUSES) can be read; for anything else
+* the answer is null. `ownerId` is the house owner, for a chest inside a house.
+*/
+async function chestActivity(memo, claimId, chestId, ownerId) {
+	if (ownerId) {
+		const owner = (await claimDetail(memo, claimId)).members.find((m) => m.id === ownerId);
+		if (!owner || !isHouseOwner(owner.name)) return null;
+		let houses = await get(memo, `/players/${ownerId}/housing`, TTL.houseList, []);
+		if (!Array.isArray(houses)) houses = [houses];
+		let inside = false;
+		for (const h of houses) {
+			if (!h?.buildingEntityId || h.isEmpty) continue;
+			if (((await get(memo, `/players/${ownerId}/housing/${h.buildingEntityId}`, TTL.storage, { inventories: [] })).inventories ?? []).some((box) => String(box.entityId) === chestId)) {
+				inside = true;
+				break;
+			}
+		}
+		if (!inside) return null;
+	} else if (!((await get(memo, `/claims/${claimId}/inventories`, TTL.storage)).buildings ?? []).some((b) => String(b.entityId) === chestId)) return null;
+	const key = `https://activity.internal/v1/${chestId}`;
+	const ready = await memo.get(key);
+	if (ready) return JSON.parse(ready);
+	const now = Date.now();
+	while (activityCalls.length && now - activityCalls[0] > 36e5) activityCalls.shift();
+	if (activityCalls.length >= ACTIVITY_PER_HOUR) throw new UpstreamError(429, `Holding off: ${activityCalls.length} chest logs read in the last hour.`);
+	activityCalls.push(now);
+	const raw = await get(memo, `/logs/storage?buildingEntityId=${chestId}&limit=${ACTIVITY_LIMIT}`, 60, { logs: [] });
+	const activity = {
+		chest: chestId,
+		at: (/* @__PURE__ */ new Date()).toISOString(),
+		moves: movesOf(raw),
+		more: (raw?.logs?.length ?? 0) >= ACTIVITY_LIMIT
+	};
+	memo.set(key, JSON.stringify(activity), TTL.activity);
+	return activity;
 }
 async function claimDetail(memo, id) {
 	const [claim, members] = await Promise.all([get(memo, `/claims/${id}`, TTL.claim), get(memo, `/claims/${id}/members`, TTL.members, { members: [] })]);
@@ -3951,49 +4094,6 @@ async function stockSnapshot(memo, claimId, wantedPlayers, fresh = false) {
 	if (!problems.length) memo.set(whole, JSON.stringify(snapshot), TTL.snapshot + TTL.fallback);
 	return snapshot;
 }
-// src/lib/claim.ts
-/**
-* This is an internal tool for one claim. Both the site and the server read the
-* claim from here, and the server refuses to look up anything else.
-*/
-var CLAIM = {
-	/** The claim's id in the game (and on Bitjita). */
-	id: "576460753011209206",
-	/** Its place in the address bar: /nowhere/claim-t5-push */
-	slug: "nowhere",
-	name: "Nowhere"
-};
-/**
-* The site lives inside the Companion app, which serves everything under /nowhere
-* from here (see server/embed.ts) and keeps every other address for itself.
-*/
-var HOME = "/" + CLAIM.slug;
-/** The site's own API. The Companion's /api/… is its pass-through to Bitjita, a different thing. */
-var API = HOME + "/api";
-/** Pages of the site that sit where a push's address would, so no push may take these names. */
-var RESERVED_SLUGS = [
-	"travelers",
-	"pushes",
-	"api",
-	"assets"
-];
-var MAIN_OF = new Map([
-	{
-		main: "Velcruza",
-		alts: ["Vel", "Cynth"]
-	},
-	{
-		main: "chels",
-		alts: ["pumapance"]
-	},
-	{
-		main: "skyediver",
-		alts: ["whitelinx"]
-	},
-	{ main: "Frostyy" },
-	{ main: "Silentstorm" }
-].flatMap((p) => (p.alts ?? []).map((alt) => [alt.toLowerCase(), p.main])));
-Object.fromEntries(MAIN_OF);
 // server/app.ts
 /**
 * The site's API, written once for every place it can be hosted.
@@ -4098,6 +4198,17 @@ function createApp(hostOf) {
 	api.get("/stock", async (c) => {
 		const players = (c.req.query("players") ?? "").split(",").filter((p) => ID.test(p)).slice(0, 60);
 		return c.json(await stockSnapshot(hostOf(c).memo, CLAIM.id, players, c.req.query("fresh") === "1"));
+	});
+	/**
+	* A chest's latest deposits and withdrawals, for the Resources page. Only the claim's chests,
+	* or (with `owner`) a chest inside one of the two shared houses.
+	*/
+	api.get("/activity", async (c) => {
+		const chest = c.req.query("chest") ?? "";
+		const owner = c.req.query("owner") || void 0;
+		if (!ID.test(chest) || owner !== void 0 && !ID.test(owner)) return c.json({ error: "That is not a chest." }, 400);
+		const activity = await chestActivity(hostOf(c).memo, CLAIM.id, chest, owner);
+		return activity ? c.json(activity) : c.json({ error: `That chest isn't one of ${CLAIM.name}'s shared chests.` }, 404);
 	});
 	/** How hard this server has been leaning on Bitjita. */
 	api.get("/status", (c) => c.json(usage()));

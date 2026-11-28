@@ -9,7 +9,7 @@
  * host is the Companion's pass-through to Bitjita.
  */
 import { Hono, type Context, type Env } from 'hono';
-import { claimDetail, stockSnapshot, UpstreamError, usage, type Memo } from './bitjita.ts';
+import { chestActivity, claimDetail, stockSnapshot, UpstreamError, usage, type Memo } from './bitjita.ts';
 import { API, CLAIM, RESERVED_SLUGS } from '../src/lib/claim.ts';
 import { BUY_ORDER } from '../src/lib/shapes.ts';
 import type { Board, Push, PushKind, PushStatus } from '../src/lib/shapes.ts';
@@ -143,6 +143,18 @@ export function createApp<E extends Env = Env>(hostOf: (c: Context<E, any, any>)
     const players = (c.req.query('players') ?? '').split(',').filter((p) => ID.test(p)).slice(0, 60);
     // fresh=1 is someone pressing refresh; the snapshot still has to be old enough before Bitjita is asked again.
     return c.json(await stockSnapshot(hostOf(c).memo, CLAIM.id, players, c.req.query('fresh') === '1'));
+  });
+
+  /**
+   * A chest's latest deposits and withdrawals, for the Resources page. Only the claim's chests,
+   * or (with `owner`) a chest inside one of the two shared houses.
+   */
+  api.get('/activity', async (c) => {
+    const chest = c.req.query('chest') ?? '';
+    const owner = c.req.query('owner') || undefined;
+    if (!ID.test(chest) || (owner !== undefined && !ID.test(owner))) return c.json({ error: 'That is not a chest.' }, 400);
+    const activity = await chestActivity(hostOf(c).memo, CLAIM.id, chest, owner);
+    return activity ? c.json(activity) : c.json({ error: `That chest isn't one of ${CLAIM.name}'s shared chests.` }, 404);
   });
 
   /** How hard this server has been leaning on Bitjita. */
