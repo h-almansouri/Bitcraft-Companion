@@ -12,6 +12,7 @@ import { BoardPage } from './pages/BoardPage.tsx';
 import { PushPage } from './pages/PushPage.tsx';
 import { ResourcesPage } from './pages/ResourcesPage.tsx';
 import { Travelers } from './pages/Travelers.tsx';
+import { BackToTop } from './ui/longpage.tsx';
 import { UnlockHost } from './ui/unlock.tsx';
 
 export const APP_NAME = 'Goal Tracker';
@@ -181,6 +182,7 @@ function Shell({ route, children }: { route: Route; children: ReactNode }) {
           </div>
         </header>
         <main className="mx-auto max-w-[1180px] px-3 pb-24 pt-5 sm:px-5">{children}</main>
+        <BackToTop />
         <footer className="px-3 pb-5 text-[11px] text-muted sm:px-5 lg:hidden">{DISCLAIMER}</footer>
       </div>
     </div>

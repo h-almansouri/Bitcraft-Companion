@@ -183,3 +183,17 @@
     animation: none;
   }
 }
+
+/*
+ * Foldable sections on the long pages (see Section in ui/longpage.tsx). The elements marked
+ * data-fold-keep lead from the section down to its title. Everything after them fades out and
+ * can't be clicked or tabbed to while the section is folded.
+ */
+.fold [data-fold-keep] ~ :not([data-fold-keep]) {
+  transition: opacity 260ms ease, visibility 0s linear 0s;
+}
+.fold[data-folded] [data-fold-keep] ~ :not([data-fold-keep]) {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms ease, visibility 0s linear 200ms;
+}

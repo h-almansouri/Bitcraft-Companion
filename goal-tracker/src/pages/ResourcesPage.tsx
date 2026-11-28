@@ -27,7 +27,7 @@ import { useLoad, type Loaded } from '../lib/hooks.ts';
 import { Link } from '../lib/router.tsx';
 import type { ChestActivity, ClaimDetail, ClaimMember, Push, StockSnapshot } from '../lib/shapes.ts';
 import { Card, Drawer, Notice, Pill, SectionLabel, Skeleton, TierChip, cx, inputBase } from '../ui/kit.tsx';
-import { BackButton, JumpBar, Section, SectionBreak, SectionHead, SubHead, jumpTo, titleFont, useLandOnHash } from '../ui/longpage.tsx';
+import { JumpBar, Section, SectionBreak, SectionHead, SubHead, jumpTo, titleFont, useLandOnHash } from '../ui/longpage.tsx';
 import { StorageRead, useStock } from '../ui/storage.tsx';
 
 const SECTIONS = [
@@ -167,7 +167,6 @@ export function ResourcesPage() {
         <SectionBreak />
       </div>
       <ChestDrawer opened={opened} onClose={() => setOpened(null)} onPick={(item) => opened && setOpened({ ...opened, item })} ctx={ctx} />
-      <BackButton />
     </div>
   );
 }
