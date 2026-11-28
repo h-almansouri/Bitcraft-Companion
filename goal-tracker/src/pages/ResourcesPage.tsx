@@ -39,7 +39,7 @@ const SECTIONS = [
 ] as const;
 
 /** Short notes on the boxes with a special job, by chest nickname (any case). */
-const BOX_NOTES: Record<string, string> = { dropbox: 'Claim push drop-off', food: 'Free food', 'tool mats': 'Tool upgrades' };
+const BOX_NOTES: Record<string, string> = { dropbox: 'Misc items', food: 'Free food', 'tool mats': 'Tool upgrades' };
 
 /** How many items a box card lists before "and N more". */
 const PREVIEW = 5;
@@ -129,7 +129,7 @@ const matches = (name: string, query: string) => {
 };
 
 /**
- * Claim resources, one long scroll: the storage boxes anyone can use and the admins-only claim
+ * Claim resources, one long scroll: the storage boxes anyone can use and the co-owners-only claim
  * house up top, a general FAQ, and the tool house at the bottom for people in tool pushes.
  * Every chest can be opened to see what's inside and its latest deposits and withdrawals.
  */
@@ -178,10 +178,8 @@ function Intro() {
       <div aria-hidden="true" className="pointer-events-none absolute inset-0" style={{ background: 'radial-gradient(ellipse 70% 90% at 0% 0%, var(--accent-soft), transparent 70%)' }} />
       <div className="relative px-5 py-7 sm:px-9 sm:py-9">
         <SectionLabel>Claim resources</SectionLabel>
-        <h1 className="mt-1.5 text-[32px] font-semibold leading-tight sm:text-[42px]">Where our stuff lives</h1>
-        <p className="mt-3 text-[15px] leading-relaxed text-ink-2">
-          Everything {CLAIM.name} owns sits in one of three places. Here's who can use what, why it's set up this way, and what's in each one right now.
-        </p>
+        <h1 className="mt-1.5 text-[32px] font-semibold leading-tight sm:text-[42px]">Claim Resources &amp; Permissions</h1>
+        <p className="mt-3 text-[15px] leading-relaxed text-ink-2">An overview of the claim's shared resources.</p>
       </div>
     </section>
   );
@@ -192,8 +190,8 @@ const PLACES: { id: string; icon: ReactNode; title: string; sub?: string; body: 
     id: 'boxes',
     icon: <Boxes size={18} />,
     title: 'Storage boxes',
-    body: 'The chests around the claim, Food included. Take what you need, put in what you like.',
-    who: 'Everyone in the claim',
+    body: 'Storage chests laid around the claim, organized by processing station. Claim members are free to use resources within.',
+    who: 'All members',
     tracked: 'No',
     tone: 'good',
   },
@@ -202,8 +200,8 @@ const PLACES: { id: string; icon: ReactNode; title: string; sub?: string; body: 
     icon: <Lock size={18} />,
     title: 'Claim house',
     sub: RESOURCE_HOUSES.claim.name,
-    body: "The claim's main stockpile, contributions included. Claim pushes count what's in here.",
-    who: 'Admins only',
+    body: "The claim's central storehouse, primarily used to track claim projects.",
+    who: 'Co-owners',
     tracked: 'No',
     tone: 'warn',
   },
@@ -212,9 +210,9 @@ const PLACES: { id: string; icon: ReactNode; title: string; sub?: string; body: 
     icon: <Gem size={18} />,
     title: 'Tool house',
     sub: RESOURCE_HOUSES.tools.name,
-    body: 'Just for tool pushes. What you put in and take out counts toward your share.',
-    who: 'People in a tool push',
-    tracked: 'Yes, every move',
+    body: 'Tracked storage for tool pushes only.',
+    who: 'Tool push participants',
+    tracked: 'Yes, contributions & withdrawals',
     tone: 'info',
   },
 ];
@@ -222,7 +220,7 @@ const PLACES: { id: string; icon: ReactNode; title: string; sub?: string; body: 
 function Overview() {
   return (
     <Section id="overview">
-      <SectionHead id="overview" eyebrow="Overview" title="Three places, three sets of rules" />
+      <SectionHead id="overview" eyebrow="Overview" title="Three Central Storages" />
       <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
         {PLACES.map((p) => (
           <a key={p.id} href={'#' + p.id} onClick={(e) => jumpTo(p.id, e)} className="group no-underline">
@@ -240,7 +238,7 @@ function Overview() {
               <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{p.body}</p>
               <dl className="mt-auto grid grid-cols-2 gap-3 border-t border-line pt-3 text-[12px]">
                 <div>
-                  <dt className="text-muted">Who can take from it</dt>
+                  <dt className="text-muted">Permissions</dt>
                   <dd className="mt-0.5 font-semibold text-ink">{p.who}</dd>
                 </div>
                 <div>
@@ -257,16 +255,12 @@ function Overview() {
       <div className="mt-4 flex flex-wrap items-center gap-x-2.5 gap-y-2 border-y border-line py-3.5 text-[13px] text-ink-2">
         <Pill tone="good">Storage boxes</Pill>
         <ArrowRight size={14} className="text-muted" />
-        <span>every so often, admins move the extra</span>
+        <span>every so often, co-owners move surplus materials</span>
         <ArrowRight size={14} className="text-muted" />
         <Pill tone="warn">Claim house</Pill>
         <ArrowRight size={14} className="text-muted" />
-        <span>claim pushes count it</span>
+        <span>contributes to claim projects</span>
       </div>
-      <p className="mt-3 flex items-start gap-2 text-[13px] text-ink-2">
-        <Eye size={15} className="mt-0.5 shrink-0 text-accent-ink" />
-        <span>Wherever it is, anyone can see what's inside and every deposit and withdrawal. Click any chest or item below.</span>
-      </p>
     </Section>
   );
 }
@@ -303,14 +297,14 @@ function StorageBoxes({
 
   return (
     <Section id="boxes">
-      <SectionHead id="boxes" eyebrow="Storage boxes" title="Free for everyone in the claim" extra={<Pill tone="good">Open to all members</Pill>}>
+      <SectionHead id="boxes" eyebrow="Storage boxes" title="Resources for claim members" extra={<Pill tone="good">Open to all members</Pill>}>
         <p>
-          Once you've joined the claim, everything in the storage boxes around it is yours to use, Food chest included. Grab what you need to upgrade your gear or finish
-          processing something all the way through. You can drop things in too. Nothing here is tracked, so there's no score to keep.
+          Once you've joined the claim, everything in the storage boxes around it is yours to use. Grab whatever you may need, from tool upgrades, food, to help completing
+          personal projects. If you would like to contribute to a claim project, such as a tier push, simply deposit your contribution in one of the storage boxes.
         </p>
         <p>
-          We keep the boxes stocked low on purpose. Every so often, an admin moves the extra into the claim house. There's always enough around to use, but if someone takes a
-          big chunk, by accident or not, nobody's progress gets wiped out.
+          Every so often, a co-owner moves extra resources into the Claim House. Similarly, if materials are running low, co-owners will move resources from the Claim House to
+          the storage chests. This is to ensure that any large individual withdrawals don't hold back claim-wide projects.
         </p>
       </SectionHead>
 
@@ -333,7 +327,7 @@ function StorageBoxes({
 
       {q && inHouse.length > 0 && (
         <p className="mt-3 text-[13px] text-ink-2">
-          <span className="font-semibold text-ink">Also in the claim house:</span> {inHouse.map((i) => `${num(i.qty)} ${i.name}`).join(', ')}. Ask an admin if you need some.
+          <span className="font-semibold text-ink">Also in the claim house:</span> {inHouse.map((i) => `${num(i.qty)} ${i.name}`).join(', ')}. Ask a co-owner if you need some.
         </p>
       )}
 
@@ -471,18 +465,18 @@ function ClaimHouse({
         title="The claim's stockpile"
         extra={
           <Pill tone="warn">
-            <Lock size={10} /> Admins only
+            <Lock size={10} /> Co-owners only
           </Pill>
         }
       >
         <p>
-          Most of the claim's resources live in {house.name}, contributions included. Only admins can get in, so the big piles are safe from slips and grabs.
+          Most of the claim's resources live in {house.name}, contributions included. Only co-owners can get in, so the big piles are safe from slips and grabs.
         </p>
         <p>
           Anyone can still see inside, though. Claim pushes count what's in the house, so when a push's numbers go up or down, you can open the house below and see exactly why.
         </p>
         <p>
-          Need something from it? Ask an admin on{' '}
+          Need something from it? Ask a co-owner on{' '}
           <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className="font-medium text-accent-ink">
             Discord
           </a>{' '}
@@ -511,13 +505,13 @@ const FAQ: { q: string; a: ReactNode }[] = [
   { q: 'Does anything I put in get tracked?', a: "Only in the tool house, for tool pushes. The boxes and the claim house aren't tracked." },
   {
     q: 'Where did all the [thing] go?',
-    a: 'Most likely an admin moved it into the claim house. Open the box above and check its recent activity: every deposit and withdrawal shows who did it and when.',
+    a: 'Most likely a co-owner moved it into the claim house. Open the box above and check its recent activity: every deposit and withdrawal shows who did it and when.',
   },
   {
     q: 'How do I get something from the claim house?',
     a: (
       <>
-        Ask an admin on{' '}
+        Ask a co-owner on{' '}
         <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className="font-medium text-accent-ink">
           Discord
         </a>
@@ -529,7 +523,10 @@ const FAQ: { q: string; a: ReactNode }[] = [
     q: 'Why not keep everything in the boxes?',
     a: "One slip, or one bad actor, could empty a box. Keeping the boxes light and the stockpile in the house keeps everyone's progress safe, with plenty still around to use.",
   },
-  { q: 'Where do I drop stuff for a claim push?', a: "The Dropbox. The push's numbers pick it up within seconds." },
+  {
+    q: 'Where do I drop stuff for a claim push?',
+    a: "Any storage box works, and the push's numbers pick it up within seconds. If it doesn't fit any of the other chests, put it in the Dropbox, which holds misc items.",
+  },
   {
     q: 'How up to date is this?',
     a: "It's live. What's in each box comes straight from the game, and the page updates by itself every 15 seconds while it's open. A box's deposits and withdrawals are read fresh each time you open it.",
@@ -553,9 +550,9 @@ function Faq() {
 }
 
 const ACCESS: { title: string; body: string }[] = [
-  { title: 'Sign up for the push', body: "Tell an admin you're in, and they'll give you access to the house." },
+  { title: 'Sign up for the push', body: "Tell a co-owner you're in, and they'll give you access to the house." },
   { title: 'No push, no access', body: "If you're not in the push, you can't get in. That way nothing leaves the house without counting against someone." },
-  { title: 'Heading out?', body: "Let an admin know. If you've taken out more than you've put in, square that up first." },
+  { title: 'Heading out?', body: "Let a co-owner know. If you've taken out more than you've put in, square that up first." },
 ];
 
 const STEPS: { title: string; body: string }[] = [
@@ -597,7 +594,7 @@ const TOOL_FAQ: { q: string; a: string }[] = [
   { q: 'Do my alts count?', a: 'Yep, for your main. Everything your alts put in or take out goes on your main\'s balance.' },
   {
     q: 'What about things moved from the boxes or the claim house?',
-    a: 'They count for the claim, even when an admin moves them. The claim is one participant and gets its share like anyone else. What you bring of your own counts for you.',
+    a: 'They count for the claim, even when a co-owner moves them. The claim is one participant and gets its share like anyone else. What you bring of your own counts for you.',
   },
   {
     q: 'What does it mean if my name is red?',
