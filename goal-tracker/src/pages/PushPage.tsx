@@ -58,7 +58,7 @@ export function PushPage({ slug, pushSlug }: { slug: string; pushSlug: string })
   const membersPending = !!push?.leftOut && claim.loading;
   /** Marked complete: what it took has been spent, so there is nothing left to check storage for. */
   const finished = push?.status === 'done';
-  // Read when the page opens, then every 15 minutes while it is on screen (see useStock). A finished push reads nothing.
+  // Read when the page opens, then every 15 seconds while it is on screen (see useStock). A finished push reads nothing.
   const stock = useStock(push && !finished && !membersPending ? `stock:${players}` : null, players ? players.split(',') : []);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [marking, setMarking] = useState(false);

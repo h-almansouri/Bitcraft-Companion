@@ -54,13 +54,23 @@ export function factsFrom(gamedata: any): GameFacts {
 
 // ---- reading rows ---------------------------------------------------------------
 
-const rows = (t: Tables, table: string): Row[] => [...(t.get(table)?.values() ?? [])];
 /** Ids arrive as text when long and as numbers when short; compare them as text. */
 const id = (value: unknown) => String(value ?? '0');
 const isId = (value: string) => /^\d{1,24}$/.test(value);
 /** The game packs the region into the top byte of every id. */
 export const regionOf = (entityId: string) => Number(BigInt(entityId) >> 56n);
-const byNumber = (a: string, b: string) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0);
+const byNumber = (a: string, b: string) => {
+  if (!isId(a) || !isId(b)) return a < b ? -1 : a > b ? 1 : 0;
+  return BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+};
+/**
+ * A table's rows, always in the same order (by id). A row that changes is re-filed at the
+ * end of what the relay connection keeps, so without this the same storage could come out
+ * in a different order from one ask to the next, and a page asking every 15 seconds would
+ * take that for a change.
+ */
+const rows = (t: Tables, table: string): Row[] =>
+  [...(t.get(table)?.entries() ?? [])].sort(([a], [b]) => byNumber(a, b)).map(([, row]) => row);
 const round = (n: number) => Math.round(n * 100) / 100;
 
 /** "Some value or nothing": [0, value] or [1, []] on the wire. */
@@ -317,7 +327,7 @@ export function stockFrom(t: Tables, claimId: string, wanted: string[], facts: G
   }
   // Buildings already standing count toward "build a T5 loom" style goals.
   const standing = new Map<string, number>();
-  for (const b of buildings?.values() ?? []) {
+  for (const b of rows(t, 'building_state')) {
     if (id(b.claim_entity_id) !== claimId) continue;
     const key = 'b.' + b.building_description_id;
     standing.set(key, (standing.get(key) ?? 0) + 1);
@@ -339,7 +349,8 @@ export function stockFrom(t: Tables, claimId: string, wanted: string[], facts: G
 
     // What they carry: bag (0), toolbelt (1), wallet (2), and any recovery chest (-1). The bag travels
     // with the player, so no bag here means they are in another region.
-    const carried = heldBy.get(pid) ?? [];
+    const shelf = (inv: Row) => (Number(inv.inventory_index) < 0 ? 99 : Number(inv.inventory_index));
+    const carried = [...(heldBy.get(pid) ?? [])].sort((a, b) => shelf(a) - shelf(b));
     if (!carried.some((inv) => Number(inv.inventory_index) === 0)) away.push({ id: pid, name: owner });
     for (const inv of carried) {
       const index = Number(inv.inventory_index);

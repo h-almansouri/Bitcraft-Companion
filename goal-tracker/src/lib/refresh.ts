@@ -1,24 +1,29 @@
 /**
  * When a page that is on screen asks for storage again by itself.
  *
- * The server shares one read of storage between everyone for 15 minutes, so the
- * page asks once the read it is showing is that old. Asking never forces a new
- * read: whoever asks first after the 15 minutes causes one, and everyone else
- * gets that same answer. That keeps Bitjita at four reads an hour at most,
- * however many people have the page open.
+ * The server keeps one relay connection and always holds the game as it stands
+ * (server/live.ts). A page asking is answered from the server's memory and costs the
+ * relay nothing, so pages look again every 15 seconds while they are on screen. That is
+ * what makes them live.
+ *
+ * While no relay can be reached the server reads the older way, and the limit that
+ * protects Bitjita sits on the server, not here (server/bitjita.ts): one fetched read
+ * is shared by everyone for 15 minutes, however often pages ask.
  */
-export const AUTO_REFRESH_MINUTES = 15;
+export const LIVE_REFRESH_SECONDS = 15;
 
-const GAP = AUTO_REFRESH_MINUTES * 60_000;
-/** Ask a little late, so the server's own 15 minutes are certainly up when the ask arrives. */
-const SLACK = 15_000;
+/** A page whose last answer is older than this no longer calls itself live: its asks are failing, or it was in the background. */
+const LIVE_FOR_MS = 45_000;
+
+/** `asked` is when this page last asked. A page never asks by itself more often than every 15 seconds. */
+export function dueForAutoRead(now: number, asked: number): boolean {
+  return now - asked >= LIVE_REFRESH_SECONDS * 1000;
+}
 
 /**
- * `readAt` is when the storage on screen was read (null when there is none).
- * `asked` is when this page last asked without getting a newer read back, or 0.
- * A page never asks by itself more than once in 15 minutes, whatever came back.
+ * Whether what is on screen may be called live: it came over the relay (`live`), and the
+ * server's last answer to this page (`answeredAt`) is recent.
  */
-export function dueForAutoRead(now: number, readAt: number | null, asked: number): boolean {
-  const countFrom = Math.max(readAt === null ? 0 : readAt + SLACK, asked);
-  return now - countFrom >= GAP;
+export function showsLive(now: number, live: boolean | undefined, answeredAt: number): boolean {
+  return !!live && now - answeredAt < LIVE_FOR_MS;
 }

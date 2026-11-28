@@ -530,10 +530,10 @@ const FAQ: { q: string; a: ReactNode }[] = [
     q: 'Why not keep everything in the boxes?',
     a: "One slip, or one bad actor, could empty a box. Keeping the boxes light and the stockpile in the house keeps everyone's progress safe, with plenty still around to use.",
   },
-  { q: 'Where do I drop stuff for a claim push?', a: "The Dropbox. The push's numbers pick it up the next time storage is read." },
+  { q: 'Where do I drop stuff for a claim push?', a: "The Dropbox. The push's numbers pick it up within seconds." },
   {
     q: 'How up to date is this?',
-    a: 'Storage is read again every 15 minutes while the page is open, or press refresh. Deposits and withdrawals come from Bitjita, a community data site, and can run a few minutes behind the game.',
+    a: "It's live. What's in each box comes straight from the game, and the page updates by itself every 15 seconds while it's open. A box's deposits and withdrawals are read fresh each time you open it.",
   },
 ];
 

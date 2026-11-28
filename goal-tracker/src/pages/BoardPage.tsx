@@ -44,7 +44,7 @@ export function BoardPage({ slug }: { slug: string }) {
   const players = useMemo(() => [...new Set(open.flatMap((p) => countedPlayers(p, claim.data?.members)))].sort(), [open, claim.data]);
   /** Some push counts whoever is in the claim, and the member list is still on its way. */
   const membersPending = claim.loading && open.some((p) => p.leftOut);
-  // Read when the page opens, then every 15 minutes while it is on screen (see useStock).
+  // Read when the page opens, then every 15 seconds while it is on screen (see useStock).
   const stock = useStock(open.length && !membersPending ? `stock:${players.join(',')}` : null, players);
 
   if (board.loading) return <Skeleton className="h-64" />;

@@ -5036,13 +5036,22 @@ function factsFrom(gamedata) {
 		building: (id) => buildings.get(id)
 	};
 }
-var rows = (t, table) => [...t.get(table)?.values() ?? []];
 /** Ids arrive as text when long and as numbers when short; compare them as text. */
 var id = (value) => String(value ?? "0");
 var isId = (value) => /^\d{1,24}$/.test(value);
 /** The game packs the region into the top byte of every id. */
 var regionOf = (entityId) => Number(BigInt(entityId) >> 56n);
-var byNumber = (a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+var byNumber = (a, b) => {
+	if (!isId(a) || !isId(b)) return a < b ? -1 : a > b ? 1 : 0;
+	return BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+};
+/**
+* A table's rows, always in the same order (by id). A row that changes is re-filed at the
+* end of what the relay connection keeps, so without this the same storage could come out
+* in a different order from one ask to the next, and a page asking every 15 seconds would
+* take that for a change.
+*/
+var rows = (t, table) => [...t.get(table)?.entries() ?? []].sort(([a], [b]) => byNumber(a, b)).map(([, row]) => row);
 var round = (n) => Math.round(n * 100) / 100;
 /** "Some value or nothing": [0, value] or [1, []] on the wire. */
 var some = (option) => Array.isArray(option) ? option[0] === 0 ? option[1] : void 0 : option?.some;
@@ -5255,7 +5264,7 @@ function stockFrom(t, claimId, wanted, facts, region) {
 		});
 	}
 	const standing = /* @__PURE__ */ new Map();
-	for (const b of buildings?.values() ?? []) {
+	for (const b of rows(t, "building_state")) {
 		if (id(b.claim_entity_id) !== claimId) continue;
 		const key = "b." + b.building_description_id;
 		standing.set(key, (standing.get(key) ?? 0) + 1);
@@ -5287,7 +5296,8 @@ function stockFrom(t, claimId, wanted, facts, region) {
 				items
 			});
 		};
-		const carried = heldBy.get(pid) ?? [];
+		const shelf = (inv) => Number(inv.inventory_index) < 0 ? 99 : Number(inv.inventory_index);
+		const carried = [...heldBy.get(pid) ?? []].sort((a, b) => shelf(a) - shelf(b));
 		if (!carried.some((inv) => Number(inv.inventory_index) === 0)) away.push({
 			id: pid,
 			name: owner

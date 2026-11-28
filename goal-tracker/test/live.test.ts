@@ -231,7 +231,7 @@ describe('storage and crafts, from the relay', () => {
   });
 
   it('counts the buildings standing in the claim, and no one else’s', () => {
-    expect(place('built')!.items).toEqual([['b.3001', 1], ['b.985246037', 1], ['b.4014', 1]]);
+    expect(place('built')!.items).toEqual([['b.985246037', 1], ['b.4014', 1], ['b.3001', 1]]);
   });
 
   it("names each member's storage the way the site always has", () => {
@@ -248,6 +248,15 @@ describe('storage and crafts, from the relay', () => {
       [`p${CHELS}:9004`, 'Storage', [['i.7', 1]]],
     ]);
     expect(stock.locations.every((l) => l.kind === 'claim' || l.owner === 'chels' || l.owner === 'Vel')).toBe(true);
+  });
+
+  it('answers in the same order every time, however the rows happen to be kept', () => {
+    // A row that changes is re-filed at the end of what the connection keeps. A page asking every
+    // 15 seconds must not take that reshuffle for a change in storage.
+    const shuffled = base();
+    for (const table of Object.keys(shuffled)) shuffled[table] = [...shuffled[table]].reverse();
+    expect(stockFrom(tablesOf(shuffled), C, [VEL, STRANGER, CHELS], facts, 8)).toEqual(stock);
+    expect(JSON.stringify(stockFrom(tablesOf(shuffled), C, [VEL, STRANGER, CHELS], facts, 8))).toBe(JSON.stringify(stock));
   });
 
   it('says who is in another region, and never looks up anyone outside the claim', () => {

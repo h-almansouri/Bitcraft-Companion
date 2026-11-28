@@ -1,32 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stockSnapshot } from '../server/bitjita.ts';
 import { memoryMemo } from '../server/storage.ts';
-import { AUTO_REFRESH_MINUTES, dueForAutoRead } from '../src/lib/refresh.ts';
+import { LIVE_REFRESH_SECONDS, dueForAutoRead, showsLive } from '../src/lib/refresh.ts';
 
 const MIN = 60_000;
 
 describe('when a page asks for storage again by itself', () => {
-  const read = Date.parse('2026-11-23T12:00:00Z');
+  const asked = Date.parse('2026-11-27T12:00:00Z');
 
-  it('waits until the read on screen is 15 minutes old', () => {
-    expect(AUTO_REFRESH_MINUTES).toBe(15);
-    expect(dueForAutoRead(read + 14 * MIN, read, 0)).toBe(false);
-    // A few seconds late on purpose, so the server's own 15 minutes are up.
-    expect(dueForAutoRead(read + 15 * MIN + 10_000, read, 0)).toBe(false);
-    expect(dueForAutoRead(read + 15 * MIN + 15_000, read, 0)).toBe(true);
+  it('looks again every 15 seconds while it is on screen, never more often', () => {
+    expect(LIVE_REFRESH_SECONDS).toBe(15);
+    expect(dueForAutoRead(asked + 5_000, asked)).toBe(false);
+    expect(dueForAutoRead(asked + 14_999, asked)).toBe(false);
+    expect(dueForAutoRead(asked + 15_000, asked)).toBe(true);
+    // A tab that was in the background for an hour asks once when it comes back, not sixty times.
+    expect(dueForAutoRead(asked + 60 * MIN, asked)).toBe(true);
+    expect(dueForAutoRead(asked + 60 * MIN + 1_000, asked + 60 * MIN)).toBe(false);
   });
 
-  it('asks once, then leaves it 15 minutes when nothing newer came back', () => {
-    const asked = read + 16 * MIN;
-    expect(dueForAutoRead(asked + 1 * MIN, read, asked)).toBe(false);
-    expect(dueForAutoRead(asked + 14 * MIN, read, asked)).toBe(false);
-    expect(dueForAutoRead(asked + 15 * MIN, read, asked)).toBe(true);
-  });
-
-  it('tries again 15 minutes after a load that failed outright', () => {
-    const opened = read;
-    expect(dueForAutoRead(opened + 5 * MIN, null, opened)).toBe(false);
-    expect(dueForAutoRead(opened + 15 * MIN, null, opened)).toBe(true);
+  it('calls itself live only while answers from the relay keep arriving', () => {
+    expect(showsLive(asked + 15_000, true, asked)).toBe(true);
+    // Two looks in a row went unanswered.
+    expect(showsLive(asked + 46_000, true, asked)).toBe(false);
+    // Read the older way (no relay could be reached): not live, however recent.
+    expect(showsLive(asked + 1_000, false, asked)).toBe(false);
+    expect(showsLive(asked + 1_000, undefined, asked)).toBe(false);
   });
 });
 
