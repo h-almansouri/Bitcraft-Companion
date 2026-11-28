@@ -59,7 +59,11 @@ export function ChainsTab({ scope }: { scope: PushScope }) {
   const wanted = (c: Chain) => !!focus && c.stages.some((s) => s.id === focus);
 
   const shown = chains.filter((c) => wanted(c) || ((!f.short || c.open) && (!picky || c.stages.some(fits))));
-  const groups = [...new Set(shown.map((c) => c.profession))].sort((a, b) => professionRank(a) - professionRank(b)).map((p) => [p, shown.filter((c) => c.profession === p)] as const);
+  // Professions with chains still to cover come first; fully covered ones drop to the bottom. Each part keeps the usual order.
+  const covered = (p: string) => !shown.some((c) => c.profession === p && c.open);
+  const groups = [...new Set(shown.map((c) => c.profession))]
+    .sort((a, b) => Number(covered(a)) - Number(covered(b)) || professionRank(a) - professionRank(b))
+    .map((p) => [p, shown.filter((c) => c.profession === p)] as const);
 
   // Arriving from "see the full picture" on a material: bring its chain into view.
   useEffect(() => {

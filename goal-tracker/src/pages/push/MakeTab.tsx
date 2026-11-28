@@ -61,7 +61,11 @@ export function MakeTab({ scope }: { scope: PushScope }) {
   const bought = listed.filter((r) => r.step.toGo <= 0);
   // Gold still to spend at the travelers, for everything left to buy.
   const gold = toBuy.reduce((sum, r) => sum + (ctx.game.price[r.step.id] ? goldFor(ctx.game.price[r.step.id], r.step.toGo) : 0), 0);
-  const groups = [...new Set(shown.map((p) => p.profession))].sort((a, b) => professionRank(a) - professionRank(b)).map((p) => [p, shown.filter((x) => x.profession === p)] as const);
+  // Professions with something left to make come first; finished ones drop to the bottom. Each part keeps the usual order.
+  const finished = (p: string) => !shown.some((x) => x.profession === p && x.open);
+  const groups = [...new Set(shown.map((p) => p.profession))]
+    .sort((a, b) => Number(finished(a)) - Number(finished(b)) || professionRank(a) - professionRank(b))
+    .map((p) => [p, shown.filter((x) => x.profession === p)] as const);
 
   // With filters on, groups start open so the matching steps are in view; otherwise they start folded.
   const isOpen = (id: Ref) => flipped.has(id) !== picky;
