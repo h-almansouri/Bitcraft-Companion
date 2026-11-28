@@ -64,24 +64,42 @@ export function useLandOnHash() {
   }, []);
 }
 
+/** How far down the screen a section's top must come up past to light up in the jump bar: just under the sticky header and bar. */
+const LIT_LINE = 140;
+
 /** Sticks under the header and lights up the section on screen. */
 export function JumpBar({ sections }: { sections: readonly PageSection[] }) {
   const [current, setCurrent] = useState<string | null>(null);
   useEffect(() => {
-    const seen = new Map<string, boolean>();
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) seen.set(e.target.id, e.isIntersecting);
-        // The first section, in page order, with any part in the band near the top of the screen.
-        setCurrent(sections.find((s) => seen.get(s.id))?.id ?? null);
-      },
-      { rootMargin: '-120px 0px -55% 0px' },
-    );
-    for (const s of sections) {
-      const el = document.getElementById(s.id);
-      if (el) observer.observe(el);
-    }
-    return () => observer.disconnect();
+    let frame = 0;
+    const check = () => {
+      frame = 0;
+      const tops = sections.flatMap((s) => {
+        const el = document.getElementById(s.id);
+        return el ? [{ id: s.id, top: el.getBoundingClientRect().top }] : [];
+      });
+      // The last section whose top has gone up past the line just under the sticky header and bar.
+      let lit = tops.filter((t) => t.top <= LIT_LINE).at(-1)?.id ?? null;
+      // At the very bottom the last sections can't scroll up that far, so the lowest one in view wins.
+      const atBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4;
+      if (atBottom) lit = tops.filter((t) => t.top < window.innerHeight * 0.85).at(-1)?.id ?? lit;
+      setCurrent(lit);
+    };
+    const soon = () => {
+      if (!frame) frame = requestAnimationFrame(check);
+    };
+    check();
+    window.addEventListener('scroll', soon, { passive: true });
+    window.addEventListener('resize', soon);
+    // Folding a section or live numbers arriving move things without a scroll.
+    const sizes = new ResizeObserver(soon);
+    sizes.observe(document.body);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', soon);
+      window.removeEventListener('resize', soon);
+      sizes.disconnect();
+    };
   }, [sections]);
 
   return (
