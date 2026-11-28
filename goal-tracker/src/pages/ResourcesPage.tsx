@@ -180,7 +180,7 @@ function Intro() {
       <div className="relative px-5 py-7 sm:px-9 sm:py-9">
         <SectionLabel>Claim resources</SectionLabel>
         <h1 className="mt-1.5 text-[32px] font-semibold leading-tight sm:text-[42px]">Where our stuff lives</h1>
-        <p className="mt-3 max-w-[60ch] text-[15px] leading-relaxed text-ink-2">
+        <p className="mt-3 text-[15px] leading-relaxed text-ink-2">
           Everything {CLAIM.name} owns sits in one of three places. Here's who can use what, why it's set up this way, and what's in each one right now.
         </p>
       </div>
@@ -655,7 +655,7 @@ function ToolHouse({ chests, found, stock, onOpen }: { chests: Chest[] | null; f
             </li>
           ))}
         </ol>
-        <p className="mt-3 max-w-[68ch] rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
+        <p className="mt-3 rounded-lg border border-line bg-surface-2 px-4.5 py-3.5 text-[13px] leading-relaxed text-ink-2">
           <span className="font-semibold text-ink">The claim chips in too.</span> It can stock shared inputs, like tannin, so you don't have to make them, and anything moved
           over from the boxes or the claim house counts for the claim rather than whoever carried it. When the claim comes out ahead, everyone does.
         </p>
@@ -666,7 +666,7 @@ function ToolHouse({ chests, found, stock, onOpen }: { chests: Chest[] | null; f
         {/* Its own box rather than a Card, so the gold border isn't overridden by the card's hairline. */}
         <div className="mt-4 rounded-card border border-accent/60 bg-surface px-5 py-5 sm:px-6" style={{ backgroundImage: 'linear-gradient(to right, var(--accent-soft), transparent 60%)' }}>
           <h4 className={cx('text-[19px]', titleFont)}>Honestly? We trust you.</h4>
-          <p className="mt-2 max-w-[70ch] text-[14px] leading-relaxed text-ink-2">
+          <p className="mt-2 text-[14px] leading-relaxed text-ink-2">
             We trust everyone to use their best judgment. If someone's trying to game the system, this claim just isn't for them. Tool pushes are meant to benefit everyone:
             nobody should feel taken advantage of, and no one person should get to take advantage of everyone else.
           </p>

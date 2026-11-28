@@ -162,7 +162,7 @@ export function SectionHead({ id, eyebrow, title, children, extra }: { id?: stri
       <h2 id={id ? `${id}-title` : undefined} className="mt-1.5 text-[24px] font-semibold text-ink sm:text-[28px]">
         {title}
       </h2>
-      {children && <div className="mt-2 max-w-[68ch] space-y-2 text-[14px] leading-relaxed text-ink-2">{children}</div>}
+      {children && <div className="mt-2 space-y-2 text-[14px] leading-relaxed text-ink-2">{children}</div>}
     </div>
   );
 }
@@ -181,7 +181,7 @@ export function SubHead({ title, children }: { title: string; children?: ReactNo
   return (
     <div>
       <h3 className={cx('text-[20px]', titleFont)}>{title}</h3>
-      {children && <p className="mt-1.5 max-w-[68ch] text-[14px] leading-relaxed text-ink-2">{children}</p>}
+      {children && <p className="mt-1.5 text-[14px] leading-relaxed text-ink-2">{children}</p>}
     </div>
   );
 }
