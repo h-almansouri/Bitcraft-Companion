@@ -1,12 +1,12 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { ArrowLeft, Boxes, ChevronRight, House, Menu, MessageCircle } from 'lucide-react';
+import { ArrowLeft, Boxes, ChevronDown, ChevronRight, House, Menu, MessageCircle } from 'lucide-react';
 import { api } from './lib/api.ts';
 import { putBoard, useCachedBoard } from './lib/boards.ts';
 import { CLAIM, DISCORD_URL, HOME } from './lib/claim.ts';
 import { useLoad } from './lib/hooks.ts';
 import { Link, usePath } from './lib/router.tsx';
 import type { Board, PushStatus } from './lib/shapes.ts';
-import { IconButton, SectionLabel, cx } from './ui/kit.tsx';
+import { IconButton, cx } from './ui/kit.tsx';
 import { AboutPage } from './pages/AboutPage.tsx';
 import { BoardPage } from './pages/BoardPage.tsx';
 import { PushPage } from './pages/PushPage.tsx';
@@ -50,6 +50,57 @@ function NavItem({ to, active, icon, children, onNavigate }: { to: string; activ
       {icon && <span className="flex w-4 shrink-0 justify-center">{icon}</span>}
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </Link>
+  );
+}
+
+/** Sidebar groups folded shut, remembered in this browser so they stay that way from page to page. */
+const FOLDED_KEY = 'nav-folded';
+function readFolded(): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FOLDED_KEY) ?? '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A heading in the sidebar with its links under it. Clicking the heading slides the links shut,
+ * or open again, with a quick ease.
+ */
+function NavGroup({ id, label, className, children }: { id: string; label: string; className?: string; children: ReactNode }) {
+  const [shut, setShut] = useState(() => readFolded().includes(id));
+  const toggle = () => {
+    const next = !shut;
+    setShut(next);
+    const others = readFolded().filter((g) => g !== id);
+    try {
+      localStorage.setItem(FOLDED_KEY, JSON.stringify(next ? [...others, id] : others));
+    } catch {
+      // Private browsing can refuse storage. The fold still works for this visit.
+    }
+  };
+  return (
+    <div className={className}>
+      <button
+        type="button"
+        aria-expanded={!shut}
+        onClick={toggle}
+        className="group flex w-full cursor-pointer items-center gap-1.5 px-5 pb-2 text-left text-muted transition-colors hover:text-ink"
+      >
+        <span className="text-[11px] font-semibold uppercase tracking-[0.08em]">{label}</span>
+        <ChevronDown size={13} aria-hidden="true" className={cx('shrink-0 transition-transform duration-300 ease-out', shut && '-rotate-90')} />
+      </button>
+      <div
+        inert={shut}
+        className={cx(
+          'grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+          shut ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">{children}</div>
+      </div>
+    </div>
   );
 }
 
@@ -102,26 +153,25 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
           </span>
           <span className="min-w-0 flex-1 truncate">Join us on Discord</span>
         </a>
-        <SectionLabel className="px-5 pb-2 pt-4">Claim</SectionLabel>
-        <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
-          General
-        </NavItem>
-        <NavItem to={RESOURCES} active={route.page === 'resources'} icon={<Boxes size={15} />} onNavigate={onNavigate}>
-          Resources
-        </NavItem>
-        {/* All pushes and Traveler restock are left out of the sidebar for now. Their pages still work at their links. */}
+        <NavGroup id="claim" label="Claim" className="pt-4">
+          <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
+            General
+          </NavItem>
+          <NavItem to={RESOURCES} active={route.page === 'resources'} icon={<Boxes size={15} />} onNavigate={onNavigate}>
+            Resources
+          </NavItem>
+          {/* All pushes and Traveler restock are left out of the sidebar for now. Their pages still work at their links. */}
+        </NavGroup>
 
         {open.length > 0 && (
-          <>
-            <SectionLabel className="px-5 pb-2 pt-6">Active pushes</SectionLabel>
+          <NavGroup id="active" label="Active pushes" className="pt-6">
             {open.map(pushLink)}
-          </>
+          </NavGroup>
         )}
         {done.length > 0 && (
-          <>
-            <SectionLabel className="px-5 pb-2 pt-6">Completed</SectionLabel>
+          <NavGroup id="completed" label="Completed" className="pt-6">
             {done.map(pushLink)}
-          </>
+          </NavGroup>
         )}
       </nav>
       <p className="shrink-0 border-t border-line px-5 py-3 text-[11px] leading-snug text-muted">{DISCLAIMER}</p>
