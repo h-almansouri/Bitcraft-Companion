@@ -220,7 +220,7 @@ const PLACES: { id: string; icon: ReactNode; title: string; sub?: string; body: 
 function Overview() {
   return (
     <Section id="overview">
-      <SectionHead id="overview" eyebrow="Overview" title="Three Central Storages" />
+      <SectionHead id="overview" eyebrow="Overview" title="Three central storages" />
       <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
         {PLACES.map((p) => (
           <a key={p.id} href={'#' + p.id} onClick={(e) => jumpTo(p.id, e)} className="group no-underline">
@@ -249,17 +249,6 @@ function Overview() {
             </Card>
           </a>
         ))}
-      </div>
-
-      {/* How stock moves between the first two. */}
-      <div className="mt-4 flex flex-wrap items-center gap-x-2.5 gap-y-2 border-y border-line py-3.5 text-[13px] text-ink-2">
-        <Pill tone="good">Storage boxes</Pill>
-        <ArrowRight size={14} className="text-muted" />
-        <span>every so often, co-owners move surplus materials</span>
-        <ArrowRight size={14} className="text-muted" />
-        <Pill tone="warn">Claim house</Pill>
-        <ArrowRight size={14} className="text-muted" />
-        <span>contributes to claim projects</span>
       </div>
     </Section>
   );
@@ -470,11 +459,10 @@ function ClaimHouse({
         }
       >
         <p>
-          Most of the claim's resources live in {house.name}, contributions included. Only co-owners can get in, so the big piles are safe from slips and grabs.
+          Most of the claim's resources live in {house.name}. This house is not used for any of Chels's personal items and is only used to store and track claim projects.
+          Only co-owners have access to this house.
         </p>
-        <p>
-          Anyone can still see inside, though. Claim pushes count what's in the house, so when a push's numbers go up or down, you can open the house below and see exactly why.
-        </p>
+        <p>Claim pushes count what's in this house, so when a push's numbers go up or down, you can track its inventory below.</p>
         <p>
           Need something from it? Ask a co-owner on{' '}
           <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer" className="font-medium text-accent-ink">
@@ -536,7 +524,7 @@ const FAQ: { q: string; a: ReactNode }[] = [
 function Faq() {
   return (
     <Section id="faq">
-      <SectionHead id="faq" eyebrow="FAQ" title="Good to know" />
+      <SectionHead id="faq" eyebrow="FAQ" title="Storage chest and store house FAQs" />
       <dl className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
         {FAQ.map((item) => (
           <Card key={item.q} className="px-5 py-4">
