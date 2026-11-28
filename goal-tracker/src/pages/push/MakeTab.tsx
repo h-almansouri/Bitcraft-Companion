@@ -61,11 +61,10 @@ export function MakeTab({ scope }: { scope: PushScope }) {
   const bought = listed.filter((r) => r.step.toGo <= 0);
   // Gold still to spend at the travelers, for everything left to buy.
   const gold = toBuy.reduce((sum, r) => sum + (ctx.game.price[r.step.id] ? goldFor(ctx.game.price[r.step.id], r.step.toGo) : 0), 0);
-  // Professions with something left to make come first; finished ones drop to the bottom. Each part keeps the usual order.
-  const finished = (p: string) => !shown.some((x) => x.profession === p && x.open);
-  const groups = [...new Set(shown.map((p) => p.profession))]
-    .sort((a, b) => Number(finished(a)) - Number(finished(b)) || professionRank(a) - professionRank(b))
-    .map((p) => [p, shown.filter((x) => x.profession === p)] as const);
+  // Professions with something left to make are listed; finished ones go in a folded Completed section at the bottom.
+  const groups = [...new Set(shown.map((p) => p.profession))].sort((a, b) => professionRank(a) - professionRank(b)).map((p) => [p, shown.filter((x) => x.profession === p)] as const);
+  const working = groups.filter(([, list]) => list.some((p) => p.open));
+  const completed = groups.filter(([, list]) => !list.some((p) => p.open));
 
   // With filters on, groups start open so the matching steps are in view; otherwise they start folded.
   const isOpen = (id: Ref) => flipped.has(id) !== picky;
@@ -132,7 +131,7 @@ export function MakeTab({ scope }: { scope: PushScope }) {
         </div>
       ) : (
         <div className="mt-4 space-y-7">
-          {groups.map(([profession, list]) => (
+          {working.map(([profession, list]) => (
             <FoldGroup key={profession} scope={scope} view="make" id={profession} title={profession} extra={<span className="num text-xs text-muted">{list.filter((p) => p.open).length} to make</span>}>
               <div className="space-y-2">
                 {list
@@ -158,6 +157,28 @@ export function MakeTab({ scope }: { scope: PushScope }) {
               )}
             </FoldGroup>
           ))}
+
+          {completed.length > 0 && (
+            <details className="group">
+              <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+                <span className="text-[15px] font-semibold text-ink">Completed</span>
+                <span className="num rounded bg-surface-3 px-1.5 text-[11px] text-ink-2">{completed.reduce((n, [, list]) => n + list.length, 0)}</span>
+                <ChevronDown size={15} className="-rotate-90 text-muted transition-transform group-open:rotate-0" />
+              </summary>
+              <div className="mt-2.5 space-y-5">
+                {completed.map(([profession, list]) => (
+                  <div key={profession}>
+                    <h3 className="mb-2 text-[13px] font-semibold text-ink-2">{profession}</h3>
+                    <div className="space-y-2">
+                      {list.map((product) => (
+                        <ProductCard key={product.id} scope={scope} product={product} open={flipped.has(product.id)} onToggle={() => toggle(product.id)} onOpen={openItem} />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
     </div>
