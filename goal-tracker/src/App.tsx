@@ -104,7 +104,7 @@ function Sidebar({ route, onNavigate }: { route: Route; onNavigate: () => void }
         </a>
         <SectionLabel className="px-5 pb-2 pt-4">Claim</SectionLabel>
         <NavItem to={HOME} active={route.page === 'about'} icon={<House size={15} />} onNavigate={onNavigate}>
-          About {CLAIM.name}
+          General
         </NavItem>
         <NavItem to={RESOURCES} active={route.page === 'resources'} icon={<Boxes size={15} />} onNavigate={onNavigate}>
           Resources
@@ -147,7 +147,7 @@ function Shell({ route, children }: { route: Route; children: ReactNode }) {
   }, [open]);
 
   const title =
-    route.page === 'travelers' ? 'Traveler restock' : route.page === 'about' ? `About ${CLAIM.name}` : route.page === 'resources' ? 'Claim resources' : 'Pushes';
+    route.page === 'travelers' ? 'Traveler restock' : route.page === 'about' ? 'General' : route.page === 'resources' ? 'Claim resources' : 'Pushes';
   useEffect(() => {
     document.title = [push?.name ?? title, CLAIM.name, APP_NAME].join(' · ');
   }, [title, push?.name]);

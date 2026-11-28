@@ -158,7 +158,7 @@ function Hero({ claim }: { claim: ClaimDetail | null }) {
         <img src={LOGO} alt="" aria-hidden="true" width={56} height={56} className="mb-3 h-14 w-14 rounded-full md:hidden" />
         <h1 className="text-[38px] font-semibold leading-tight sm:text-[50px]">{CLAIM.name}</h1>
         <p className="mt-3 text-[15px] leading-relaxed text-ink-2 sm:text-base md:max-w-[calc(100%-13rem)]">
-          A small, active crew building a claim together. Free food and tool upgrades are always around, so you can just play.
+          A small, active community building a claim together. Free food and tool upgrades are always around, so you can just play.
         </p>
         <div className="mt-6 flex flex-wrap gap-2.5">
           <a
@@ -326,7 +326,7 @@ const titleFont = 'font-display font-semibold text-ink';
 
 /** Short "if this is you" stories: everyone's playstyle has a place. */
 const PLAYSTYLES: { who: string; story: string }[] = [
-  { who: 'Love gathering?', story: "Head out and gather to your heart's content. We've got alts at base processing full-time, so drop off your haul and get back out there." },
+  { who: 'Love gathering?', story: "Head out and gather to your heart's content. We've got alts at base processing full-time, so drop off your haul, open craft, and get back out there." },
   { who: 'Rather stay home?', story: "If you'd rather hang at base and craft, most community crafts are open. Jump in on whatever's going." },
   { who: 'Chasing a goal?', story: "Let the group know. If you're pushing for something specific, like tiering up a specific profession, people are usually happy to help." },
 ];
@@ -340,7 +340,7 @@ const OVERVIEW: { icon: ReactNode; title: string; body: string; jump?: SectionId
       </>
     ),
     title: 'Free food and basic tool upgrades',
-    body: 'Take what you need from the food chest, no restocking required, and upgrade your own tools from the chest of upgrade materials at base whenever you need to. As with all shared claim resources, just be respectful and mindful.',
+    body: 'Take whatever you need from the food chest and upgrade your tools with materials from the tools chest as you level up your professions. No obligation to restock materials, but as with all shared claim resources, please be respectful.',
     jump: 'food',
   },
   {
@@ -352,7 +352,7 @@ const OVERVIEW: { icon: ReactNode; title: string; body: string; jump?: SectionId
   {
     icon: <Factory size={18} />,
     title: 'Optimized passive stations',
-    body: "Long term, we're building as many passive stations as we can, laid out to make the most of personal cache range, so processing a lot of one resource is as efficient as possible. Tool rollers were especially kept in mind.",
+    body: "Long term, we're building out as many passive stations as we can, laid out to maximize the personal cache and deployables range. This allows passive craft processing to be as efficient as possible.",
     jump: 'layout',
   },
 ];
@@ -495,9 +495,8 @@ function Roadmap({ pushes, members, ctx, stock, loading }: { pushes: Push[]; mem
     <Section id="roadmap">
       <SectionHead id="roadmap" eyebrow="Roadmap" title="What we're working on">
         <p>
-          Claim goals, tool pushes and shared claim resources all live on this site, so you can always see what's available and exactly what you'd be
-          chipping in for. Want to help with a claim push? Just drop the materials in the Dropbox. No pressure to contribute, as contributions outside of tool pushes are not
-          tracked.
+          Claim goals, tool pushes, and shared claim resources all live on this site, so you can always see what resources are available and how they are being used.
+          There is no requirement to contribute, and contributions outside of tool pushes are not tracked.
         </p>
       </SectionHead>
 
@@ -651,7 +650,7 @@ function FreeFood({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnap
   return (
     <Section id="food">
       <SectionHead id="food" eyebrow="Food" title="Food chest">
-        <p>Everything in the {FREE_FOOD_CHESTS.join(' and ')} chest is free for claim members. No need to restock it, just remember it's shared. Here's what's in there right now.</p>
+        <p>Everything in the {FREE_FOOD_CHESTS.join(' and ')} chest is free for claim members. No need to restock what you take, but just be mindful that it's shared. Here's what's in there right now.</p>
       </SectionHead>
 
       <Card className="mt-5 overflow-hidden">
@@ -779,8 +778,8 @@ function ToolPushes() {
           extra={<Pill tone="info">Mythic pushes unlock at tier {GROUP.mythicTier}</Pill>}
         >
           <p>
-            For anyone who wants to min-max, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. They're completely optional, and they're the only place
-            we track who put in what, so everyone gets a fair cut. Wins and losses get shared.
+            For those who enjoy tool rolling, we periodically host tool pushes for Epic, Legendary, and Mythic tools. They're completely optional, and contributions are tracked
+            to ensure all returns (or losses) are shared proportionately.
           </p>
         </SectionHead>
         <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -812,8 +811,8 @@ function ToolPushes() {
 
       <div>
         <SubHead title="Why percentage-based contributions?">
-          We could just pay you market price for your materials. But in EA2, the tools we rolled (Mythic, Legendary and Epic) were usually worth more than the raw materials that
-          went in, so a percentage lets everyone in on that. It also keeps pushes feeling like a group effort.
+          We could just pay you market price for your materials. But in EA2, the tools we rolled were usually worth more than the raw materials that went in. By following a
+          percentage-based contribution system, everyone has the potential to profit off positive rolls.
         </SubHead>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
           <Compare title="Market value contributions" tag="Not how we do it" chosen={false} points={MARKET_VALUE} />
@@ -899,8 +898,8 @@ function ClaimLayout({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockS
     <Section id="layout">
       <SectionHead id="layout" eyebrow="Claim layout" title="Passive stations">
         <p>
-          Long term, we want to build as many passive stations as we can, in a layout that makes the most of personal cache range. That way, anyone processing a lot of one
-          resource can do it as efficiently as possible. We especially kept tool rollers in mind when planning it.
+          Long term, we're building out as many passive stations as we can, laid out to maximize the personal cache and deployables range. This allows passive craft
+          processing to be as efficient as possible.
         </p>
       </SectionHead>
 
