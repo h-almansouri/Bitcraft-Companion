@@ -746,13 +746,13 @@ const STEPS: { title: string; body: string }[] = [
 
 type Point = [kind: 'pro' | 'con' | 'neutral', text: string];
 const MARKET_VALUE: Point[] = [
-  ['neutral', 'You get exactly what your materials were worth'],
+  ['neutral', 'You get exactly what your materials were worth. Outcomes are equivalent to selling your contributions for gold and purchasing the tool on the market'],
   ['pro', "You never come out behind, so bad rolls can't hurt you"],
   ['con', 'Lucky rolls go to the claim, not you'],
 ];
 const PERCENTAGE: Point[] = [
-  ['neutral', 'You get a percentage of everything rolled'],
-  ['pro', 'A lucky push pays off for everyone who chipped in'],
+  ['neutral', 'You get a percentage of everything rolled as gold or tools'],
+  ['pro', 'Ability to obtain epic, legendary, and mythic tools without going to the market'],
   ['con', 'An unlucky push is shared too, so you can get back less'],
 ];
 
