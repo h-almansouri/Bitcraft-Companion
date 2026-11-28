@@ -2,10 +2,10 @@ import { useState, type ReactNode } from 'react';
 import { ArrowRight, Check, ChevronRight, CornerDownRight, ExternalLink, MapPin } from 'lucide-react';
 import { yieldOf } from '../../engine/book.ts';
 import type { Recipe, Ref } from '../../engine/types.ts';
-import { flowOf, pickRoute, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
+import { flowOf, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
 import { costText, tradesFor } from '../../lib/price.ts';
-import { Button, Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
+import { Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { AssignControl, BranchList, SplitBar, branchText, jobState, stationOf } from './parts.tsx';
 
@@ -63,12 +63,11 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'go
   );
 }
 
-function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="mt-7">
       <div className="mb-2.5 flex items-center gap-2">
         <h3 className="flex-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">{title}</h3>
-        {aside}
       </div>
       {children}
     </section>
@@ -89,7 +88,6 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
     if (same) same.qty += l.qty;
     else loaded.push({ ...l });
   }
-  const [choosing, setChoosing] = useState(false);
 
   return (
     <div>
@@ -112,8 +110,8 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
           {branches.some((b) => !b.final) && (
             <details className="group mt-2">
               <summary className="cursor-pointer list-none text-[13px] text-accent-ink hover:underline [&::-webkit-details-marker]:hidden">
-                <span className="group-open:hidden">Follow it all the way to the finished goods</span>
-                <span className="hidden group-open:inline">Hide the full chain</span>
+                <span className="group-open:hidden">Resource usage details</span>
+                <span className="hidden group-open:inline">Hide resource usage details</span>
               </summary>
               <Card className="mt-2 px-4 py-3">
                 <Chain view={view} id={id} depth={0} seen={new Set([id])} onOpen={openItem} />
@@ -123,22 +121,12 @@ function Detail({ scope, row }: { scope: PushScope; row: Row }) {
         </Section>
       )}
 
-      <Section
-        title="How to get it"
-        aside={
-          !view.onOrder.has(id) &&
-          node.alternatives.length + ctx.router.gatherSources(id).length > 0 && (
-            <button type="button" className="text-[13px] text-accent-ink hover:underline" onClick={() => setChoosing(!choosing)}>
-              {choosing ? 'Done' : 'Change route'}
-            </button>
-          )
-        }
-      >
-        {choosing ? <RouteChooser scope={scope} row={row} onDone={() => setChoosing(false)} /> : <HowTo scope={scope} row={row} />}
-        {id in push.routes && !choosing && <p className="mt-2 text-xs text-muted">This push uses a hand-picked route for this.</p>}
+      <Section title="How to get it">
+        <HowTo scope={scope} row={row} />
+        {id in push.routes && <p className="mt-2 text-xs text-muted">This push uses a hand-picked route for this.</p>}
       </Section>
 
-      <Section title="Where it is">
+      <Section title="Storage location">
         {holdings.length === 0 && jobs.length === 0 ? (
           <p className="text-sm text-ink-2">None in the storage this push counts.</p>
         ) : (
@@ -314,10 +302,7 @@ function HowTo({ scope, row }: { scope: PushScope; row: Row }) {
             </>
           ) : sources.length ? (
             <>
-              <div className="text-sm font-medium">
-                Gather it{gatherLeft > 0 && <span className="font-normal text-ink-2"> · {num(gatherLeft)} still to bring in</span>}
-              </div>
-              <p className="mt-0.5 text-xs text-muted">Open a source to see what it takes and where it grows.</p>
+              <div className="text-sm font-medium">{gatherLeft > 0 ? `${num(gatherLeft)} left to gather` : 'All gathered'}</div>
               <SourceList scope={scope} sources={sources} id={id} />
             </>
           ) : (
@@ -347,76 +332,6 @@ function PriceGrid({ scope, id, needed, toGo }: { scope: PushScope; id: Ref; nee
           <div className={cx('num text-[13px] font-semibold', i === 2 && 'text-warn')}>{value}</div>
         </div>
       ))}
-    </div>
-  );
-}
-
-/** Lets the claim pick a different recipe for one thing in this push. */
-function RouteChooser({ scope, row, onDone }: { scope: PushScope; row: Row; onDone: () => void }) {
-  const { ctx, push, save } = scope;
-  const { id } = row;
-  const current = id in push.routes ? push.routes[id] : undefined;
-  const fallback = ctx.router.choose(id);
-  const [busy, setBusy] = useState(false);
-
-  const pick = async (value: string | null | undefined) => {
-    setBusy(true);
-    const routes = pickRoute(ctx, push.routes, id, value);
-    try {
-      await save({ routes });
-      onDone();
-    } catch {
-      /* the page shows the error */
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const option = (key: string, selected: boolean, title: ReactNode, sub: ReactNode, onPick: () => void) => (
-    <button
-      key={key}
-      type="button"
-      disabled={busy}
-      onClick={onPick}
-      className={cx('flex w-full items-start gap-3 rounded-lg border px-3.5 py-2.5 text-left text-sm transition-colors', selected ? 'border-accent bg-accent-soft' : 'border-line bg-surface hover:bg-surface-2')}
-    >
-      <span className={cx('mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2', selected ? 'border-accent bg-accent' : 'border-line')} />
-      <span className="min-w-0">
-        <span className="block font-medium">{title}</span>
-        <span className="block text-[13px] text-ink-2">{sub}</span>
-      </span>
-    </button>
-  );
-
-  return (
-    <div className="space-y-2">
-      {row.node.alternatives.map((r) =>
-        option(
-          r.id,
-          current === r.id || (current === undefined && fallback?.id === r.id),
-          <>
-            {r.inputs.map((i) => `${num(i.qty)} ${ctx.book.name(i.id)}`).join(' + ')}
-            {fallback?.id === r.id && <span className="ml-2 text-xs font-normal text-muted">default</span>}
-          </>,
-          `gives ${Number.isInteger(yieldOf(r, id)) ? num(yieldOf(r, id)) : yieldOf(r, id).toFixed(2)}${r.station ? ` · ${r.station}` : ''}`,
-          () => pick(fallback?.id === r.id ? undefined : r.id),
-        ),
-      )}
-      {option(
-        'raw',
-        current === null || (current === undefined && !fallback),
-        <>
-          Don't craft it
-          {!fallback && <span className="ml-2 text-xs font-normal text-muted">default</span>}
-        </>,
-        'List it as something to gather, buy or trade for',
-        () => pick(fallback ? null : undefined),
-      )}
-      <div className="flex justify-end pt-1">
-        <Button variant="ghost" size="sm" onClick={onDone}>
-          Cancel
-        </Button>
-      </div>
     </div>
   );
 }
