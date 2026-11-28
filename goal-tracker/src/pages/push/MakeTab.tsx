@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Flag, Hourglass, PartyPopper, ShoppingBag } from 'lucide-react';
 import { BOUGHT, buildProducts, nextStep, professionRank, rawMaterials, type MakeStep, type Product, type RawMaterial, type StepState } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
+import { costText, eachText, goldFor, tradesFor } from '../../lib/price.ts';
 import type { Ref } from '../../engine/types.ts';
 import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
@@ -58,6 +59,8 @@ export function MakeTab({ scope }: { scope: PushScope }) {
   const listed = buys.filter((r) => !picky || wantedBy.has(r.step.id) || fits(r.step));
   const toBuy = listed.filter((r) => r.step.toGo > 0);
   const bought = listed.filter((r) => r.step.toGo <= 0);
+  // Gold still to spend at the travelers, for everything left to buy.
+  const gold = toBuy.reduce((sum, r) => sum + (ctx.game.price[r.step.id] ? goldFor(ctx.game.price[r.step.id], r.step.toGo) : 0), 0);
   const groups = [...new Set(shown.map((p) => p.profession))].sort((a, b) => professionRank(a) - professionRank(b)).map((p) => [p, shown.filter((x) => x.profession === p)] as const);
 
   // With filters on, groups start open so the matching steps are in view; otherwise they start folded.
@@ -86,7 +89,9 @@ export function MakeTab({ scope }: { scope: PushScope }) {
           <div className="mb-2.5 flex items-center gap-2">
             <ShoppingBag size={15} className="text-accent-ink" />
             <h2 className="text-[15px] font-semibold">Buy</h2>
-            <span className="num text-xs text-muted">{toBuy.length} to buy</span>
+            <span className="num text-xs text-muted">
+              {toBuy.length} to buy{gold > 0 && ` · ${num(gold)} gold`}
+            </span>
           </div>
           {toBuy.length > 0 && (
             <Card className="divide-y divide-line">
@@ -158,7 +163,12 @@ function BuyRow({ scope, raw }: { scope: PushScope; raw: RawMaterial }) {
   const { ctx, view, openItem } = scope;
   const { step, ends } = raw;
   const left = step.toGo;
-  const seller = view.onOrder.has(step.id) ? 'On a claim buy order' : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}`;
+  const price = ctx.game.price[step.id];
+  const nameOf = (id: Ref) => ctx.book.thing(id)?.name ?? id;
+  const tag = price ? eachText(price, nameOf) : '';
+  const seller = view.onOrder.has(step.id)
+    ? `On a claim buy order${price ? ` · ${ctx.game.sold[step.id]} charges ${tag}` : ''}`
+    : `Sold by ${ctx.game.sold[step.id] ?? 'a traveler'}${price ? ` for ${tag}` : ''}`;
   const spot = (view.stock.where.get(step.id) ?? [])[0];
   // What it is for: the things it goes straight into, and the chains it is a part of.
   const uses = [...new Map(ends.flatMap(({ product }) => (product.id === step.id ? product.for.filter((e) => e.id).map((e) => [e.id!, e.name] as const) : [[product.id, product.name] as const]))).entries()];
@@ -189,7 +199,10 @@ function BuyRow({ scope, raw }: { scope: PushScope; raw: RawMaterial }) {
       </div>
       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
         {left > 0 ? (
-          <span className="inline-flex h-6 shrink-0 items-center rounded bg-warn-soft px-2 text-[11px] font-semibold text-warn">Buy {num(left)}</span>
+          <span className="num inline-flex h-6 shrink-0 items-center rounded bg-warn-soft px-2 text-[11px] font-semibold text-warn">
+            Buy {num(left)}
+            {price && ` · ${costText(price, tradesFor(price, left), nameOf)}`}
+          </span>
         ) : (
           <span className="inline-flex h-6 shrink-0 items-center gap-1 px-2 text-[11px] font-semibold text-good">
             <Check size={12} /> Bought

@@ -171,16 +171,27 @@ export async function build({ offline = false } = {}) {
         .sort((a, b) => a.min - b.min || a.id - b.id),
     }));
 
-  // What travelers sell, so "can't be crafted" things can say where to buy them.
+  // What travelers sell, so "can't be crafted" things can say where to buy them,
+  // and what one trade costs: [how many it hands over, what it takes]. Item 1 is Hex Coins.
   const sold = {};
+  const price = {};
+  const priceLevel = {};
   for (const order of tradeOrders) {
     // The trade table names two travelers by their job rather than their name.
     const alias = { Tamer: 'Alesi', Slayer: 'Ramparte', Twins: 'The Twins' };
     const npc = npcs.find((n) => n.npc_type === order.traveler)?.name ?? (typeof order.traveler === 'string' ? (alias[order.traveler] ?? order.traveler) : undefined);
+    const cost = (order.required_items ?? []).map((s) => [ref(s), s.quantity]);
+    note(cost);
+    // When the same traveler has several trades for one thing, keep the one anyone can make (the lowest skill level asked).
+    const level = Math.max(0, ...(order.level_requirements ?? []).map((l) => l.level));
     for (const s of order.offer_items ?? []) {
       const id = ref(s);
       if (npc && !sold[id]) sold[id] = npc;
       used.add(id);
+      if (npc && sold[id] === npc && cost.length && !(priceLevel[id] <= level)) {
+        price[id] = [s.quantity, cost];
+        priceLevel[id] = level;
+      }
     }
   }
 
@@ -219,6 +230,7 @@ export async function build({ offline = false } = {}) {
     recipes,
     gather,
     sold,
+    price,
     travelers,
     townships,
   };

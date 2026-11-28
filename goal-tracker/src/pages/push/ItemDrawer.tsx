@@ -4,6 +4,7 @@ import { yieldOf } from '../../engine/book.ts';
 import type { Recipe, Ref } from '../../engine/types.ts';
 import { flowOf, pickRoute, type Loaded, type PushView, type Row } from '../../lib/derive.ts';
 import { num, plural } from '../../lib/format.ts';
+import { costText, tradesFor } from '../../lib/price.ts';
 import { navigate } from '../../lib/router.tsx';
 import { Button, Card, Drawer, Notice, Pill, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
@@ -314,11 +315,15 @@ function HowTo({ scope, row }: { scope: PushScope; row: Row }) {
                 On a claim buy order{gatherLeft > 0 && <span className="font-normal text-ink-2"> · {num(gatherLeft)} to buy</span>}
               </div>
               <p className="mt-1 text-xs text-ink-2">The claim is paying for this, so nobody is asked to gather or craft it, or anything that only went into making it. Take “Claim Buy Order” off under “Who's on it” to plan it the normal way again.</p>
+              {ctx.game.price[id] && <PriceGrid scope={scope} id={id} needed={node.needed} toGo={gatherLeft} />}
             </>
           ) : row.profession === 'Trade' ? (
-            <p className="text-sm">
-              Buy from <span className="font-medium">{ctx.game.sold[id]}</span>. It can't be crafted.
-            </p>
+            <>
+              <p className="text-sm">
+                Buy from <span className="font-medium">{ctx.game.sold[id]}</span>. It can't be crafted.
+              </p>
+              {ctx.game.price[id] && <PriceGrid scope={scope} id={id} needed={node.needed} toGo={node.toGo} />}
+            </>
           ) : sources.length ? (
             <>
               <div className="text-sm font-medium">
@@ -332,6 +337,28 @@ function HowTo({ scope, row }: { scope: PushScope; row: Row }) {
           )}
         </Card>
       )}
+    </div>
+  );
+}
+
+/** What the traveler charges: for one, for everything the push needs, and for what is still to buy. */
+function PriceGrid({ scope, id, needed, toGo }: { scope: PushScope; id: Ref; needed: number; toGo: number }) {
+  const { ctx } = scope;
+  const price = ctx.game.price[id];
+  const nameOf = (ref: Ref) => ctx.book.thing(ref)?.name ?? ref;
+  const cells: [string, string][] = [
+    [price.per === 1 ? 'Each' : `Per ${num(price.per)}`, costText(price, 1, nameOf)],
+    [`All ${num(needed)}`, costText(price, tradesFor(price, needed), nameOf)],
+  ];
+  if (toGo > 0) cells.push([`The ${num(toGo)} to buy`, costText(price, tradesFor(price, toGo), nameOf)]);
+  return (
+    <div className="mt-3 grid grid-cols-3 gap-2">
+      {cells.map(([label, value], i) => (
+        <div key={label} className="rounded-md bg-surface-2 px-2.5 py-2">
+          <div className="text-[11px] text-muted">{label}</div>
+          <div className={cx('num text-[13px] font-semibold', i === 2 && 'text-warn')}>{value}</div>
+        </div>
+      ))}
     </div>
   );
 }

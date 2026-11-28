@@ -13,8 +13,18 @@ export interface RawGameData {
   gather: RawGather[];
   /** ref -> traveler who sells it */
   sold: Record<Ref, string>;
+  /** ref -> what one trade with that traveler costs: [how many it hands over, what it takes]. Older files have none. */
+  price?: Record<Ref, [number, [Ref, number][]]>;
   travelers: Traveler[];
   townships: Township[];
+}
+
+/** What one trade with a traveler costs. */
+export interface TradePrice {
+  /** How many of the thing one trade hands over. */
+  per: number;
+  /** What the trade takes, usually only Hex Coins (i.1). */
+  cost: Stack[];
 }
 
 interface RawRecipe {
@@ -76,6 +86,7 @@ export interface Game extends GameData {
   skills: Record<string, string>;
   stations: Record<string, string>;
   sold: Record<Ref, string>;
+  price: Record<Ref, TradePrice>;
   travelers: Traveler[];
   townships: Township[];
   /** Station type id for building things, used to find "a T5 loom" style matches. */
@@ -150,6 +161,7 @@ export function inflate(raw: RawGameData): Game {
     skills: raw.skills,
     stations: raw.stations,
     sold: raw.sold,
+    price: Object.fromEntries(Object.entries(raw.price ?? {}).map(([id, [per, cost]]) => [id, { per, cost: stacks(cost) }])),
     travelers: raw.travelers,
     townships: raw.townships,
     stationType,
