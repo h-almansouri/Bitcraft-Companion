@@ -1,6 +1,6 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { isAlt, withAlts } from '../../lib/claim.ts';
-import { ArrowRight, Hammer, Hand, Hourglass, UserPlus } from 'lucide-react';
+import { ArrowRight, ChevronDown, Hammer, Hand, Hourglass, UserPlus } from 'lucide-react';
 import { flowOf, type FlowBranch, type PushView, type Row } from '../../lib/derive.ts';
 import { num } from '../../lib/format.ts';
 import type { Ref } from '../../engine/types.ts';
@@ -11,6 +11,79 @@ import type { PushScope } from '../PushPage.tsx';
 /** Colours for "turns into something else" branches; plain use gets the neutral one. */
 const BRANCH_COLORS = ['var(--accent)', 'var(--branch-1)', 'var(--branch-2)', 'var(--branch-3)', 'var(--branch-4)', 'var(--branch-5)'];
 const AS_IS_COLOR = 'var(--muted)';
+
+/** Which groups are folded shut on one view of one push, remembered in this browser. */
+const foldKey = (scope: PushScope, view: string) => `qm.fold.${scope.push.slug}.${view}`;
+function readFolds(key: string): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+/** How long a group takes to slide shut or open, matching the sidebar. */
+const FOLD_MS = 300;
+
+/**
+ * A group heading (a profession, or Buy) with its cards under it. Clicking the heading slides
+ * the cards shut, or open again, the way the sidebar groups fold. Each push remembers its own
+ * folds per view, so coming back finds it as it was left.
+ */
+export function FoldGroup({ scope, view, id, title, icon, extra, children }: { scope: PushScope; view: string; id: string; title: string; icon?: ReactNode; extra?: ReactNode; children: ReactNode }) {
+  const key = foldKey(scope, view);
+  const [shut, setShut] = useState(() => readFolds(key).includes(id));
+  // Open cards may hold a "Who's on it" menu that hangs below the group, so the body only
+  // clips while it is sliding or shut.
+  const [moving, setMoving] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const toggle = () => {
+    const next = !shut;
+    setShut(next);
+    setMoving(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setMoving(false), FOLD_MS + 30);
+    // Read again before writing, so folds made in other groups since this one opened are kept.
+    const others = readFolds(key).filter((g) => g !== id);
+    try {
+      localStorage.setItem(key, JSON.stringify(next ? [...others, id] : others));
+    } catch {
+      // Private browsing can refuse storage. The fold still works for this visit.
+    }
+  };
+  return (
+    <section>
+      <h2 className={cx('flex items-center gap-2 transition-[margin] duration-300', shut ? 'mb-0' : 'mb-2.5')}>
+        <button
+          type="button"
+          aria-expanded={!shut}
+          onClick={toggle}
+          className="group flex min-w-0 cursor-pointer items-baseline gap-2 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          {icon && <span className="self-center">{icon}</span>}
+          <span className="text-[15px] font-semibold text-ink transition-colors group-hover:text-accent-ink">{title}</span>
+          {extra}
+          <ChevronDown
+            size={14}
+            aria-hidden="true"
+            className={cx('shrink-0 self-center text-muted transition-transform duration-300 ease-out group-hover:text-accent-ink', shut && '-rotate-90')}
+          />
+        </button>
+      </h2>
+      <div
+        inert={shut}
+        className={cx(
+          'grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+          shut ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
+        )}
+      >
+        <div className={cx('min-h-0', (shut || moving) && 'overflow-hidden')}>{children}</div>
+      </div>
+    </section>
+  );
+}
 
 export function colorsFor(branches: FlowBranch[]): string[] {
   let next = 0;

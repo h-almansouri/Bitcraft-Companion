@@ -7,7 +7,7 @@ import type { Ref } from '../../engine/types.ts';
 import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { STAGES, UNASSIGNED, matchPeople, matchRole, matchText, matchTier, takenBy, useFilterBar, type StageId } from './filters.tsx';
-import { AssignControl, StationLines, stationOf } from './parts.tsx';
+import { AssignControl, FoldGroup, StationLines, stationOf } from './parts.tsx';
 
 /** Shares are worked out through recipe ratios, so they are rounded up to whole things for showing. */
 export const whole = (n: number) => Math.ceil(n - 1e-6);
@@ -85,14 +85,19 @@ export function MakeTab({ scope }: { scope: PushScope }) {
       {bar(shown.length, products.length, 'things to make')}
 
       {listed.length > 0 && (
-        <section className="mt-4">
-          <div className="mb-2.5 flex items-center gap-2">
-            <ShoppingBag size={15} className="text-accent-ink" />
-            <h2 className="text-[15px] font-semibold">Buy</h2>
-            <span className="num text-xs text-muted">
-              {toBuy.length} to buy{gold > 0 && ` · ${num(gold)} gold`}
-            </span>
-          </div>
+        <div className="mt-4">
+          <FoldGroup
+            scope={scope}
+            view="make"
+            id={BOUGHT}
+            title="Buy"
+            icon={<ShoppingBag size={15} className="text-accent-ink" />}
+            extra={
+              <span className="num text-xs text-muted">
+                {toBuy.length} to buy{gold > 0 && ` · ${num(gold)} gold`}
+              </span>
+            }
+          >
           {toBuy.length > 0 && (
             <Card className="divide-y divide-line">
               {toBuy.map((raw) => (
@@ -113,7 +118,8 @@ export function MakeTab({ scope }: { scope: PushScope }) {
               </Card>
             </details>
           )}
-        </section>
+          </FoldGroup>
+        </div>
       )}
 
       {groups.length === 0 ? (
@@ -123,11 +129,7 @@ export function MakeTab({ scope }: { scope: PushScope }) {
       ) : (
         <div className="mt-4 space-y-7">
           {groups.map(([profession, list]) => (
-            <section key={profession}>
-              <div className="mb-2.5 flex items-baseline gap-2">
-                <h2 className="text-[15px] font-semibold">{profession}</h2>
-                <span className="num text-xs text-muted">{list.filter((p) => p.open).length} to make</span>
-              </div>
+            <FoldGroup key={profession} scope={scope} view="make" id={profession} title={profession} extra={<span className="num text-xs text-muted">{list.filter((p) => p.open).length} to make</span>}>
               <div className="space-y-2">
                 {list
                   .filter((p) => p.open)
@@ -150,7 +152,7 @@ export function MakeTab({ scope }: { scope: PushScope }) {
                   </div>
                 </details>
               )}
-            </section>
+            </FoldGroup>
           ))}
         </div>
       )}
@@ -345,9 +347,10 @@ function StatePill({ step, scope }: { step: MakeStep; scope: PushScope }) {
   } else if (step.state === 'craft') {
     const runs = todo?.step?.runs ?? 0;
     const partial = todo && (todo.doable ?? 0) < runs;
-    label = partial ? `Craft now · ${num(todo.doable ?? 0)} of ${num(runs)}` : 'Craft now';
-    look = 'bg-accent-soft text-accent-ink';
-    title = partial ? 'Storage has enough for some of these crafts now.' : 'Everything it takes is in storage.';
+    // Green when every craft can be done now; yellow when storage only covers some of them.
+    label = partial ? `Craft ${num(todo.doable ?? 0)} of ${num(runs)} now` : 'Craft all now';
+    look = partial ? 'bg-warn-soft text-warn' : 'bg-good-soft text-good';
+    title = partial ? 'Storage has enough for some of these crafts now. The rest wait on earlier steps.' : 'Everything it takes is in storage.';
   } else if (step.state === 'gather' || step.state === 'buy') {
     const left = todo?.qty ?? step.toGo;
     label = step.state === 'buy' ? (view.onOrder.has(step.id) ? 'Claim buy order' : `Buy ${num(left)}`) : `Gather ${num(left)}`;

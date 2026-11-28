@@ -6,7 +6,7 @@ import { Bar, Card, Empty, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { UNASSIGNED, matchPeople, matchRole, matchText, matchTier, takenBy, useFilterBar } from './filters.tsx';
 import { whole } from './MakeTab.tsx';
-import { AssignControl } from './parts.tsx';
+import { AssignControl, FoldGroup } from './parts.tsx';
 
 type Raw = RawMaterial;
 
@@ -60,17 +60,13 @@ export function GatherTab({ scope }: { scope: PushScope }) {
 
       <div className="mt-4 space-y-7">
         {groups.map(([profession, list]) => (
-          <section key={profession}>
-            <div className="mb-2.5 flex items-baseline gap-2">
-              <h2 className="text-[15px] font-semibold">{profession}</h2>
-              <span className="num text-xs text-muted">{list.length} to gather</span>
-            </div>
+          <FoldGroup key={profession} scope={scope} view="gather" id={profession} title={profession} extra={<span className="num text-xs text-muted">{list.length} to gather</span>}>
             <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
               {list.map((raw) => (
                 <RawCard key={raw.step.id} scope={scope} raw={raw} />
               ))}
             </div>
-          </section>
+          </FoldGroup>
         ))}
 
         {inHand.length > 0 && (

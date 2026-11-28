@@ -7,7 +7,7 @@ import type { Ref } from '../../engine/types.ts';
 import { Bar, Card, Empty, SectionLabel, TierChip, cx } from '../../ui/kit.tsx';
 import type { PushScope } from '../PushPage.tsx';
 import { STAGES, UNASSIGNED, matchPeople, matchRole, matchText, matchTier, stageOf, takenBy, useFilterBar } from './filters.tsx';
-import { StationLines } from './parts.tsx';
+import { FoldGroup, StationLines } from './parts.tsx';
 
 const ratio = (n: number) => (Number.isInteger(n) ? num(n) : n.toFixed(n < 10 ? 2 : 1));
 
@@ -82,14 +82,21 @@ export function ChainsTab({ scope }: { scope: PushScope }) {
             const lines = list.filter((c) => c.stages.length > 1);
             const singles = list.filter((c) => c.stages.length === 1);
             return (
-              <section key={profession}>
-                <div className="mb-2.5 flex items-baseline gap-2">
-                  <h2 className="text-[15px] font-semibold">{profession}</h2>
-                  <SectionLabel>starts here</SectionLabel>
-                  <span className="num text-xs text-muted">
-                    {list.filter((c) => !c.open).length} of {list.length} covered
-                  </span>
-                </div>
+              <FoldGroup
+                key={profession}
+                scope={scope}
+                view="chains"
+                id={profession}
+                title={profession}
+                extra={
+                  <>
+                    <SectionLabel>starts here</SectionLabel>
+                    <span className="num text-xs text-muted">
+                      {list.filter((c) => !c.open).length} of {list.length} covered
+                    </span>
+                  </>
+                }
+              >
                 <div className="space-y-2.5">
                   {lines.map((chain) => (
                     <ChainPicture key={chain.key} chain={chain} onOpen={openItem} hit={picky ? fits : undefined} focus={focus} />
@@ -108,7 +115,7 @@ export function ChainsTab({ scope }: { scope: PushScope }) {
                     ))}
                   </div>
                 )}
-              </section>
+              </FoldGroup>
             );
           })}
         </div>
