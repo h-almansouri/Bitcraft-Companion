@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react';
-import { ArrowDown, ArrowRight, ArrowUp, Check, Gem, Hammer, MessageCircle, Minus, Sparkles, Trophy, Utensils, X } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUp, Check, Factory, Gem, Hammer, MessageCircle, Minus, Sparkles, Trophy, Utensils, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useCachedBoard } from '../lib/boards.ts';
 import { CLAIM, DISCORD_URL, FREE_FOOD_CHESTS, HOME, MARKET_REGION, playersAndAlts } from '../lib/claim.ts';
@@ -14,6 +14,7 @@ import { StorageRead, useStock } from '../ui/storage.tsx';
 import { KIND_LABEL } from './BoardPage.tsx';
 
 const PUSHES = HOME + '/pushes';
+const RESOURCES = HOME + '/resources';
 const LOGO = HOME + '/logo.png';
 
 /**
@@ -37,6 +38,7 @@ const SECTIONS = [
   { id: 'roadmap', label: 'Roadmap' },
   { id: 'food', label: 'Food' },
   { id: 'tool-pushes', label: 'Tool pushes' },
+  { id: 'layout', label: 'Claim layout' },
 ] as const;
 type SectionId = (typeof SECTIONS)[number]['id'];
 
@@ -118,6 +120,8 @@ export function AboutPage() {
         <FreeFood ctx={ctx} stock={stock} />
         <SectionBreak />
         <ToolPushes />
+        <SectionBreak />
+        <ClaimLayout ctx={ctx} stock={stock} />
         <SectionBreak />
       </div>
       <BackToTop />
@@ -328,13 +332,28 @@ const PLAYSTYLES: { who: string; story: string }[] = [
 ];
 
 const OVERVIEW: { icon: ReactNode; title: string; body: string; jump?: SectionId }[] = [
-  { icon: <Utensils size={18} />, title: 'Free food', body: 'Take what you need, no restocking required. As with all shared claim resources, just be respectful and mindful.', jump: 'food' },
-  { icon: <Hammer size={18} />, title: 'Free basic tool upgrades', body: "There's a chest of upgrade materials at base, so you can upgrade your own tools whenever you need to." },
+  {
+    icon: (
+      <>
+        <Utensils size={17} />
+        <Hammer size={17} />
+      </>
+    ),
+    title: 'Free food and basic tool upgrades',
+    body: 'Take what you need from the food chest, no restocking required, and upgrade your own tools from the chest of upgrade materials at base whenever you need to. As with all shared claim resources, just be respectful and mindful.',
+    jump: 'food',
+  },
   {
     icon: <Gem size={18} />,
     title: 'Optional tool pushes',
     body: 'For the min-maxers, we run tool pushes now and then, going for Epic, Legendary and Mythic tools. Totally optional, and the only contribution-based goal we track.',
     jump: 'tool-pushes',
+  },
+  {
+    icon: <Factory size={18} />,
+    title: 'Optimized passive stations',
+    body: "Long term, we're building as many passive stations as we can, laid out to make the most of personal cache range, so processing a lot of one resource is as efficient as possible. Tool rollers were especially kept in mind.",
+    jump: 'layout',
   },
 ];
 
@@ -356,7 +375,7 @@ function Overview() {
         {OVERVIEW.map((o) => {
           const card = (
             <Card className={cx('h-full px-5 py-4', o.jump && 'transition-colors group-hover:border-accent')}>
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">{o.icon}</span>
+              <span className="inline-flex h-9 min-w-9 items-center justify-center gap-1.5 rounded-lg bg-accent-soft px-2 text-accent-ink">{o.icon}</span>
               <h3 className={cx('mt-3 text-[17px]', titleFont)}>{o.title}</h3>
               <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{o.body}</p>
             </Card>
@@ -817,7 +836,130 @@ function ToolPushes() {
             </Card>
           ))}
         </dl>
+        <p className="mt-3 text-[13px] text-ink-2">
+          More details are in the{' '}
+          <Link to={RESOURCES} className="font-medium text-accent-ink">
+            Resources tab
+          </Link>
+          .
+        </p>
       </div>
+    </Section>
+  );
+}
+
+/** The passive stations that do the big processing runs, in the order the layout card shows them, with what each makes. */
+const PROCESSING: [station: string, makes: string][] = [
+  ['Loom', 'Cloth strips, for rope'],
+  ['Tanning Tub', 'Tanned pelts, for leather'],
+  ['Smelter', 'Molten metal, for ingots'],
+  ['Kiln', 'Bricks, charcoal and pots'],
+];
+
+type StationRow = { id: string; name: string; tier: number; count: number };
+
+/**
+ * The claim's layout plan, and the passive stations standing so far. The counts come from the
+ * buildings list in the shared storage read, so this costs no extra Bitjita calls.
+ */
+function ClaimLayout({ ctx, stock }: { ctx: GameCtx | null; stock: Loaded<StockSnapshot> & { refresh: () => void } }) {
+  const stations = useMemo(() => {
+    if (!stock.data || !ctx) return null;
+    const { game } = ctx;
+    // A passive station is any building type with at least one passive craft (looms, smelters, ovens, hutches...).
+    const passive = new Set(game.recipes.flatMap((r) => (r.passive && r.station ? [r.station] : [])));
+    const groups = new Map<string, StationRow[]>();
+    for (const loc of stock.data.locations) {
+      if (loc.id !== 'built') continue;
+      for (const [id, count] of loc.items) {
+        const type = game.stationType[id];
+        const station = type != null ? game.stations[type] : undefined;
+        if (!station || !passive.has(station)) continue;
+        const thing = game.things[id];
+        // The column already says "Looms", so a row reads "Exquisite" rather than "Exquisite Loom".
+        const name = thing?.name ?? station;
+        const short = name.endsWith(' ' + station) ? name.slice(0, -station.length - 1) : name;
+        if (!groups.has(station)) groups.set(station, []);
+        groups.get(station)!.push({ id, name: short, tier: thing?.tier ?? 0, count });
+      }
+    }
+    for (const rows of groups.values()) rows.sort((a, b) => b.tier - a.tier || b.count - a.count);
+    return groups;
+  }, [stock.data, ctx]);
+
+  const countOf = (rows: StationRow[] | undefined) => (rows ?? []).reduce((sum, r) => sum + r.count, 0);
+  const total = stations ? [...stations.values()].reduce((sum, rows) => sum + countOf(rows), 0) : 0;
+  const others = stations ? [...stations].filter(([station]) => !PROCESSING.some(([p]) => p === station)) : [];
+
+  return (
+    <Section id="layout">
+      <SectionHead id="layout" eyebrow="Claim layout" title="Passive stations">
+        <p>
+          Long term, we want to build as many passive stations as we can, in a layout that makes the most of personal cache range. That way, anyone processing a lot of one
+          resource can do it as efficiently as possible. We especially kept tool rollers in mind when planning it.
+        </p>
+      </SectionHead>
+
+      <Card className="mt-5 overflow-hidden">
+        <div className="flex items-center gap-3 border-b border-line px-5 py-3">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-soft text-accent-ink">
+            <Factory size={16} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[14px] font-semibold text-ink">Passive stations so far</p>
+            <p className="num text-xs text-ink-2">{stations ? `${num(total)} in the claim right now` : 'Counting stations…'}</p>
+          </div>
+          <StorageRead stock={stock} />
+        </div>
+
+        {stock.error && !stock.data ? (
+          <div className="p-5">
+            <Notice tone="warn">The claim's buildings can't be read right now ({stock.error}). Try again in a few minutes.</Notice>
+          </div>
+        ) : !stations ? (
+          <div className="grid grid-cols-2 gap-4 p-5 lg:grid-cols-4">
+            {PROCESSING.map(([station]) => (
+              <Skeleton key={station} className="h-24" />
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-px bg-line sm:grid-cols-2 lg:grid-cols-4">
+              {PROCESSING.map(([station, makes]) => {
+                const rows = stations.get(station) ?? [];
+                const count = countOf(rows);
+                return (
+                  <div key={station} className="bg-surface px-4 py-3.5">
+                    <div className="flex items-baseline gap-2">
+                      <h3 className={cx('text-[16px]', titleFont)}>{plural(count, station)}</h3>
+                      <span className="num ml-auto text-[20px] font-semibold text-ink">{num(count)}</span>
+                    </div>
+                    <p className="text-xs text-muted">{makes}</p>
+                    {rows.length ? (
+                      <ul className="mt-2.5 space-y-1">
+                        {rows.map((r) => (
+                          <li key={r.id} className="flex items-center gap-2 text-[13px]">
+                            {r.tier ? <TierChip tier={r.tier} /> : null}
+                            <span className="min-w-0 flex-1 truncate text-ink">{r.name}</span>
+                            <span className="num shrink-0 text-ink-2">{num(r.count)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2.5 text-[13px] text-ink-2">None yet</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {others.length > 0 && (
+              <p className="border-t border-line px-5 py-2.5 text-xs text-muted">
+                Also passive: {others.map(([station, rows]) => `${num(countOf(rows))} ${plural(countOf(rows), station)}`).join(', ')}
+              </p>
+            )}
+          </>
+        )}
+      </Card>
     </Section>
   );
 }
